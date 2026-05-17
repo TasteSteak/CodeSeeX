@@ -1,0 +1,9 @@
+{
+  "id": "list_directory",
+  "kind": "workspace",
+  "source": "built-in",
+  "icon": "LD",
+  "name": "List Directory",
+  "description": "List files and folders in a workspace directory with optional depth and filtering.",
+  "config": []
+}

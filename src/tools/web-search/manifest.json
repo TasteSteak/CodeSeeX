@@ -1,0 +1,9 @@
+{
+  "id": "web_search",
+  "kind": "search",
+  "source": "built-in",
+  "icon": "WS",
+  "name": "Web Search",
+  "description": "Collect candidate links and open selected pages through the proxy search adapter.",
+  "config": []
+}

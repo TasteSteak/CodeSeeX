@@ -1,0 +1,9 @@
+{
+  "id": "read_file_range",
+  "kind": "workspace",
+  "source": "built-in",
+  "icon": "RF",
+  "name": "Read File Range",
+  "description": "Read a limited line range from a workspace text file.",
+  "config": []
+}

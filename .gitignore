@@ -1,0 +1,14 @@
+debug/
+logs/
+proxy-state.json
+runtime.json
+proxy.env
+node_modules/
+dist/
+out/
+release/
+*.tsbuildinfo
+*.log
+codex/.generated/
+.codeseex-private/
+build/private/

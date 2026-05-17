@@ -1,0 +1,64 @@
+{
+  "name": "codeseex",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Codex-compatible DeepSeek bridge with a desktop manager.",
+  "author": "TasteSteak",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://github.com/TasteSteak/CodeSeeX",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TasteSteak/CodeSeeX.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TasteSteak/CodeSeeX/issues"
+  },
+  "main": "src/electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:manager": "node manager.js",
+    "start:proxy": "node proxy.js",
+    "check": "node --check src/electron/main.js && node --check src/manager/server.js && node --check src/manager/process-control.js && node --check src/manager/static/app.js && node --check src/shared/config.js && node --check src/proxy/server.js && node --check src/codex/model-catalog.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis portable"
+  },
+  "build": {
+    "appId": "io.github.tastesteak.codeseex",
+    "productName": "CodeSeeX",
+    "copyright": "Copyright 2026 TasteSteak and CodeSeeX contributors",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "proxy.js",
+      "manager.js",
+      "proxy.env.example",
+      "README.md",
+      "LICENSE",
+      "package.json"
+    ],
+    "win": {
+      "icon": "src/manager/static/assets/icons/app.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3",
+    "undici": "^7.25.0"
+  }
+}

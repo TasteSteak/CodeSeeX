@@ -1,0 +1,9 @@
+{
+  "id": "apply_patch",
+  "kind": "editor",
+  "source": "built-in",
+  "icon": "AP",
+  "name": "Apply Patch",
+  "description": "Default text-file editing tool for Codex-style patches, including source, docs, Markdown reports, and config updates.",
+  "config": []
+}

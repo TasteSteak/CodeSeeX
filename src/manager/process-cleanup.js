@@ -1,0 +1,225 @@
+const { execFileSync } = require("node:child_process");
+const path = require("node:path");
+
+const { readJson, writeJson } = require("../shared/json-store");
+
+function cleanupStaleProxyProcesses(options = {}) {
+  const rootDir = path.resolve(options.rootDir || process.cwd());
+  const dataDir = path.resolve(options.dataDir || rootDir);
+  const runtimeFile = options.runtimeFile || path.join(dataDir, "runtime.json");
+  const ports = normalizePorts(options.ports);
+  const includeProxy = options.includeProxy !== false;
+  const includeManager = options.includeManager === true;
+  const includeDesktop = options.includeDesktop === true;
+  const excludePids = new Set([process.pid, process.ppid].concat(options.excludePids || []).filter(Boolean).map(Number));
+  const processes = listProcesses();
+  const byPid = new Map(processes.map((item) => [Number(item.pid), item]));
+  const portOwners = listPortOwners(ports);
+  const targets = new Map();
+  const runtime = readJson(runtimeFile, null);
+
+  if (runtime && runtime.pid) {
+    addTargetIfConfirmed(targets, byPid.get(Number(runtime.pid)), {
+      rootDir,
+      includeProxy,
+      includeManager,
+      includeDesktop,
+      reason: "runtime",
+    });
+  }
+
+  for (const pid of portOwners) {
+    addTargetIfConfirmed(targets, byPid.get(Number(pid)), {
+      rootDir,
+      includeProxy,
+      includeManager,
+      includeDesktop,
+      reason: "port",
+    });
+  }
+
+  for (const proc of processes) {
+    addTargetIfConfirmed(targets, proc, {
+      rootDir,
+      includeProxy,
+      includeManager,
+      includeDesktop,
+      reason: "process",
+    });
+  }
+
+  const killed = [];
+  for (const target of Array.from(targets.values()).sort((left, right) => right.pid - left.pid)) {
+    if (!target.pid || excludePids.has(target.pid)) continue;
+    try {
+      killProcessTree(target.pid);
+      killed.push(target);
+    } catch (error) {
+      target.error = error.message || String(error);
+    }
+  }
+
+  if (killed.length > 0) markRuntimeStopped(runtimeFile, killed.map((item) => item.pid));
+  return { killed, targets: Array.from(targets.values()) };
+}
+
+function addTargetIfConfirmed(targets, proc, options) {
+  if (!proc || !proc.pid) return;
+  const type = classifyProxyProcess(proc, options.rootDir, {
+    trustedSignal: options.reason === "runtime" || options.reason === "port",
+  });
+  if (!type) return;
+  if (type === "proxy" && !options.includeProxy) return;
+  if (type === "manager" && !options.includeManager) return;
+  if (type === "desktop" && !options.includeDesktop) return;
+  if (!targets.has(proc.pid)) {
+    targets.set(proc.pid, {
+      pid: proc.pid,
+      name: proc.name || "",
+      commandLine: proc.commandLine || "",
+      type,
+      reason: options.reason,
+    });
+  }
+}
+
+function classifyProxyProcess(proc, rootDir, options = {}) {
+  const root = normalizePath(rootDir);
+  const commandLine = normalizeText(proc.commandLine || "");
+  const executablePath = normalizePath(proc.executablePath || "");
+  const name = String(proc.name || "").toLowerCase();
+  const inProject = commandLine.includes(root) || executablePath.includes(root);
+  const trustedSignal = options.trustedSignal === true;
+  if (!inProject && !trustedSignal) return null;
+
+  if (isProxyCommand(commandLine)) {
+    return "proxy";
+  }
+
+  if (isManagerCommand(commandLine)) {
+    return "manager";
+  }
+
+  if (isDesktopCommand(name, commandLine, executablePath, trustedSignal)) {
+    return "desktop";
+  }
+
+  return null;
+}
+
+function isProxyCommand(commandLine) {
+  return /(^|[\\/\s"'.])proxy\.js([\\/\s"']|$)/i.test(commandLine)
+    || commandLine.includes("--proxy-child")
+    || /src[\\/]proxy[\\/]server\.js/i.test(commandLine);
+}
+
+function isManagerCommand(commandLine) {
+  return /(^|[\\/\s"'.])manager\.js([\\/\s"']|$)/i.test(commandLine)
+    || /src[\\/]manager[\\/]server\.js/i.test(commandLine);
+}
+
+function isDesktopCommand(name, commandLine, executablePath, trustedSignal) {
+  if (name !== "electron.exe" && name !== "electron") return false;
+  if (commandLine.includes("electron") || executablePath.includes("electron")) return true;
+  return trustedSignal;
+}
+
+function listProcesses() {
+  if (process.platform === "win32") return listWindowsProcesses();
+  return [];
+}
+
+function listWindowsProcesses() {
+  const script = [
+    "$items = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine",
+    "$items | ConvertTo-Json -Compress -Depth 3",
+  ].join("; ");
+  const output = runPowerShell(script);
+  const parsed = parseJson(output, []);
+  const items = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+  return items.map((item) => ({
+    pid: Number(item.ProcessId),
+    parentPid: Number(item.ParentProcessId),
+    name: item.Name || "",
+    executablePath: item.ExecutablePath || "",
+    commandLine: item.CommandLine || "",
+  })).filter((item) => item.pid);
+}
+
+function listPortOwners(ports) {
+  if (process.platform !== "win32" || ports.length === 0) return [];
+  const portList = ports.map((port) => Number(port)).filter(Boolean).join(",");
+  if (!portList) return [];
+  const script = [
+    "$ports = @(" + portList + ")",
+    "$items = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique",
+    "@($items) | ConvertTo-Json -Compress",
+  ].join("; ");
+  const parsed = parseJson(runPowerShell(script), []);
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(Number).filter(Boolean);
+}
+
+function runPowerShell(script) {
+  try {
+    return execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return "";
+  }
+}
+
+function killProcessTree(pid) {
+  if (process.platform === "win32") {
+    execFileSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return;
+  }
+  process.kill(pid, "SIGTERM");
+}
+
+function markRuntimeStopped(runtimeFile, killedPids) {
+  const runtime = readJson(runtimeFile, null);
+  if (!runtime || !runtime.pid || !killedPids.includes(Number(runtime.pid))) return;
+  const next = Object.assign({}, runtime, {
+    status: "stopped",
+    stopped_at: new Date().toISOString(),
+    error: { message: "Stopped stale proxy process before startup.", code: "stale_proxy_stopped" },
+  });
+  try {
+    writeJson(runtimeFile, next);
+  } catch {}
+}
+
+function normalizePorts(value) {
+  if (Array.isArray(value)) return value.map(Number).filter((port) => Number.isFinite(port) && port > 0);
+  if (value === undefined || value === null || value === "") return [];
+  return String(value).split(",").map((part) => Number(part.trim())).filter((port) => Number.isFinite(port) && port > 0);
+}
+
+function normalizePath(value) {
+  return path.resolve(String(value || "")).replace(/\//g, "\\").toLowerCase();
+}
+
+function normalizeText(value) {
+  return String(value || "").replace(/\//g, "\\").toLowerCase();
+}
+
+function parseJson(value, fallback) {
+  if (!String(value || "").trim()) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+module.exports = {
+  cleanupStaleProxyProcesses,
+  classifyProxyProcess,
+};

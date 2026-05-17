@@ -1,0 +1,9 @@
+{
+  "id": "workspace_search",
+  "kind": "workspace",
+  "source": "built-in",
+  "icon": "WS",
+  "name": "Workspace Search",
+  "description": "Search local workspace text files and return compact path and line matches.",
+  "config": []
+}

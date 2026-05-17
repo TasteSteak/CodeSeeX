@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh_cn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeSeeX</title>
+  <link rel="icon" href="/assets/icons/app.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="windowbar">
+    <div class="window-controls">
+      <span></span><span></span><span></span>
+    </div>
+    <span class="window-title" data-product-name>CodeSeeX</span>
+    <div class="window-actions" aria-label="Window controls">
+      <button class="window-action window-action-minimize" type="button" data-window-action="minimize" aria-label="Minimize" title="Minimize">
+        <span aria-hidden="true"></span>
+      </button>
+      <button class="window-action window-action-maximize" type="button" data-window-action="maximize" aria-label="Maximize" title="Maximize">
+        <span aria-hidden="true"></span>
+      </button>
+      <button class="window-action window-action-close" type="button" data-window-action="close" aria-label="Close" title="Close">
+        <span aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+
+  <div class="layout-container">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon app-icon" aria-hidden="true"></div>
+        <div class="brand-text">
+          <div class="title" data-product-name>CodeSeeX</div>
+          <div class="subtitle" data-i18n="brandSubtitle">DeepSeek Bridge</div>
+        </div>
+      </div>
+
+      <div class="status-indicator" id="statusPill">
+        <span class="status-dot"></span>
+        <span class="status-text" id="running">正在连接...</span>
+      </div>
+
+      <nav class="nav-menu">
+        <a href="#" class="nav-item active" data-view="console" data-i18n="navConsole">仪表盘</a>
+        <a href="#" class="nav-item" data-view="usage" data-i18n="navUsage">用量信息</a>
+        <a href="#" class="nav-item" data-view="logs" data-i18n="navLogs">日志台</a>
+        <a href="#" class="nav-item" data-view="config" data-i18n="navConfig">系统配置</a>
+        <a href="#" class="nav-item" data-view="about" data-i18n="navAbout">关于</a>
+      </nav>
+
+      <div class="sidebar-footer" data-i18n="sidebarFooter">
+        非官方工具，仅供学习研究
+        请遵守 Codex 与 DeepSeek 相关条款
+      </div>
+    </aside>
+
+    <main class="workspace view-console" id="workspace">
+      <header class="page-header">
+        <div class="header-titles">
+          <h1 id="pageTitle">仪表盘</h1>
+          <p id="pageSubtitle">查看代理运行状态、最近一次完整对话和基础运行指标。</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-primary" id="startButton" type="button" data-i18n="start">启动</button>
+          <button class="btn btn-secondary" id="restartButton" type="button" data-i18n="restart">重启</button>
+          <button class="btn btn-danger" id="stopButton" type="button" data-i18n="stop">停止</button>
+        </div>
+      </header>
+
+      <section class="metrics-grid dashboard-metrics">
+        <div class="metric-card">
+          <span class="metric-label" id="pidLabel" data-i18n="proxyPid">代理进程 PID</span>
+          <span class="metric-value" id="pid">-</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label" data-i18n="activeRequests">活动请求</span>
+          <span class="metric-value" id="activeRequests">0</span>
+        </div>
+      </section>
+
+      <section class="panels-grid">
+        <div class="dashboard-panel dashboard-layout">
+          <div class="dashboard-left">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 data-i18n="recentTurn">最近完整对话</h2>
+              </div>
+              <div class="panel-body info-list selectable" id="lastTurnCard">
+                <div class="info-row"><span data-i18n="noTurn">暂无完整对话</span><strong>-</strong></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h2 data-i18n="runtimeStats">运行统计</h2>
+              </div>
+              <div class="panel-body info-list selectable">
+                <div class="info-row"><span data-i18n="completedTurns">已完成对话</span><strong id="completedTurns">0</strong></div>
+                <div class="info-row"><span data-i18n="failedTurns">失败请求</span><strong id="failedTurns">0</strong></div>
+                <div class="info-row"><span data-i18n="lastCompletedAt">上次完成时间</span><strong id="lastCompletedAt">-</strong></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel balance-panel dashboard-balance-panel">
+            <div class="panel-header"><h2 class="icon-heading" id="balanceTitle"><span class="heading-icon heading-icon-coin" aria-hidden="true"></span><span data-i18n="balanceTitle">余额</span></h2></div>
+            <div class="panel-body info-list selectable">
+              <div class="info-row"><span id="balanceAvailabilityLabel" data-i18n="balanceAvailability">可用状态</span><strong id="balanceAvailability">-</strong></div>
+              <div class="info-row"><span id="balanceTotalLabel" data-i18n="balanceTotal">账户余额</span><strong id="balanceTotal">-</strong></div>
+              <div class="info-row"><span id="balanceGrantedLabel" data-i18n="balanceGranted">赠金余额</span><strong id="balanceGranted">-</strong></div>
+              <div class="info-row"><span id="balanceToppedUpLabel" data-i18n="balanceToppedUp">充值余额</span><strong id="balanceToppedUp">-</strong></div>
+              <div class="form-actions">
+                <button class="btn btn-secondary" type="button" id="refreshBalanceButton" data-i18n="balanceRefresh">刷新余额</button>
+                <span class="muted" id="balanceStatus" data-i18n="balanceUnchecked">未查询</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="usage-page page-stack">
+          <section class="usage-summary-grid">
+            <div class="metric-card"><span class="metric-label" data-i18n="usageTotalTurns">包含记录数</span><span class="metric-value selectable" id="usageTotalTurns">0</span></div>
+            <div class="metric-card"><span class="metric-label" data-i18n="usageCacheHitRate">整体缓存命中率</span><span class="metric-value selectable" id="usageCacheHitRate">-</span></div>
+            <div class="metric-card"><span class="metric-label" data-i18n="averageMs">平均耗时</span><span class="metric-value selectable" id="usageAverageMs">-</span></div>
+            <div class="metric-card"><span class="metric-label" data-i18n="totalCost">累计产生费用</span><span class="metric-value selectable" id="usageTotalCost">CNY 0.0000</span></div>
+          </section>
+
+          <section class="panel usage-detail-panel">
+            <div class="panel-header">
+              <h2 data-i18n="detailRows">对话明细</h2>
+            </div>
+            <div class="panel-body usage-table-wrap">
+              <table class="usage-table selectable">
+                <thead>
+                  <tr>
+                    <th data-i18n="time">时间</th>
+                    <th data-i18n="model">模型</th>
+                    <th data-i18n="cacheHit">缓存命中</th>
+                    <th data-i18n="cacheMiss">缓存未命中</th>
+                    <th data-i18n="output">输出</th>
+                    <th data-i18n="total">总计</th>
+                    <th data-i18n="elapsed">耗时</th>
+                    <th data-i18n="cost">花费</th>
+                  </tr>
+                </thead>
+                <tbody id="usageRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <div class="log-page page-stack">
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2 data-i18n="eventTrace">事件追踪</h2>
+            </div>
+            <div class="panel-body">
+              <div class="log-list selectable" id="logStream"></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="config-page page-stack">
+          <section class="panel config-panel">
+            <div class="panel-header">
+              <div class="config-tabs segmented-control">
+                <input type="radio" name="CONFIG_TAB" id="config_tab_client" value="client" checked>
+                <label for="config_tab_client"><span class="tab-icon tab-icon-client" aria-hidden="true"></span><span data-i18n="configTabClient">客户端</span></label>
+                <input type="radio" name="CONFIG_TAB" id="config_tab_proxy" value="proxy">
+                <label for="config_tab_proxy"><span class="tab-icon tab-icon-proxy" aria-hidden="true"></span><span data-i18n="configTabProxy">代理</span></label>
+                <input type="radio" name="CONFIG_TAB" id="config_tab_tools" value="tools">
+                <label for="config_tab_tools"><span class="tab-icon tab-icon-tools" aria-hidden="true"></span><span data-i18n="configTabTools">工具</span></label>
+              </div>
+              <div class="config-status-area">
+                <span class="config-restart-text muted" id="restartRequiredBadge" hidden data-i18n="restartRequired">部分更改需要重启 CodeSeeX 后生效</span>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="config-tab-panel active" data-config-panel="client">
+                <h3 class="config-section-title" data-i18n="personalization">个性化</h3>
+                <div class="setting-item">
+                  <span data-i18n="showThinking">显示思考链</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="SHOW_THINKING">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="thinkingMode">思考模式</label>
+                  <div class="segmented-control" id="ctrl-thinking">
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_auto" value="auto" checked>
+                    <label for="tk_auto" data-i18n="thinkingAuto">自动跟随</label>
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_enabled" value="enabled">
+                    <label for="tk_enabled" data-i18n="thinkingEnabled">强制开启</label>
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_disabled" value="disabled">
+                    <label for="tk_disabled" data-i18n="thinkingDisabled">强制关闭</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="theme">主题</label>
+                  <div class="segmented-control" id="ctrl-theme">
+                    <input type="radio" name="UI_THEME" id="theme_system" value="system" checked>
+                    <label for="theme_system" data-i18n="themeSystem">跟随系统</label>
+                    <input type="radio" name="UI_THEME" id="theme_light" value="light">
+                    <label for="theme_light" data-i18n="themeLight">浅色</label>
+                    <input type="radio" name="UI_THEME" id="theme_dark" value="dark">
+                    <label for="theme_dark" data-i18n="themeDark">深色</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label for="UI_LANGUAGE" data-i18n="language">语言</label>
+                  <select id="UI_LANGUAGE" class="inline-control" style="width: 180px;"></select>
+                </div>
+
+                <h3 class="config-section-title" data-i18n="other">其它</h3>
+                <div class="setting-item">
+                  <label data-i18n="closeBehavior">关闭行为</label>
+                  <div class="segmented-control" id="ctrl-close-behavior">
+                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_exit" value="exit" checked>
+                    <label for="close_exit" data-i18n="closeBehaviorExit">退出</label>
+                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_tray" value="tray">
+                    <label for="close_tray" data-i18n="closeBehaviorTray">最小化到托盘</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="logRetention">日志保留</label>
+                  <div class="segmented-control" id="ctrl-log-retention">
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_1" value="1">
+                    <label for="log_retention_1" data-i18n="logRetention1d">1 天</label>
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_3" value="3">
+                    <label for="log_retention_3" data-i18n="logRetention3d">3 天</label>
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_7" value="7" checked>
+                    <label for="log_retention_7" data-i18n="logRetention7d">7 天</label>
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_30" value="30">
+                    <label for="log_retention_30" data-i18n="logRetention30d">30 天</label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-tab-panel" data-config-panel="proxy">
+                <h3 class="config-section-title" data-i18n="configTabProxy">代理</h3>
+                <div class="setting-item">
+                  <span>
+                    <label for="PROXY_PORT" data-i18n="proxyListenPort">CodeSeeX 监听端口</label>
+                    <small class="muted" data-i18n="proxyListenPortHint">客户端和 Codex 接入地址共用此端口；修改后需要重启 CodeSeeX。</small>
+                  </span>
+                  <input type="number" id="PROXY_PORT" class="inline-control" min="1" max="65535" step="1" style="width: 120px;">
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item setting-item-block">
+                  <span>
+                    <span data-i18n="billingMode">计费模式费率设置</span>
+                    <small class="muted" data-i18n="billingUnit">单位：CNY / 每百万 Tokens</small>
+                  </span>
+
+                  <div class="billing-row mt-12">
+                    <div class="billing-field">
+                      <span class="billing-prefix" data-i18n="billingCachedInput">输入缓存命中</span>
+                      <input type="number" id="BILLING_CACHED_INPUT_CNY" step="0.001">
+                      <span class="billing-suffix">CNY</span>
+                    </div>
+                    <div class="billing-field">
+                      <span class="billing-prefix" data-i18n="billingCacheMissInput">输入缓存未命中</span>
+                      <input type="number" id="BILLING_CACHE_MISS_INPUT_CNY" step="0.001">
+                      <span class="billing-suffix">CNY</span>
+                    </div>
+                    <div class="billing-field">
+                      <span class="billing-prefix" data-i18n="billingOutput">输出</span>
+                      <input type="number" id="BILLING_OUTPUT_CNY" step="0.001">
+                      <span class="billing-suffix">CNY</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-tab-panel" data-config-panel="tools">
+                <div class="setting-item">
+                  <span>
+                    <span data-i18n="communityToolCode">执行社区工具代码</span>
+                    <small class="muted" data-i18n="communityToolCodeHint">开启后，第三方工具的 index.js 会作为本地代码运行；仅在信任来源时启用。</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="COMMUNITY_TOOL_CODE_ENABLED">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="setting-divider"></div>
+                <div class="tool-config-list" id="toolConfigList"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="about-page page-stack">
+          <section class="panel about-hero">
+            <div class="panel-body about-hero-body">
+              <div class="about-mark app-icon" aria-hidden="true"></div>
+              <div>
+                <span class="eyebrow">Desktop Bridge</span>
+                <h2 id="appProductName" data-product-name>CodeSeeX</h2>
+                <p id="appDescription" data-i18n="productDescription">Local Codex and DeepSeek bridge with a desktop manager.</p>
+                <div class="version-pill" id="appVersion">v-</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="about-grid">
+            <div class="panel about-info-panel">
+              <div class="panel-header"><h2 data-i18n="versionInfo">版本信息</h2></div>
+              <div class="panel-body info-list selectable">
+                <div class="info-row"><span data-i18n="appName">应用名称</span><strong id="appName">-</strong></div>
+                <div class="info-row"><span data-i18n="currentVersion">当前版本</span><strong id="aboutVersion">-</strong></div>
+                <div class="info-row"><span data-i18n="license">开源协议</span><strong id="appLicense">-</strong></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header"><h2 data-i18n="projectSupport">项目与支持</h2></div>
+              <div class="panel-body about-actions">
+                <button class="btn btn-secondary btn-link-icon" type="button" data-about-action="source"><span aria-hidden="true"></span><span data-i18n="source">查看源代码</span></button>
+                <button class="btn btn-secondary btn-link-icon" type="button" data-about-action="feedback"><span aria-hidden="true"></span><span data-i18n="feedback">反馈</span></button>
+                <button class="btn btn-secondary btn-link-icon" type="button" data-about-action="license"><span aria-hidden="true"></span><span data-i18n="licenseButton">协议</span></button>
+                <button class="btn btn-primary btn-link-icon" type="button" data-about-action="update"><span aria-hidden="true"></span><span data-i18n="checkUpdate">检查更新</span></button>
+                <p class="about-status" id="aboutStatus" data-i18n="ready">准备就绪。</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="loading-overlay" id="loadingOverlay" hidden>
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <strong id="loadingTitle" data-i18n="busyTitle">正在处理</strong>
+      <span id="loadingDetail" data-i18n="busyDetail">请稍候...</span>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
