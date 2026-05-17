@@ -1,5 +1,9 @@
 # CodeSeeX
 
+![Version](https://img.shields.io/badge/version-0.1.0-1f6feb)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043)
+![License](https://img.shields.io/badge/license-AGPL--3.0--only-bd561d)
+
 CodeSeeX is a local bridge between Codex and DeepSeek. It exposes an OpenAI-compatible Responses API endpoint for Codex, forwards requests to DeepSeek Chat Completions, and provides a local desktop manager for configuration, logs, usage, and tool visibility.
 
 CodeSeeX is an unofficial, unaffiliated learning and research tool. It is not endorsed by OpenAI, Codex, or DeepSeek. Use it with your own API credentials and follow the applicable Codex, OpenAI, DeepSeek, and search-provider terms.
