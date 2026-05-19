@@ -230,7 +230,7 @@ function normalizeShellArguments(name, argsText) {
   if (!parsed || typeof parsed !== "object") return argsText || "{}";
 
   if (typeof parsed.command === "string") {
-    parsed.command = parseJsonStringArray(parsed.command) || ["powershell.exe", "-Command", unwrapPowerShellCommandText(parsed.command) || parsed.command];
+    parsed.command = parseJsonStringArray(parsed.command) || platformShellCommand(unwrapPowerShellCommandText(parsed.command) || parsed.command);
   } else if (Array.isArray(parsed.command)) {
     parsed.command = unwrapNestedShellCommand(parsed.command) || parsed.command;
   }
@@ -238,6 +238,11 @@ function normalizeShellArguments(name, argsText) {
     parsed.command = [TOOL_NAME, normalizePatchText(parsed.command[1])];
   }
   return JSON.stringify(parsed);
+}
+
+function platformShellCommand(commandText) {
+  if (process.platform === "win32") return ["powershell.exe", "-Command", commandText];
+  return ["sh", "-lc", commandText];
 }
 
 function parseJsonStringArray(value) {

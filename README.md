@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-1f6feb">
+  <img alt="Version 0.2.1" src="https://img.shields.io/badge/version-0.2.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -29,9 +29,10 @@ Codex  ->  CodeSeeX proxy  ->  DeepSeek API
 
 ## Get Started
 
-Download the latest Windows installer or portable build from the project releases, then start
-`CodeSeeX`. The desktop app opens a local manager UI and starts the local Codex-compatible API on
-the configured port.
+Download the latest release build for your platform, then start `CodeSeeX`. The desktop app opens a
+local manager UI and starts the local Codex-compatible API on the configured port. Windows currently
+ships installer and portable artifacts; macOS and Linux builds are supported by the source build
+configuration and may be published as release artifacts as they are verified.
 
 CodeSeeX and Codex are separate apps. Start CodeSeeX when you want the local proxy available, then
 start Codex Desktop with a DeepSeek-specific TOML that points to CodeSeeX:
@@ -56,8 +57,9 @@ API credentials are read from the user's Codex auth file, not from `proxy.env`.
 
 ## Configuration
 
-Most settings can be changed in the desktop manager. Runtime folders are created next to
-`CodeSeeX.exe`: `lang/`, `logs/`, and `extension/tools/`.
+Most settings can be changed in the desktop manager. Runtime folders include `lang/`, `logs/`, and
+`extension/tools/`. Windows packaged builds store them next to `CodeSeeX.exe` for portable use;
+macOS and Linux packaged builds use the app user-data directory so installed apps can write safely.
 
 For local overrides, CodeSeeX stores a small `proxy.env` file with non-secret runtime settings:
 
@@ -84,26 +86,26 @@ See `CHANGELOG.md` for version history and release highlights.
 
 Install dependencies from source:
 
-```powershell
+```sh
 npm install
 ```
 
 Start the desktop app:
 
-```powershell
+```sh
 npm start
 ```
 
 For CLI-only development:
 
-```powershell
+```sh
 npm run start:manager
 ```
 
 The manager serves both the desktop UI and Codex API on one port. The standalone proxy entry remains
 available for focused proxy debugging:
 
-```powershell
+```sh
 npm run start:proxy
 ```
 
@@ -128,7 +130,7 @@ In development, visible runtime folders are created in the project root. Runtime
 
 Run syntax checks before committing:
 
-```powershell
+```sh
 npm run check
 ```
 

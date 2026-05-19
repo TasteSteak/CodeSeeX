@@ -16,6 +16,7 @@ const DEFAULT_EXCERPT_MAX_CHARS = 300;
 const DEFAULT_MAX_EXCERPTS_PER_PAGE = 3;
 const DEFAULT_SEARCH_TIMEOUT_MS = 12000;
 const DEFAULT_QUALITY_THRESHOLD = 0.34;
+const SEARCH_USER_AGENT = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 function resolveDispatcher(config = {}) {
   const proxy = resolveProxyUrl(config);
@@ -528,7 +529,7 @@ async function searchGoogleHtml(query, config = {}) {
   const fetched = await fetchText(url, config, {
     Accept: "text/html,application/xhtml+xml",
     "Accept-Language": locale.acceptLanguage,
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "User-Agent": SEARCH_USER_AGENT,
   });
   if (!fetched.ok) return Object.assign({ source: "google_html", query, results: [] }, fetched);
   const results = parseGoogleHtml(fetched.text);
@@ -547,7 +548,7 @@ async function searchBingHtml(query, config = {}) {
   const fetched = await fetchText(url, config, {
     Accept: "text/html,application/xhtml+xml",
     "Accept-Language": locale.acceptLanguage,
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "User-Agent": SEARCH_USER_AGENT,
   });
   if (!fetched.ok) return Object.assign({ source: "bing_html", query, results: [] }, fetched);
   const results = parseBingHtml(fetched.text);
@@ -566,7 +567,7 @@ async function searchYandexHtml(query, config = {}) {
   const fetched = await fetchText(url, config, {
     Accept: "text/html,application/xhtml+xml",
     "Accept-Language": locale.acceptLanguage,
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "User-Agent": SEARCH_USER_AGENT,
   });
   if (!fetched.ok) return Object.assign({ source: "yandex_html", query, results: [] }, fetched);
   const results = parseYandexHtml(fetched.text);

@@ -127,7 +127,10 @@ if (process.argv.includes("--proxy-child")) {
   function resolveDataDir(rootDir) {
     if (process.env.PROXY_DATA_DIR) return path.resolve(process.env.PROXY_DATA_DIR);
     if (process.env.PORTABLE_EXECUTABLE_DIR) return path.resolve(process.env.PORTABLE_EXECUTABLE_DIR);
-    if (app.isPackaged) return path.dirname(app.getPath("exe"));
+    if (app.isPackaged) {
+      if (process.platform === "win32") return path.dirname(app.getPath("exe"));
+      return app.getPath("userData");
+    }
     return rootDir;
   }
 

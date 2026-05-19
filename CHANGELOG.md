@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 - 2026-05-19
+
+### Changed
+
+- Improved cross-platform packaged runtime directory handling: Windows keeps portable folders next to the executable, while macOS and Linux use the app user-data directory.
+- Added public `dist:mac` and `dist:linux` build scripts and basic Electron Builder targets.
+- Updated documentation to describe current platform support and runtime folder behavior more accurately.
+
+### Fixed
+
+- Added macOS/Linux stale process and listen-port cleanup so old CodeSeeX processes are not left blocking startup.
+- Fixed proxy shell command normalization so non-Windows platforms use `sh -lc` instead of Windows PowerShell.
+- Removed the Windows-specific browser user-agent fingerprint from built-in web search requests.
+
 ## 0.2.0 - 2026-05-19
 
 ### Added

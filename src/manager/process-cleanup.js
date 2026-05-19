@@ -126,7 +126,7 @@ function isDesktopCommand(name, commandLine, executablePath, trustedSignal) {
 
 function listProcesses() {
   if (process.platform === "win32") return listWindowsProcesses();
-  return [];
+  return listPosixProcesses();
 }
 
 function listWindowsProcesses() {
@@ -147,7 +147,8 @@ function listWindowsProcesses() {
 }
 
 function listPortOwners(ports) {
-  if (process.platform !== "win32" || ports.length === 0) return [];
+  if (ports.length === 0) return [];
+  if (process.platform !== "win32") return listPosixPortOwners(ports);
   const portList = ports.map((port) => Number(port)).filter(Boolean).join(",");
   if (!portList) return [];
   const script = [
@@ -157,6 +158,82 @@ function listPortOwners(ports) {
   ].join("; ");
   const parsed = parseJson(runPowerShell(script), []);
   return (Array.isArray(parsed) ? parsed : [parsed]).map(Number).filter(Boolean);
+}
+
+function listPosixProcesses() {
+  try {
+    const output = execFileSync("ps", ["-axo", "pid=,ppid=,comm=,args="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return output.split(/\r?\n/)
+      .map((line) => {
+        const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)(?:\s+([\s\S]*))?$/);
+        if (!match) return null;
+        return {
+          pid: Number(match[1]),
+          parentPid: Number(match[2]),
+          name: match[3] || "",
+          executablePath: match[3] || "",
+          commandLine: match[4] || match[3] || "",
+        };
+      })
+      .filter((item) => item && item.pid);
+  } catch {
+    return [];
+  }
+}
+
+function listPosixPortOwners(ports) {
+  const normalizedPorts = ports.map(Number).filter(Boolean);
+  if (normalizedPorts.length === 0) return [];
+  const owners = new Set();
+  for (const pid of listPosixPortOwnersWithLsof(normalizedPorts)) owners.add(pid);
+  if (owners.size === 0) {
+    for (const pid of listPosixPortOwnersWithSs(normalizedPorts)) owners.add(pid);
+  }
+  return Array.from(owners);
+}
+
+function listPosixPortOwnersWithLsof(ports) {
+  const owners = new Set();
+  for (const port of ports) {
+    try {
+      const output = execFileSync("lsof", ["-nP", "-iTCP:" + port, "-sTCP:LISTEN", "-t"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      for (const line of output.split(/\r?\n/)) {
+        const pid = Number(line.trim());
+        if (pid) owners.add(pid);
+      }
+    } catch {}
+  }
+  return Array.from(owners);
+}
+
+function listPosixPortOwnersWithSs(ports) {
+  try {
+    const output = execFileSync("ss", ["-ltnp"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const wanted = new Set(ports.map(Number));
+    const owners = new Set();
+    for (const line of output.split(/\r?\n/)) {
+      const port = parseListenPort(line);
+      if (!wanted.has(port)) continue;
+      for (const match of line.matchAll(/pid=(\d+)/g)) owners.add(Number(match[1]));
+    }
+    return Array.from(owners);
+  } catch {
+    return [];
+  }
+}
+
+function parseListenPort(line) {
+  const match = String(line || "").match(/(?:^|\s)(?:\[[^\]]+\]|[^\s:]+|\*):(\d+)\s/);
+  return match ? Number(match[1]) : 0;
 }
 
 function runPowerShell(script) {
@@ -180,7 +257,39 @@ function killProcessTree(pid) {
     });
     return;
   }
-  process.kill(pid, "SIGTERM");
+  let killedAny = false;
+  let lastError = null;
+  for (const targetPid of posixProcessTreePids(pid)) {
+    try {
+      process.kill(targetPid, "SIGTERM");
+      killedAny = true;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!killedAny && lastError) throw lastError;
+}
+
+function posixProcessTreePids(pid) {
+  const rootPid = Number(pid);
+  if (!rootPid) return [];
+  const childrenByParent = new Map();
+  for (const proc of listProcesses()) {
+    const parentPid = Number(proc.parentPid);
+    if (!parentPid) continue;
+    if (!childrenByParent.has(parentPid)) childrenByParent.set(parentPid, []);
+    childrenByParent.get(parentPid).push(Number(proc.pid));
+  }
+  const seen = new Set();
+  const result = [];
+  function visit(currentPid) {
+    if (!currentPid || seen.has(currentPid)) return;
+    seen.add(currentPid);
+    for (const childPid of childrenByParent.get(currentPid) || []) visit(childPid);
+    result.push(currentPid);
+  }
+  visit(rootPid);
+  return result;
 }
 
 function markRuntimeStopped(runtimeFile, killedPids) {
@@ -203,11 +312,13 @@ function normalizePorts(value) {
 }
 
 function normalizePath(value) {
-  return path.resolve(String(value || "")).replace(/\//g, "\\").toLowerCase();
+  const resolved = path.resolve(String(value || ""));
+  return process.platform === "win32" ? resolved.replace(/\//g, "\\").toLowerCase() : resolved;
 }
 
 function normalizeText(value) {
-  return String(value || "").replace(/\//g, "\\").toLowerCase();
+  const text = String(value || "");
+  return process.platform === "win32" ? text.replace(/\//g, "\\").toLowerCase() : text;
 }
 
 function parseJson(value, fallback) {
