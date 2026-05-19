@@ -9,7 +9,17 @@ const API_KEY_FIELDS = [
   "apiKey",
 ];
 
-function readCodexAuthApiKey(env = process.env) {
+let cachedAuthorizationHeader = "";
+
+function readCodexAuthApiKey(env = process.env, options = {}) {
+  const authorizationKey = apiKeyFromAuthorization(options.authorization);
+  if (authorizationKey) return authorizationKey;
+
+  if (options.includeCachedAuthorization) {
+    const cachedKey = apiKeyFromAuthorization(cachedAuthorizationHeader);
+    if (cachedKey) return cachedKey;
+  }
+
   const filePath = resolveCodexAuthPath(env);
   if (!filePath) return "";
 
@@ -20,6 +30,24 @@ function readCodexAuthApiKey(env = process.env) {
   } catch {
     return "";
   }
+}
+
+function rememberAuthorizationHeader(value) {
+  const normalized = normalizeAuthorizationHeader(value);
+  if (normalized) cachedAuthorizationHeader = normalized;
+  return normalized;
+}
+
+function apiKeyFromAuthorization(value) {
+  const normalized = normalizeAuthorizationHeader(value);
+  if (!normalized) return "";
+  return normalized.replace(/^Bearer\s+/i, "").trim();
+}
+
+function normalizeAuthorizationHeader(value) {
+  const text = String(value || "").trim();
+  if (!text || !/^Bearer\s+\S+/i.test(text)) return "";
+  return text;
 }
 
 function apiKeyFromCodexAuth(auth) {
@@ -93,8 +121,10 @@ function safeExists(filePath) {
 }
 
 module.exports = {
+  apiKeyFromAuthorization,
   apiKeyFromCodexAuth,
   codexAuthPathCandidates,
+  rememberAuthorizationHeader,
   readCodexAuthApiKey,
   resolveCodexAuthPath,
 };

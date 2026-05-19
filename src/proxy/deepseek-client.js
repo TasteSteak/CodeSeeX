@@ -1,4 +1,4 @@
-const { readCodexAuthApiKey } = require("../shared/codex-auth");
+const { readCodexAuthApiKey, rememberAuthorizationHeader } = require("../shared/codex-auth");
 const { httpError, makeId, parseJsonResponse } = require("../shared/http");
 const { resolveDispatcher } = require("./web-search-executor");
 
@@ -139,6 +139,8 @@ async function callDeepSeekStream(payload, config, authorization, onChunk) {
         }
       }
     }
+  } catch (error) {
+    throw toUpstreamStreamError(error);
   } finally {
     reader.releaseLock();
   }
@@ -180,7 +182,7 @@ async function fetchDeepSeek(payload, config, authorization) {
       "Content-Type": "application/json",
       Accept: payload.stream ? "text/event-stream" : "application/json",
     };
-    const authHeader = resolveAuthorizationHeader(config);
+    const authHeader = resolveAuthorizationHeader(Object.assign({}, config, { authorization }));
     if (authHeader) headers.Authorization = authHeader;
 
     return await fetch(url, {
@@ -191,8 +193,7 @@ async function fetchDeepSeek(payload, config, authorization) {
       dispatcher: resolveDispatcher(config),
     });
   } catch (error) {
-    if (error && error.name === "AbortError") throw httpError(504, "Upstream DeepSeek request timed out.", "api_error", "upstream_timeout");
-    throw httpError(502, "Failed to connect to DeepSeek upstream: " + (error.message || String(error)), "api_error", "upstream_connection_failed");
+    throw toUpstreamConnectionError(error);
   } finally {
     clearTimeout(timeout);
   }
@@ -212,6 +213,55 @@ function getAssistantMessage(completion) {
 function upstreamError(status, body) {
   const message = (body && body.error ? body.error.message : null) || (body ? body.message : null) || (body ? body.raw : null) || "Upstream DeepSeek request failed with status " + status + ".";
   return httpError(status, message, "api_error", (body && body.error ? body.error.code : null) || "upstream_error");
+}
+
+function toUpstreamConnectionError(error) {
+  if (isHttpError(error)) return error;
+  if (error && error.name === "AbortError") return httpError(504, "Upstream DeepSeek request timed out.", "api_error", "upstream_timeout");
+  const wrapped = httpError(502, "Failed to connect to DeepSeek upstream: " + safeErrorSummary(error), "api_error", "upstream_connection_failed");
+  attachSafeCause(wrapped, error);
+  return wrapped;
+}
+
+function toUpstreamStreamError(error) {
+  if (isHttpError(error)) return error;
+  const wrapped = httpError(502, "DeepSeek upstream stream failed: " + safeErrorSummary(error), "api_error", "upstream_stream_failed");
+  attachSafeCause(wrapped, error);
+  return wrapped;
+}
+
+function isHttpError(error) {
+  return Boolean(error && Number.isFinite(Number(error.status)) && error.type && error.code);
+}
+
+function attachSafeCause(target, source) {
+  const cause = source && source.cause ? source.cause : null;
+  target.safe_cause = {
+    name: sanitizeErrorText(source && source.name),
+    code: sanitizeErrorText((source && source.code) || (cause && cause.code)),
+    cause_code: sanitizeErrorText(cause && cause.code),
+    cause_name: sanitizeErrorText(cause && cause.name),
+    syscall: sanitizeErrorText(cause && cause.syscall),
+  };
+}
+
+function safeErrorSummary(error) {
+  const parts = [];
+  const message = sanitizeErrorText(error && error.message ? error.message : String(error || "unknown_error"));
+  if (message) parts.push(message);
+  const code = sanitizeErrorText((error && error.code) || (error && error.cause && error.cause.code));
+  if (code && !parts.some((part) => part.includes(code))) parts.push("code=" + code);
+  const causeMessage = sanitizeErrorText(error && error.cause && error.cause.message);
+  if (causeMessage && causeMessage !== message) parts.push("cause=" + causeMessage);
+  return parts.filter(Boolean).join("; ") || "unknown_error";
+}
+
+function sanitizeErrorText(value) {
+  return String(value || "")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/(https?:\/\/)([^:@/\s]+):([^@/\s]+)@/gi, "$1[redacted]@")
+    .replace(/[A-Za-z0-9._%+-]+:[A-Za-z0-9._~+/=-]+@/g, "[redacted]@")
+    .slice(0, 500);
 }
 
 function parseDeepSeekFrame(frame) {
@@ -254,6 +304,8 @@ function stripUndefined(value) {
 }
 
 function resolveAuthorizationHeader(config) {
+  const requestAuth = rememberAuthorizationHeader(config && config.authorization);
+  if (requestAuth) return requestAuth;
   const codexApiKey = String(readCodexAuthApiKey(config) || "").trim();
   if (codexApiKey) return formatBearer(codexApiKey);
   return "";
@@ -278,7 +330,7 @@ async function fetchDeepSeekStream(payload, config, authorization) {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     };
-    const authHeader = resolveAuthorizationHeader(config);
+    const authHeader = resolveAuthorizationHeader(Object.assign({}, config, { authorization }));
     if (authHeader) headers.Authorization = authHeader;
 
     const resp = await fetch(url, {
@@ -291,12 +343,21 @@ async function fetchDeepSeekStream(payload, config, authorization) {
     clearTimeout(timeout);
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      throw upstreamError(resp.status, text ? { error: { message: text } } : null);
+      throw upstreamError(resp.status, parseUpstreamErrorText(text));
     }
     return resp.body;
   } catch (error) {
     clearTimeout(timeout);
-    if (error && error.name === "AbortError") throw httpError(504, "Upstream DeepSeek request timed out.", "api_error", "upstream_timeout");
-    throw error;
+    throw toUpstreamConnectionError(error);
+  }
+}
+
+function parseUpstreamErrorText(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { error: { message: value } };
   }
 }

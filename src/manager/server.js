@@ -8,7 +8,7 @@ const { DATA_DIR, ROOT_DIR, defaultEventLogFile, loadProxyConfig } = require("..
 const { addCorsHeaders, enforceLocalAccess, handleHttpError, httpError, parseJsonResponse, readJsonBody, sendJson } = require("../shared/http");
 const { appendJsonl, readJson } = require("../shared/json-store");
 const { appendEventLog, eventLogDir, eventLogPath: datedEventLogPath, readEventLogTail } = require("../shared/event-log");
-const { buildCodeSeeXCatalog, codeSeeXUserDir, codexAdapterCatalogPath, codexCliInvocation, TARGET_MODELS } = require("../codex/model-catalog");
+const { buildCodeSeeXCatalog, codeSeeXUserDir, codexAdapterCatalogPath, codexCliInvocation, TARGET_MODELS, validateCodeSeeXCatalog } = require("../codex/model-catalog");
 const { createProxyContext, handleRequest: handleProxyRequest, markProxyRunning, markProxyStopped } = require("../proxy/server");
 const { PRODUCT_DESCRIPTION, PRODUCT_NAME } = require("../shared/product");
 const { repairMojibakeText } = require("../shared/text-encoding");
@@ -54,6 +54,7 @@ function startManager(options = {}) {
 
   ensureRuntimeDirectories(dataDir);
   ensureProxyEnv(dataDir, rootDir);
+  ensureCodexAdapterBootstrapCatalog(dataDir, rootDir);
   const proxyEnv = loadProxyEnv(dataDir, rootDir);
   cleanupStaleSinglePortProcesses({ rootDir, dataDir, port });
   notifyConfigChanged({ onConfigChanged: options.onConfigChanged }, publicConfig(proxyEnv));
@@ -399,9 +400,34 @@ function scheduleCodexAdapterMaintenance(dataDir, rootDir = ROOT_DIR) {
   catalogMaintenanceByDataDir.set(key, timer);
 }
 
+function ensureCodexAdapterBootstrapCatalog(dataDir, rootDir = ROOT_DIR) {
+  if (isCodexAdapterReady(dataDir) && isCodexAdapterKnownSource(dataDir)) return;
+  try {
+    const catalogPath = codexAdapterCatalogPath(dataDir);
+    const result = buildCodeSeeXCatalog({
+      outputPath: catalogPath,
+      rootDir,
+      nativeCatalog: null,
+      nativeError: new Error("Native Codex catalog has not been loaded yet."),
+    });
+    writeCodexAdapterStatus(dataDir, {
+      status: CODEX_ADAPTER_STATUS_READY,
+      updated_at: new Date().toISOString(),
+      error: "",
+      base_model: result.baseModel || "",
+      fallback: Boolean(result.fallback),
+      source: result.source || "",
+      warning: result.warning || "",
+      target_models: result.targetModels || [],
+    });
+  } catch (error) {
+    writeCodexAdapterError(dataDir, error);
+  }
+}
+
 async function generateCodexAdapterCatalog(dataDir, rootDir = ROOT_DIR, options = {}) {
   const catalogPath = codexAdapterCatalogPath(dataDir);
-  if (!options.force && isCodexAdapterReady(dataDir)) return gatherCodexAdapter(dataDir, rootDir);
+  if (!options.force && isCodexAdapterReady(dataDir) && isCodexAdapterNative(dataDir)) return gatherCodexAdapter(dataDir, rootDir);
   writeCodexAdapterStatus(dataDir, {
     status: CODEX_ADAPTER_STATUS_GENERATING,
     updated_at: new Date().toISOString(),
@@ -409,14 +435,23 @@ async function generateCodexAdapterCatalog(dataDir, rootDir = ROOT_DIR, options 
     base_model: "",
     target_models: TARGET_MODELS.map((model) => model.slug),
   });
+  let nativeCatalog = null;
+  let nativeError = null;
   try {
-    const nativeCatalog = await readNativeCodexCatalogAsync();
-    const result = buildCodeSeeXCatalog({ outputPath: catalogPath, rootDir, nativeCatalog });
+    nativeCatalog = await readNativeCodexCatalogAsync();
+  } catch (error) {
+    nativeError = error;
+  }
+  try {
+    const result = buildCodeSeeXCatalog({ outputPath: catalogPath, rootDir, nativeCatalog, nativeError });
     writeCodexAdapterStatus(dataDir, {
       status: CODEX_ADAPTER_STATUS_READY,
       updated_at: new Date().toISOString(),
       error: "",
       base_model: result.baseModel || "",
+      fallback: Boolean(result.fallback),
+      source: result.source || "",
+      warning: result.warning || "",
       target_models: result.targetModels || [],
     });
   } catch (error) {
@@ -452,11 +487,25 @@ function isCodexAdapterReady(dataDir) {
   try {
     const catalogPath = codexAdapterCatalogPath(dataDir);
     const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
-    const models = Array.isArray(catalog.models) ? catalog.models.map((model) => model && model.slug).filter(Boolean) : [];
-    return TARGET_MODELS.every((model) => models.includes(model.slug));
+    return validateCodeSeeXCatalog(catalog).ok;
   } catch {
     return false;
   }
+}
+
+function isCodexAdapterFallback(dataDir) {
+  const status = readCodexAdapterStatus(dataDir);
+  return Boolean(status && status.fallback);
+}
+
+function isCodexAdapterKnownSource(dataDir) {
+  const status = readCodexAdapterStatus(dataDir);
+  return Boolean(status && ["native", "seed"].includes(status.source) && !status.fallback);
+}
+
+function isCodexAdapterNative(dataDir) {
+  const status = readCodexAdapterStatus(dataDir);
+  return Boolean(status && status.source === "native" && !status.fallback);
 }
 
 function gatherCodexAdapter(dataDir, rootDir = ROOT_DIR) {
@@ -467,14 +516,20 @@ function gatherCodexAdapter(dataDir, rootDir = ROOT_DIR) {
   let baseModel = "";
   let models = TARGET_MODELS.map((model) => model.slug);
   let error = status.error || "";
+  let warning = status.warning || "";
+  let fallback = Boolean(status.fallback);
+  let source = status.source || "";
   let statusValue = status.status || CODEX_ADAPTER_STATUS_IDLE;
   try {
     const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
     const catalogModels = Array.isArray(catalog.models) ? catalog.models : [];
-    ready = catalogModels.length > 0;
+    const validation = validateCodeSeeXCatalog(catalog);
+    ready = validation.ok;
     models = catalogModels.map((model) => model.slug).filter(Boolean);
     baseModel = status.base_model || "";
     if (ready && statusValue !== CODEX_ADAPTER_STATUS_GENERATING) statusValue = CODEX_ADAPTER_STATUS_READY;
+    if (!ready && !error) error = validation.error;
+    if (ready && !source) source = fallback ? "fallback" : "unknown";
   } catch (readError) {
     if (!error) error = readError && readError.message ? readError.message : String(readError);
     if (statusValue !== CODEX_ADAPTER_STATUS_GENERATING && error) statusValue = CODEX_ADAPTER_STATUS_ERROR;
@@ -488,6 +543,9 @@ function gatherCodexAdapter(dataDir, rootDir = ROOT_DIR) {
     context_window: 1000000,
     effective_context_window_percent: 90,
     base_model: baseModel,
+    fallback,
+    source,
+    warning,
     toml_snippet: codexTomlSnippet(catalogPath, proxyBaseUrl(config)),
     error: ready ? "" : error,
   };
@@ -511,6 +569,9 @@ function writeCodexAdapterError(dataDir, error) {
     status: CODEX_ADAPTER_STATUS_ERROR,
     error: error && error.message ? error.message : String(error),
     base_model: "",
+    fallback: false,
+    source: "",
+    warning: "",
   });
 }
 
@@ -892,7 +953,7 @@ async function fetchDeepSeekBalance(config) {
 }
 
 function resolveApiKey(config) {
-  const codexKey = String(readCodexAuthApiKey(config) || "").trim();
+  const codexKey = String(readCodexAuthApiKey(config, { includeCachedAuthorization: true }) || "").trim();
   return codexKey;
 }
 

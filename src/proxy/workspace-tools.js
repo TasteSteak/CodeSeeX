@@ -26,7 +26,11 @@ const SKIP_DIRS = new Set([
 function executeWorkspaceSearch(args, config = {}) {
   const parsed = parseArgs(args);
   const query = String(parsed.query ?? parsed.pattern ?? "").trim();
-  const rootDir = workspaceRoot(config);
+  const scope = workspaceScope(config);
+  const searchRoot = resolveWorkspacePath(scope, parsed.path || parsed.root || parsed.cwd || parsed.directory || ".");
+  if (!searchRoot.ok) return searchRoot;
+  const rootDir = searchRoot.path;
+  const displayRoot = searchRoot.root || scope.rootDir;
   if (!query) return { ok: false, error: "missing_query", message: "workspace_search requires a non-empty query." };
   if (query.length > MAX_QUERY_LENGTH) return { ok: false, error: "query_too_long", message: `Search query must be at most ${MAX_QUERY_LENGTH} characters.` };
   if (looksUnsafePattern(query)) return { ok: false, error: "unsafe_query", message: "The query is too broad or unsafe. Use a more specific literal string." };
@@ -46,7 +50,7 @@ function executeWorkspaceSearch(args, config = {}) {
 
   for (const filePath of walkFiles(rootDir)) {
     if (results.length >= maxResults) break;
-    const rel = toPortableRelative(rootDir, filePath);
+    const rel = toPortableRelative(displayRoot, filePath);
     if (!matchesGlobs(rel, includeGlobs, true) || matchesGlobs(rel, excludeGlobs, false)) continue;
     const stat = safeStat(filePath);
     if (!stat || stat.size > MAX_FILE_BYTES || isProbablyBinary(filePath)) continue;
@@ -70,7 +74,9 @@ function executeWorkspaceSearch(args, config = {}) {
   }
 
   return {
+    ok: true,
     q: query,
+    path: searchRoot.relative,
     n: results.length,
     r: results,
   };
@@ -78,9 +84,9 @@ function executeWorkspaceSearch(args, config = {}) {
 
 function executeReadFileRange(args, config = {}) {
   const parsed = parseArgs(args);
-  const rootDir = workspaceRoot(config);
+  const scope = workspaceScope(config);
   const requestedPath = parsed.path || parsed.file || parsed.src;
-  const resolved = resolveInsideRoot(rootDir, requestedPath);
+  const resolved = resolveWorkspacePath(scope, requestedPath);
   if (!resolved.ok) return resolved;
   const stat = safeStat(resolved.path);
   if (!stat) return { ok: false, error: "not_found", message: "The requested path does not exist.", path: String(requestedPath || "") };
@@ -150,11 +156,11 @@ function executeReadFileRange(args, config = {}) {
 
 function executeListDirectory(args, config = {}) {
   const parsed = parseArgs(args);
-  const rootDir = workspaceRoot(config);
+  const scope = workspaceScope(config);
   const requestedPath = String(parsed.path || "").trim();
   if (!requestedPath) return { ok: false, error: "missing_path", message: "list_directory requires a path.", path: "" };
 
-  const resolved = resolveInsideRoot(rootDir, requestedPath);
+  const resolved = resolveWorkspacePath(scope, requestedPath);
   if (!resolved.ok) return resolved;
   const stat = safeStat(resolved.path);
   if (!stat) return { ok: false, error: "not_found", message: "The requested path does not exist.", path: resolved.relative };
@@ -179,9 +185,18 @@ function executeListDirectory(args, config = {}) {
   };
 }
 
-function workspaceRoot(config) {
-  const configured = (config && config.rootDir) || process.cwd();
-  return path.resolve(String(configured || process.cwd()));
+function workspaceScope(config = {}) {
+  const rawScope = config.workspaceScope && typeof config.workspaceScope === "object" ? config.workspaceScope : null;
+  const rootDir = normalizeRootPath((rawScope && rawScope.rootDir) || config.rootDir || process.cwd());
+  const roots = (rawScope && Array.isArray(rawScope.roots) ? rawScope.roots : [rootDir])
+    .map(normalizeRootPath)
+    .filter(Boolean);
+  if (!roots.some((root) => samePath(root, rootDir))) roots.unshift(rootDir);
+  return {
+    rootDir,
+    roots: dedupePaths(roots.length > 0 ? roots : [rootDir]),
+    allowOutsideWorkspace: Boolean(rawScope && rawScope.allowOutsideWorkspace),
+  };
 }
 
 function* walkFiles(rootDir) {
@@ -228,16 +243,30 @@ function walkDirectory(absoluteDir, relativeDir, currentDepth, maxDepth, entries
   }
 }
 
-function resolveInsideRoot(rootDir, requestedPath) {
+function resolveWorkspacePath(scope, requestedPath) {
   const raw = String(requestedPath || "").trim();
   if (!raw) return { ok: false, error: "missing_path", message: "A path is required." };
-  const resolved = path.resolve(rootDir, raw);
-  const normalized = path.normalize(resolved);
-  const normalizedRelative = path.relative(rootDir, normalized);
-  if (normalizedRelative.startsWith("..") || path.isAbsolute(normalizedRelative)) {
-    return { ok: false, error: "path_outside_workspace", message: "Path must stay inside the workspace.", path: raw };
+  const rootDir = scope.rootDir;
+  const absoluteInput = path.isAbsolute(raw);
+  const normalized = path.normalize(absoluteInput ? path.resolve(raw) : path.resolve(rootDir, raw));
+  const containingRoot = findContainingRoot(scope.roots, normalized);
+  if (!containingRoot && !(scope.allowOutsideWorkspace && absoluteInput)) {
+    return {
+      ok: false,
+      error: "path_outside_workspace",
+      message: "Path must stay inside the workspace unless full file access is enabled and an absolute path is provided.",
+      path: raw,
+      workspace_roots: scope.roots.map(toPortablePath),
+    };
   }
-  return { ok: true, path: normalized, relative: toPortableRelative(rootDir, normalized) };
+  const displayRoot = containingRoot || rootDir;
+  return {
+    ok: true,
+    path: normalized,
+    root: displayRoot,
+    relative: containingRoot ? toPortableRelative(displayRoot, normalized) : toPortablePath(normalized),
+    outside_workspace: !containingRoot,
+  };
 }
 
 function safeStat(filePath) {
@@ -356,6 +385,53 @@ function clampInt(value, fallback, min, max) {
 
 function toPortableRelative(rootDir, filePath) {
   return path.relative(rootDir, filePath).replace(/\\/g, "/");
+}
+
+function toPortablePath(filePath) {
+  return String(filePath || "").replace(/\\/g, "/");
+}
+
+function normalizeRootPath(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return path.resolve(raw);
+  } catch {
+    return "";
+  }
+}
+
+function dedupePaths(paths) {
+  const output = [];
+  for (const item of paths) {
+    if (!item || output.some((existing) => samePath(existing, item))) continue;
+    output.push(item);
+  }
+  return output;
+}
+
+function findContainingRoot(roots, target) {
+  const sorted = (Array.isArray(roots) ? roots : [])
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length);
+  return sorted.find((root) => isInsidePath(target, root)) || "";
+}
+
+function isInsidePath(target, root) {
+  if (samePath(target, root)) return true;
+  const relative = path.relative(root, target);
+  return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function samePath(left, right) {
+  const a = comparablePath(left);
+  const b = comparablePath(right);
+  return Boolean(a && b && a === b);
+}
+
+function comparablePath(value) {
+  const resolved = path.resolve(String(value || ""));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function looksUnsafePattern(query) {

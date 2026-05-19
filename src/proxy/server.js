@@ -251,15 +251,17 @@ async function handleResponsesCreate(req, res, requestBody, context) {
     const previousRecord = resolvePreviousRecord(requestBody.previous_response_id, context);
     const normalizedInput = normalizeInput(requestBody.input);
     logIncomingToolItems(runtime, normalizedInput);
+    const workspaceScope = resolveWorkspaceScope(requestBody, normalizedInput, config);
     const currentMessages = inputToMessages(normalizedInput);
     const conversationMessages = buildConversation(requestBody, previousRecord, currentMessages);
-    const toolContext = createToolContext(requestBody.tools || [], { rootDir: config.rootDir, extensionDir: config.extensionDir });
+    const toolContext = createToolContext(requestBody.tools || [], { rootDir: workspaceScope.rootDir, extensionDir: config.extensionDir });
     const contextDiagnostic = captureContextDiagnostic(context, {
       requestBody,
       previousRecord,
       normalizedInput,
       currentMessages,
       conversationMessages,
+      workspaceScope,
     });
 
     writeDebug(config, "latest-request.json", {
@@ -272,6 +274,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       upstream_messages: conversationMessages,
       tools: toolContext.upstreamTools,
       response_tools: requestBody.tools || [],
+      workspace_scope: workspaceScope,
     });
 
     if (requestBody.stream) {
@@ -281,7 +284,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
         requestBody,
         messages: conversationMessages,
         toolContext,
-        config,
+        config: Object.assign({}, config, { workspaceScope }),
         runtime,
         authorization: req.headers.authorization || "",
         toVisibleAssistant,
@@ -345,7 +348,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       requestBody,
       messages: conversationMessages,
       toolContext,
-      config,
+      config: Object.assign({}, config, { workspaceScope }),
       runtime,
       authorization: req.headers.authorization || "",
     });
@@ -444,6 +447,181 @@ function applyCodexModelAlias(requestBody, config, runtime) {
     model: mappedModel,
     aliased: true,
   };
+}
+
+function resolveWorkspaceScope(requestBody, normalizedInput, config = {}) {
+  const roots = [];
+  for (const candidate of workspaceRootCandidates(requestBody, normalizedInput, config)) {
+    const normalized = normalizeExistingDirectory(candidate);
+    if (!normalized || hasPath(roots, normalized)) continue;
+    roots.push(normalized);
+  }
+  const fallbackRoot = normalizeExistingDirectory(config.rootDir) || process.cwd();
+  if (roots.length === 0) roots.push(fallbackRoot);
+
+  return {
+    rootDir: roots[0],
+    roots,
+    allowOutsideWorkspace: workspaceToolsAllowOutside(requestBody, normalizedInput, config),
+    fileAccess: normalizeWorkspaceFileAccess(config.workspaceToolFileAccess),
+  };
+}
+
+function workspaceRootCandidates(requestBody, normalizedInput, config = {}) {
+  const candidates = [];
+  collectPathLikeValues(requestBody, candidates);
+  collectPathLikeValues(normalizedInput, candidates);
+  for (const root of Array.isArray(config.workspaceRoots) ? config.workspaceRoots : []) candidates.push(root);
+  if (config.rootDir) candidates.push(config.rootDir);
+  return candidates.filter((candidate) => looksLikeUsefulWorkspacePath(candidate, config));
+}
+
+function collectPathLikeValues(value, output, key = "") {
+  if (output.length > 80 || value === undefined || value === null) return;
+  if (typeof value === "string") {
+    collectPathLikeText(value, output, key);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 200)) collectPathLikeValues(item, output, key);
+    return;
+  }
+  if (typeof value !== "object") return;
+  for (const [childKey, child] of Object.entries(value)) {
+    const nextKey = key ? key + "." + childKey : childKey;
+    if (isLikelyPathKey(childKey)) collectPathLikeValues(child, output, nextKey);
+    else if (childKey === "content" || childKey === "text" || childKey === "input") collectPathLikeValues(child, output, nextKey);
+  }
+}
+
+function collectPathLikeText(text, output, key = "") {
+  const value = String(text || "");
+  if (!value) return;
+  if (isLikelyPathKey(key)) {
+    addPathCandidate(output, value);
+    return;
+  }
+
+  for (const pattern of [
+    /<cwd>\s*([^<\r\n]+)\s*<\/cwd>/gi,
+    /<[^>]*(?:cwd|workdir|workspace|project)[^>]*>\s*([^<\r\n]+)\s*<\/[^>]+>/gi,
+    /(?:^|\n)\s*(?:cwd|workdir|workspace|workspace_root|project_root|current_dir|current_directory)\s*[:=]\s*["']?([^"'\r\n]+)["']?/gi,
+    /(?:cwd|workdir|workspace|project)\s+is\s+["']?([^"'\r\n]+)["']?/gi,
+  ]) {
+    let match;
+    while ((match = pattern.exec(value)) !== null) addPathCandidate(output, match[1]);
+  }
+}
+
+function addPathCandidate(output, value) {
+  const text = stripPathCandidate(value);
+  if (!text || !looksLikeAbsolutePath(text)) return;
+  output.push(text);
+}
+
+function stripPathCandidate(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^`+|`+$/g, "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/[),.;\]]+$/g, "");
+}
+
+function isLikelyPathKey(key) {
+  return /(?:^|[_.-])(?:cwd|workdir|workspace|workspace_root|project_root|current_dir|current_directory|root_dir|root|path|dir|directory)(?:$|[_.-])/i.test(String(key || ""));
+}
+
+function looksLikeUsefulWorkspacePath(candidate, config = {}) {
+  const value = stripPathCandidate(candidate);
+  if (!looksLikeAbsolutePath(value)) return false;
+  const resolved = normalizeExistingDirectory(value);
+  if (!resolved) return false;
+  const ignored = [
+    config.dataDir,
+    config.debugDir,
+    config.extensionDir,
+  ].map(normalizeExistingDirectory).filter(Boolean);
+  return !ignored.some((dir) => samePathOrInside(resolved, dir));
+}
+
+function looksLikeAbsolutePath(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return /^[a-zA-Z]:[\\/]/.test(text) || /^\\\\[^\\]/.test(text) || text.startsWith("/");
+}
+
+function normalizeExistingDirectory(value) {
+  const raw = stripPathCandidate(value);
+  if (!raw) return "";
+  try {
+    const resolved = path.resolve(raw);
+    const stat = safeStatLocal(resolved);
+    if (stat && stat.isDirectory()) return canonicalPath(resolved);
+    if (stat && stat.isFile()) return canonicalPath(path.dirname(resolved));
+    const parent = safeStatLocal(path.dirname(resolved));
+    if (parent && parent.isDirectory()) return canonicalPath(path.dirname(resolved));
+  } catch {}
+  return "";
+}
+
+function safeStatLocal(filePath) {
+  try {
+    return filePath ? require("node:fs").statSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalPath(filePath) {
+  try {
+    return require("node:fs").realpathSync.native(path.resolve(filePath));
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function workspaceToolsAllowOutside(requestBody, normalizedInput, config = {}) {
+  const mode = normalizeWorkspaceFileAccess(config.workspaceToolFileAccess);
+  if (mode === "all") return true;
+  if (mode === "workspace") return false;
+  return requestIndicatesFullFileAccess(requestBody) || requestIndicatesFullFileAccess(normalizedInput);
+}
+
+function normalizeWorkspaceFileAccess(value) {
+  const mode = String(value || "auto").trim().toLowerCase();
+  if (["all", "full", "danger-full-access", "unrestricted"].includes(mode)) return "all";
+  if (["workspace", "restricted", "safe"].includes(mode)) return "workspace";
+  return "auto";
+}
+
+function requestIndicatesFullFileAccess(value) {
+  const text = JSON.stringify(value || "").toLowerCase();
+  return text.includes("danger-full-access")
+    || text.includes("sandbox_mode\":\"danger")
+    || text.includes("sandbox\":\"elevated")
+    || text.includes("windows.sandbox\":\"elevated")
+    || text.includes("approval_policy\":\"never");
+}
+
+function hasPath(paths, candidate) {
+  return paths.some((item) => samePath(item, candidate));
+}
+
+function samePath(left, right) {
+  const a = normalizeComparablePath(left);
+  const b = normalizeComparablePath(right);
+  return Boolean(a && b && a === b);
+}
+
+function samePathOrInside(target, root) {
+  if (samePath(target, root)) return true;
+  const relative = path.relative(root, target);
+  return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizeComparablePath(value) {
+  const resolved = path.resolve(String(value || ""));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function resolveCodexModelAlias(model, config = {}) {

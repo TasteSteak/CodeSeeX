@@ -16,11 +16,12 @@ function modelTool(tool = {}) {
     type: "function",
     function: {
       name: TOOL_NAME,
-      description: tool.description || "Search local workspace text files. Returns compact model payload: q=query, n=count, r[]=matches, p=path, l=line, s=match-centered snippet, c=context lines. Use this before reading files when you need to locate code.",
+      description: tool.description || "Search local workspace text files. Optionally pass path to search within a subdirectory or known absolute path when permitted. Returns compact model payload: q=query, n=count, r[]=matches, p=path, l=line, s=match-centered snippet, c=context lines. Use this before reading files when you need to locate code.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string" },
+          path: { type: "string" },
           include: { type: "array", items: { type: "string" } },
           exclude: { type: "array", items: { type: "string" } },
           max_results: { type: "integer" },

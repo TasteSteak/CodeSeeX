@@ -786,20 +786,26 @@ function queryWindowsInternetSetting(name) {
 function parseWindowsProxyServer(raw) {
   const value = String(raw || "").trim();
   if (!value) return "";
-  const https = value.match(/https=([^;]+)/i);
-  const http = value.match(/http=([^;]+)/i);
-  const first = value.split(";").find((part) => part && !/^[a-z]+=*$/i.test(part));
-  return normalizeProxyUrl((https && https[1]) || (http && http[1]) || stripProxySchemePrefix(first || value));
-}
+  if (!value.includes("=")) return normalizeProxyUrl(value);
 
-function stripProxySchemePrefix(value) {
-  return String(value || "").replace(/^[a-z]+=/i, "");
+  const entries = {};
+  for (const part of value.split(";")) {
+    const match = String(part || "").trim().match(/^([a-z][a-z0-9+.-]*)=(.+)$/i);
+    if (!match) continue;
+    entries[match[1].toLowerCase()] = match[2].trim();
+  }
+
+  // Undici ProxyAgent supports HTTP(S) CONNECT proxies. Do not reinterpret
+  // socks=host:port as http://host:port; that causes fast "fetch failed" errors.
+  return normalizeProxyUrl(entries.https || entries.http || "");
 }
 
 function normalizeProxyUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return raw;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    return /^https?:\/\//i.test(raw) ? raw : "";
+  }
   return "http://" + raw;
 }
 

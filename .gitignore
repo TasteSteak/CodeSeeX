@@ -12,3 +12,4 @@ release/
 codex/.generated/
 .codeseex-private/
 build/private/
+src/codex/catalog-seed.c6

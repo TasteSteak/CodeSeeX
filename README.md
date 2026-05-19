@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-1f6feb">
+  <img alt="Version 0.2.0" src="https://img.shields.io/badge/version-0.2.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -15,6 +15,7 @@ CodeSeeX is an unofficial, unaffiliated learning and research tool. It is not en
 - Local Responses API proxy for Codex.
 - DeepSeek upstream integration with streaming, reasoning display control, and token usage tracking.
 - Desktop manager built with Electron plus a local web UI.
+- DeepSeek V4 Codex adapter catalog generation, including a packaged seed for machines without a native Codex catalog.
 - Registered tool packages under `src/tools/<tool>/`, with community tools discoverable from `extension/tools/<tool>/`.
 - Built-in tool bridge for `apply_patch`, `web_search`, `workspace_search`, and `read_file_range`.
 - Single configurable CodeSeeX listen port through `PROXY_PORT`.
@@ -70,8 +71,14 @@ SHOW_THINKING=true
 For DeepSeek V4 model metadata, CodeSeeX maintains an adapter catalog under the current user's
 `.codeseex/model-catalog.json`. GPT/OpenAI TOML files do not need this setting and are not affected.
 
-The adapter catalog is generated locally from the user's installed Codex catalog. CodeSeeX does not
-ship a prebuilt OpenAI/Codex model catalog or bundled official system prompt file.
+The adapter catalog is generated locally. CodeSeeX first tries to derive it from the user's
+installed Codex catalog. If that is unavailable, release builds use a packaged compressed seed so
+new users can still start Codex with the DeepSeek V4 models. A minimal emergency fallback is kept
+only to avoid a missing catalog file.
+
+## Release Notes
+
+See `CHANGELOG.md` for version history and release highlights.
 
 ## Development
 

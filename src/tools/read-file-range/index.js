@@ -16,7 +16,7 @@ function modelTool(tool = {}) {
     type: "function",
     function: {
       name: TOOL_NAME,
-      description: tool.description || "Read a limited line range from a local workspace text file. Use path plus start/end or count. The file must stay inside the workspace.",
+      description: tool.description || "Read a limited line range from a local text file. Use path plus start/end or count. Relative paths resolve from the current workspace; absolute paths are accepted only when the host has full file access.",
       parameters: {
         type: "object",
         properties: {

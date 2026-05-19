@@ -1,6 +1,6 @@
 {
   "name": "codeseex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Local Codex-compatible DeepSeek bridge with a desktop manager.",
   "author": "TasteSteak",
@@ -18,9 +18,10 @@
     "start": "electron .",
     "start:manager": "node manager.js",
     "start:proxy": "node proxy.js",
-    "check": "node --check src/electron/main.js && node --check src/manager/server.js && node --check src/manager/process-control.js && node --check src/manager/static/app.js && node --check src/shared/config.js && node --check src/proxy/server.js && node --check src/codex/model-catalog.js",
-    "dist": "electron-builder",
-    "dist:win": "electron-builder --win nsis portable"
+    "build:catalog-seed": "node scripts/build-catalog-seed.js",
+    "check": "node --check src/electron/main.js && node --check src/manager/server.js && node --check src/manager/process-control.js && node --check src/manager/static/app.js && node --check src/shared/config.js && node --check src/shared/codex-auth.js && node --check src/proxy/server.js && node --check src/proxy/deepseek-client.js && node --check src/proxy/streaming/index.js && node --check src/proxy/web-search-executor.js && node --check src/codex/model-catalog.js",
+    "dist": "npm run build:catalog-seed && electron-builder",
+    "dist:win": "npm run build:catalog-seed && electron-builder --win nsis portable"
   },
   "build": {
     "appId": "io.github.tastesteak.codeseex",
@@ -36,8 +37,15 @@
       "manager.js",
       "proxy.env.example",
       "README.md",
+      "CHANGELOG.md",
       "LICENSE",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "src/codex/catalog-seed.c6",
+        "to": "catalog-seed.c6"
+      }
     ],
     "win": {
       "icon": "src/manager/static/assets/icons/app.ico",

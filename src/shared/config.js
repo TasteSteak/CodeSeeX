@@ -58,6 +58,8 @@ function loadProxyConfig(env = process.env) {
     billingOutputCny: numberOrDefault(env.BILLING_OUTPUT_CNY, 6),
     availableModels: splitList(env.AVAILABLE_MODELS || "deepseek-v4-flash,deepseek-v4-pro"),
     communityToolCodeEnabled: parseBool(env.COMMUNITY_TOOL_CODE_ENABLED, false),
+    workspaceToolFileAccess: String(env.WORKSPACE_TOOL_FILE_ACCESS || "auto").trim().toLowerCase() || "auto",
+    workspaceRoots: splitPathList(env.WORKSPACE_ROOTS),
     parentPid: Number(env.PROXY_PARENT_PID || "0") || null,
   };
 }
@@ -70,6 +72,13 @@ function normalizeRetentionDays(value) {
 function numberOrDefault(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function splitPathList(value) {
+  return String(value || "")
+    .split(/[;\n]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 function resolveRootDir(env = process.env) {

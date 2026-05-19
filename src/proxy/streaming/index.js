@@ -122,6 +122,7 @@ async function streamDeepSeekResponseV2(res, options) {
       break;
     }
   } catch (error) {
+    logUpstreamStreamError(runtime, error);
     const errorPayload = responseError(error);
     const response = buildResponseRecord({
       id,
@@ -501,6 +502,41 @@ function responseError(error) {
     type: error && error.type ? error.type : "api_error",
     code: error && error.code ? error.code : "stream_failed",
   };
+}
+
+function logUpstreamStreamError(runtime, error) {
+  if (!runtime) return;
+  pushEvent(runtime, {
+    type: "upstream_stream_error",
+    level: "error",
+    message: "DeepSeek upstream stream failed.",
+    audience: "diagnostic",
+    detail: {
+      status: Number(error && error.status) || undefined,
+      type: safeLogText(error && error.type),
+      code: safeLogText(error && error.code),
+      message: safeLogText(error && error.message),
+      cause: sanitizeErrorCause(error && error.safe_cause),
+    },
+  });
+}
+
+function sanitizeErrorCause(cause) {
+  if (!cause || typeof cause !== "object") return null;
+  const output = {};
+  for (const [key, value] of Object.entries(cause)) {
+    const safe = safeLogText(value);
+    if (safe) output[key] = safe;
+  }
+  return Object.keys(output).length > 0 ? output : null;
+}
+
+function safeLogText(value) {
+  return String(value || "")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/(https?:\/\/)([^:@/\s]+):([^@/\s]+)@/gi, "$1[redacted]@")
+    .replace(/[A-Za-z0-9._%+-]+:[A-Za-z0-9._~+/=-]+@/g, "[redacted]@")
+    .slice(0, 500);
 }
 
 function createTurnStreamEmitter({ res, seq, responseId, config, reserveOutputIndex, pushOutput }) {

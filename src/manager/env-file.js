@@ -16,6 +16,8 @@ const RUNTIME_ENV_KEYS = [
   "BILLING_CACHE_MISS_INPUT_CNY",
   "BILLING_OUTPUT_CNY",
   "COMMUNITY_TOOL_CODE_ENABLED",
+  "WORKSPACE_TOOL_FILE_ACCESS",
+  "WORKSPACE_ROOTS",
 ];
 
 function readEnvFile(filePath, options = {}) {

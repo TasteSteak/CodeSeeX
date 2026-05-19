@@ -34,7 +34,7 @@ function modelTool(tool = {}) {
     type: "function",
     function: {
       name: TOOL_NAME,
-      description: tool.description || "List files and folders within the workspace. Use this before read_file_range when the user asks about a directory or folder structure.",
+      description: tool.description || "List files and folders in a local directory. Relative paths resolve from the current workspace; absolute paths are accepted only when the host has full file access. Use this before read_file_range when the user asks about a directory or folder structure.",
       parameters: {
         type: "object",
         properties: {
