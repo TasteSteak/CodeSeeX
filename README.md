@@ -7,69 +7,56 @@
 </p>
 
 <p align="center">
-  A local Codex-compatible bridge that lets Codex use DeepSeek through a desktop manager.
+  Run DeepSeek V4 in Codex with 1M context, Codex tool compatibility, and built-in Web Search.
 </p>
 
-CodeSeeX exposes a local OpenAI-compatible Responses API for Codex, forwards model requests to DeepSeek, and provides a desktop UI for configuration, adapter catalog generation, logs, usage, and tool visibility.
+<p align="center">
+  Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, and search-provider terms.
+</p>
 
-CodeSeeX is an unofficial, unaffiliated learning and research tool. It is not endorsed by OpenAI, Codex, or DeepSeek. Use it with your own API credentials and follow the applicable Codex, OpenAI, DeepSeek, and search-provider terms.
+<!-- Screenshot placeholder:
+![CodeSeeX dashboard](docs/img/dashboard.png)
+-->
 
-## Preview
-
-Recommended screenshots to capture for the project page:
-
-- Dashboard: CodeSeeX service status, balance card, and recent logs.
-- Proxy settings: listen port, billing fields, thinking display, and model catalog helper.
-- Codex TOML setup: `base_url` and `model_catalog_json` filled in.
-- Codex model selector: `deepseek-v4-flash` and `deepseek-v4-pro` visible.
-- Conversation demo: DeepSeek reasoning/tool display and final answer working in Codex.
-
-## Why CodeSeeX
-
-- Use DeepSeek from Codex through a local Responses API bridge.
-- Keep Codex and CodeSeeX independent: start CodeSeeX only when you want the local proxy.
-- Generate a DeepSeek V4 adapter catalog so Codex can understand the model metadata, context window, and tool behavior.
-- View user-level logs, request status, usage estimates, and tool activity in a local desktop UI.
-- Extend tools through `~/.codeseex/extension/tools/<tool>/` without changing built-in source files.
+CodeSeeX gives Codex a local Responses API endpoint, forwards supported requests to DeepSeek, preserves the Codex tool workflow, and provides a desktop manager for setup, logs, usage, tools, and adapter configuration.
 
 ```text
-Codex  ->  CodeSeeX local API  ->  DeepSeek API
-              ^
-              |
-        desktop manager
+Codex Desktop  ->  CodeSeeX local API  ->  DeepSeek API
+                       ^
+                       |
+                 desktop manager
 ```
 
-## Current Release
+## What You Get
 
-Windows installer and portable builds are available from the [GitHub Releases page](https://github.com/TasteSteak/CodeSeeX/releases):
-
-- `CodeSeeX Setup 0.3.0.exe`: Windows installer.
-- `CodeSeeX 0.3.0.exe`: Windows portable build.
-
-macOS and Linux build scripts are included, but release artifacts should be treated as pending until they are verified on real devices.
+- DeepSeek V4 with 1M context: expose `deepseek-v4-pro` and `deepseek-v4-flash` to Codex with million-token catalog metadata.
+- Codex tool compatibility: keep Codex workflows such as Apply Patch, MCP, Skills, and Plugins available through the bridge.
+- Built-in tool layer: use CodeSeeX Web Search, workspace search, file reading, and patch support out of the box.
+- Generated setup: copy a ready-to-use `config.toml` from the CodeSeeX proxy settings page.
+- Local visibility: see service state, balance, usage estimates, user-level logs, and tool activity from the desktop UI.
 
 ## Quick Start
 
-1. Install or start CodeSeeX.
-2. Open the CodeSeeX manager UI.
-3. Make sure the local service is running on the configured port. The default is `8787`.
-4. Open `Settings -> Proxy` and confirm the catalog status is ready.
-5. Copy the generated `config.toml` snippet shown by CodeSeeX into the Codex configuration you use for DeepSeek.
-6. Restart CodeSeeX after port changes, then start Codex Desktop with that DeepSeek TOML.
-7. In Codex, select `deepseek-v4-pro` or `deepseek-v4-flash` and start a new conversation.
+1. Download the latest build for your platform from [GitHub Releases](https://github.com/TasteSteak/CodeSeeX/releases).
+2. Start CodeSeeX and open the desktop manager.
+3. Go to `Settings -> Proxy`.
+4. Confirm the local service is running. The default listen port is `8787`.
+5. Copy the generated `config.toml` shown by CodeSeeX into the Codex configuration you use for DeepSeek.
+6. Restart CodeSeeX only if you changed the listen port, then start or restart Codex Desktop.
+7. In Codex, choose `deepseek-v4-pro` or `deepseek-v4-flash` and start a new conversation.
 
-CodeSeeX reads API credentials from the user's Codex auth file. It does not store DeepSeek API keys in `proxy.env`.
+Release artifacts may vary by version. Build scripts are included for Windows, macOS, and Linux, and platform builds should be verified on real devices before release.
 
-## Codex TOML Example
+## Codex config.toml
 
-Copy the TOML shown inside CodeSeeX whenever possible, because the catalog path and port are machine-specific.
+Prefer copying the TOML generated inside CodeSeeX, because the local port and catalog path are machine-specific.
 
 ```toml
 model_provider = "custom"
 model = "deepseek-v4-pro"
 disable_response_storage = true
 model_reasoning_effort = "xhigh"
-model_catalog_json = 'C:/Users/you/.codeseex/model-catalog.json'
+model_catalog_json = '~/.codeseex/model-catalog.json'
 
 [model_providers.custom]
 name = "DeepSeek"
@@ -84,166 +71,74 @@ To use the faster model, change:
 model = "deepseek-v4-flash"
 ```
 
-If you change the CodeSeeX listen port, update `base_url` to the same port and restart CodeSeeX.
+CodeSeeX reads API credentials from the user's Codex auth configuration. It does not store DeepSeek API keys in `proxy.env`.
 
-## Main Features
+## Features
 
-- Local Codex-compatible `/v1/responses` bridge.
-- DeepSeek V4 model mapping for `deepseek-v4-flash` and `deepseek-v4-pro`.
-- Adapter catalog generation at `~/.codeseex/model-catalog.json`.
-- Streaming output with reasoning display control.
-- Usage estimate and balance display.
-- User-level logs with daily log files and retention options.
-- Built-in tool bridge for `apply_patch`, `web_search`, `workspace_search`, and `read_file_range`.
-- Community tool discovery from `~/.codeseex/extension/tools/<tool>/` by default.
-- Single configurable local listen port through `PROXY_PORT`.
+- Codex-compatible local API for `/v1/responses` and related model calls.
+- DeepSeek V4 adapter catalog for `deepseek-v4-flash` and `deepseek-v4-pro` with `1M` context metadata.
+- Compatibility with Codex built-in tool flows, including Apply Patch, MCP, Skills, and Plugins.
+- Single configurable local port for the desktop manager, `/api/*`, and `/v1/*`.
+- Proxy settings for catalog mode, upstream model override, billing rates, and generated `config.toml`.
+- Streaming answer display with reasoning visibility controls and grouped proxy tool summaries.
+- User-level logs, daily log retention, balance checks, usage estimates, tray shortcuts, auto-start, and silent update indicators.
+- Built-in tools for Web Search, patching, workspace search, and file reading, plus optional community tools.
 
-## Runtime Files
+## Configuration & Tools
 
-Most settings can be changed in the desktop manager. Runtime data is stored in the user's `~/.codeseex` directory by default so installed apps can write safely across Windows, macOS, and Linux. Set `PROXY_DATA_DIR` to choose another data directory, or `PORTABLE_EXECUTABLE_DIR` for an explicit portable layout.
+Runtime data is stored in the user's `~/.codeseex` directory by default so installed apps can write safely across Windows, macOS, and Linux.
 
-Runtime folders include:
+Important runtime paths:
 
-- `lang/`: optional language overrides.
-- `logs/`: daily user-level logs such as `logs-20260519.jsonl`.
-- `debug/`: diagnostic files when debug mode is enabled.
-- `extension/tools/`: community tool packages.
-- `proxy.env`: non-secret local runtime settings.
+- `~/.codeseex/model-catalog.json`: adapter catalog referenced by Codex through `model_catalog_json`.
+- `~/.codeseex/logs/`: daily user-level logs such as `logs-20260521.jsonl`.
+- `~/.codeseex/extension/tools/<tool>/`: optional community tool packages.
+- `~/.codeseex/proxy.env`: non-secret local runtime settings.
 
-Example non-secret `proxy.env` values:
-
-```env
-PROXY_HOST=127.0.0.1
-PROXY_PORT=8787
-DEEPSEEK_THINKING=auto
-SHOW_THINKING=true
-```
-
-## Adapter Catalog
-
-Codex needs model metadata to understand the DeepSeek V4 models. CodeSeeX maintains this file:
-
-```text
-~/.codeseex/model-catalog.json
-```
-
-CodeSeeX first tries to derive the adapter catalog from the user's installed Codex catalog. If that is unavailable, release builds use a packaged compressed seed so new users can still start Codex with the DeepSeek V4 models. A minimal emergency fallback is kept only to avoid a missing catalog file.
-
-GPT/OpenAI TOML files do not need `model_catalog_json` and are not affected by CodeSeeX.
-
-## Community Tools
-
-Built-in tools live under `src/tools/<tool>/`. Community tools are discovered from:
-
-```text
-~/.codeseex/extension/tools/<tool>/
-```
-
-Each tool should provide a `manifest.json`. Fixed icon files can be placed under the tool folder, such as `assets/icon.svg` or `assets/icon.png`.
-
-Community tool code execution is intentionally controlled by configuration. Enabling community tool code means running local code from that tool package, so only use tools you trust.
-
-See `docs/tool-authoring.md` for tool authoring details.
+Community tools are disabled unless enabled in configuration. Enabling community tool code means running local code from that tool package, so only use tools you trust. See [docs/tool-authoring.md](docs/tool-authoring.md) for the tool package format.
 
 ## Troubleshooting
 
 ### Balance Query Fails
 
-- Make sure Codex auth is already configured for the same user account.
-- Confirm CodeSeeX can reach the DeepSeek API endpoint.
-- If the error mentions TLS certificate hostname mismatch, DNS/proxy software may be redirecting `api.deepseek.com`.
-- If a local proxy is configured, make sure the proxy process is actually listening.
+- Make sure Codex auth is configured for the same user account.
+- Confirm the machine can reach the DeepSeek API endpoint.
+- If a local proxy is configured, make sure that proxy process is actually running.
 
 ### Codex Cannot See DeepSeek Models
 
 - Confirm `model_catalog_json` points to an existing `~/.codeseex/model-catalog.json`.
-- Copy the TOML snippet from CodeSeeX instead of typing the path manually.
+- Copy the generated TOML from CodeSeeX instead of typing the path manually.
 - Restart Codex after changing TOML.
-- If Codex Desktop still shows an empty model selector, try starting a new conversation or restarting Codex Desktop.
+- GPT/OpenAI TOML files do not need `model_catalog_json` and are not affected by CodeSeeX.
 
 ### Conversation Fails With `fetch failed`
 
 - Check the CodeSeeX logs page for the upstream error.
+- Confirm Codex `base_url` points to CodeSeeX, for example `http://127.0.0.1:8787/v1`.
 - Test whether the machine can access `https://api.deepseek.com`.
-- Confirm the local `base_url` in Codex points to CodeSeeX, for example `http://127.0.0.1:8787/v1`.
-- Make sure no other process is occupying the configured CodeSeeX port.
-
-### Port Already In Use
-
-- Change the CodeSeeX listen port in the proxy settings page.
-- Restart CodeSeeX after changing the port.
-- Update Codex `base_url` to the same port.
+- Make sure no other process is using the configured CodeSeeX port.
 
 ## Development
 
-Install dependencies:
-
 ```sh
 npm install
-```
-
-Start the desktop app:
-
-```sh
 npm start
-```
-
-Start only the manager/API service:
-
-```sh
-npm run start:manager
-```
-
-Start the standalone proxy entry for focused debugging:
-
-```sh
-npm run start:proxy
-```
-
-Run syntax checks:
-
-```sh
 npm run check
-```
-
-Build Windows release artifacts:
-
-```sh
 npm run dist:win
 ```
 
-Build scripts for macOS/Linux are available, but should be run on the target platform:
+Additional build scripts are available for target-platform testing:
 
 ```sh
 npm run dist:mac
 npm run dist:linux
 ```
 
-## Project Layout
-
-```text
-codeseex/
-|-- src/
-|   |-- electron/        # Electron desktop shell
-|   |-- manager/         # Manager API and static UI
-|   |-- proxy/           # Responses API proxy
-|   |-- shared/          # Shared config and utilities
-|   `-- tools/           # Built-in tool packages
-|-- docs/                # Documentation
-|-- manager.js           # Manager CLI entry
-|-- proxy.js             # Proxy CLI entry
-|-- proxy.env.example    # Local config template
-`-- package.json
-```
-
-Runtime files such as `proxy.env`, `runtime.json`, `proxy-state.json`, `logs/`, `debug/`, `dist/`, and `node_modules/` are ignored by Git. By default, app runtime data is written to `~/.codeseex`; development scripts can override this with `PROXY_DATA_DIR`.
-
-## Privacy and Third-Party Services
+## Privacy & License
 
 CodeSeeX is a local proxy, but model requests are forwarded to the configured DeepSeek API endpoint. Do not send code, secrets, personal data, or third-party material unless you have permission to process it with that service.
 
-The built-in `web_search` tool may request pages or search-result pages from third-party websites. Search engines and websites may apply their own terms, rate limits, and anti-abuse rules.
+The built-in `web_search` tool may request search-result pages or regular web pages from third-party websites. Those services may apply their own terms, rate limits, and anti-abuse rules.
 
-## License
-
-AGPLv3. See `LICENSE`. If you modify and distribute CodeSeeX, or provide a modified version as a network service, you must make the corresponding source code available under the same license.
+CodeSeeX is licensed under AGPL-3.0-only. See [LICENSE](LICENSE). If you modify and distribute CodeSeeX, or provide a modified version as a network service, you must make the corresponding source code available under the same license.
