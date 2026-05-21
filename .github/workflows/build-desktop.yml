@@ -1,0 +1,93 @@
+name: Build desktop artifacts
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CI: true
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64
+            runner: ubuntu-latest
+            npm_script: dist:linux
+            artifact_name: CodeSeeX-linux-x64
+            artifact_paths: |
+              dist/*.AppImage
+              dist/*.deb
+              dist/*.tar.gz
+              dist/*.yml
+              dist/*.blockmap
+          - label: macOS arm64
+            runner: macos-14
+            npm_script: dist:mac
+            artifact_name: CodeSeeX-macos-arm64
+            artifact_paths: |
+              dist/*.dmg
+              dist/*-mac.zip
+              dist/*.yml
+              dist/*.blockmap
+          - label: Windows x64
+            runner: windows-latest
+            npm_script: dist:win
+            artifact_name: CodeSeeX-windows-x64
+            artifact_paths: |
+              dist/*.exe
+              dist/*.yml
+              dist/*.blockmap
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Build ${{ matrix.label }} package
+        run: npm run ${{ matrix.npm_script }} -- --publish never
+
+      - name: List generated files
+        shell: bash
+        run: find dist -maxdepth 2 -type f -print | sort
+
+      - name: Upload ${{ matrix.label }} artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
+          retention-days: 14
