@@ -135,6 +135,8 @@ npm run dist:mac
 npm run dist:linux
 ```
 
+GitHub Actions can build the desktop artifacts automatically for Linux, macOS, and Windows. See [Desktop Build Action](docs/build-actions.md) for the workflow setup and testing steps.
+
 ## Privacy & License
 
 CodeSeeX is a local proxy, but model requests are forwarded to the configured DeepSeek API endpoint. Do not send code, secrets, personal data, or third-party material unless you have permission to process it with that service.
