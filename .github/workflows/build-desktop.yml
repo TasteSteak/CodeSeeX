@@ -78,7 +78,7 @@ jobs:
         run: npm run check
 
       - name: Build ${{ matrix.label }} package
-        run: npm run ${{ matrix.npm_script }}
+        run: npm run ${{ matrix.npm_script }} -- --publish never
 
       - name: List generated files
         shell: bash

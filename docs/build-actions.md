@@ -28,11 +28,11 @@ GitHub's hosted runner documentation currently lists `macos-14` as an arm64 macO
 2. `actions/setup-node@v6` installs Node.js 22 and enables npm cache reuse based on `package-lock.json`.
 3. `npm ci` installs dependencies exactly from the lockfile for reproducible builds.
 4. `npm run check` runs the repository's syntax checks before packaging.
-5. `npm run dist:linux`, `npm run dist:mac`, or `npm run dist:win` runs according to the matrix entry.
+5. `npm run dist:linux -- --publish never`, `npm run dist:mac -- --publish never`, or `npm run dist:win -- --publish never` runs according to the matrix entry. The explicit publish mode keeps CI focused on producing downloadable artifacts instead of trying to publish a GitHub Release.
 6. `find dist -maxdepth 2 -type f -print | sort` prints the generated files into the workflow log for quick inspection.
 7. `actions/upload-artifact@v6` uploads the generated packages from `dist` as workflow artifacts.
 
-The workflow sets `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder does not try to discover local signing identities on CI runners. The produced artifacts are suitable for CI validation and manual testing, but production macOS distribution still needs a Developer ID certificate and notarization setup.
+The workflow sets `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder does not try to discover local signing identities on CI runners. It also passes `--publish never` to electron-builder because GitHub Actions sets CI environment variables that otherwise make electron-builder try to publish with `GH_TOKEN`. The produced artifacts are suitable for CI validation and manual testing, but production macOS distribution still needs a Developer ID certificate and notarization setup.
 
 ## Artifact Names
 

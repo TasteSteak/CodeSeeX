@@ -65,6 +65,7 @@
     "linux": {
       "icon": "src/manager/static/assets/icons/app.png",
       "category": "Development",
+      "maintainer": "TasteSteak <noreply@github.com>",
       "target": [
         "AppImage",
         "deb",
