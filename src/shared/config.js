@@ -1,3 +1,4 @@
+const os = require("node:os");
 const path = require("node:path");
 const { eventLogPath } = require("./event-log");
 
@@ -53,15 +54,33 @@ function loadProxyConfig(env = process.env) {
     thinkingMode: String(env.DEEPSEEK_THINKING || "auto"),
     visibleThinkingEnabled: parseBool(env.SHOW_THINKING, true),
     thinkingTitle: env.THINKING_TITLE || "DeepSeek Thinking",
+    catalogMode: normalizeCatalogMode(env.CATALOG_MODE),
+    upstreamModelOverride: normalizeUpstreamModelOverride(env.UPSTREAM_MODEL_OVERRIDE),
+    autoStart: parseBool(env.AUTO_START, false),
     billingCachedInputCny: numberOrDefault(env.BILLING_CACHED_INPUT_CNY, 0.025),
     billingCacheMissInputCny: numberOrDefault(env.BILLING_CACHE_MISS_INPUT_CNY, 3),
     billingOutputCny: numberOrDefault(env.BILLING_OUTPUT_CNY, 6),
     availableModels: splitList(env.AVAILABLE_MODELS || "deepseek-v4-flash,deepseek-v4-pro"),
     communityToolCodeEnabled: parseBool(env.COMMUNITY_TOOL_CODE_ENABLED, false),
+    ENABLED_TOOLS: env.ENABLED_TOOLS || "",
     workspaceToolFileAccess: String(env.WORKSPACE_TOOL_FILE_ACCESS || "auto").trim().toLowerCase() || "auto",
     workspaceRoots: splitPathList(env.WORKSPACE_ROOTS),
     parentPid: Number(env.PROXY_PARENT_PID || "0") || null,
   };
+}
+
+function normalizeCatalogMode(value) {
+  const normalized = String(value || "default").trim().toLowerCase();
+  if (normalized === "auto" || normalized === "dynamic") return "auto";
+  if (normalized === "builtin") return "builtin";
+  return "default";
+}
+
+function normalizeUpstreamModelOverride(value) {
+  const normalized = String(value || "default").trim().toLowerCase();
+  if (normalized === "flash" || normalized === "deepseek-v4-flash") return "deepseek-v4-flash";
+  if (normalized === "pro" || normalized === "deepseek-v4-pro") return "deepseek-v4-pro";
+  return "default";
 }
 
 function normalizeRetentionDays(value) {
@@ -86,7 +105,9 @@ function resolveRootDir(env = process.env) {
 }
 
 function resolveDataDir(env = process.env, rootDir = resolveRootDir(env)) {
-  return path.resolve(env.PROXY_DATA_DIR || rootDir);
+  if (env.PROXY_DATA_DIR) return path.resolve(env.PROXY_DATA_DIR);
+  if (env.PORTABLE_EXECUTABLE_DIR) return path.resolve(env.PORTABLE_EXECUTABLE_DIR);
+  return path.join(os.homedir() || rootDir, ".codeseex");
 }
 
 function defaultEventLogFile(rootDir, dataDir) {
@@ -99,6 +120,8 @@ module.exports = {
   defaultEventLogFile,
   loadProxyConfig,
   normalizeDeepSeekBaseUrl,
+  normalizeCatalogMode,
+  normalizeUpstreamModelOverride,
   parseBool,
   resolveDataDir,
   resolveRootDir,

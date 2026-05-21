@@ -200,18 +200,56 @@ function thinkingDisplayMessage(reasoning, config = {}) {
   });
 }
 
-function toolUsageMessage(item) {
-  const name = toolDisplayName(item);
-  if (!name) return null;
-  return Object.assign(messageItem("\u5df2\u4f7f\u7528\u5de5\u5177 `" + name + "`", "commentary"), {
+function toolUsageMessage(items) {
+  const toolItems = (Array.isArray(items) ? items : [items]).filter(Boolean);
+  const names = toolItems.map(toolDisplayName).filter(Boolean);
+  if (names.length === 0) return null;
+  const text = names.length === 1
+    ? "\u5df2\u4f7f\u7528\u5de5\u5177 `" + names[0] + "`"
+    : toolUsageBatchText(names);
+  return Object.assign(messageItem(text, "commentary"), {
     codeseex_display_only: "tool_usage",
-    metadata: { codeseex_display_only: true, kind: "tool_usage" },
+    metadata: { codeseex_display_only: true, kind: "tool_usage", tools: names },
   });
+}
+
+function toolUsageBatchText(names) {
+  const uniqueNames = [];
+  for (const name of names) {
+    if (!uniqueNames.includes(name)) uniqueNames.push(name);
+  }
+  const visibleNames = uniqueNames.slice(0, 3);
+  const hiddenCount = Math.max(0, uniqueNames.length - visibleNames.length);
+  const suffix = hiddenCount > 0 ? " +" + hiddenCount : "";
+  return "\u5df2\u4f7f\u7528 " + names.length + " \u4e2a\u5de5\u5177\n" + visibleNames.map((name) => "`" + name + "`").join(" \u00b7 ") + suffix;
 }
 
 function shouldEmitToolUsageMessage(item) {
   if (!item || typeof item !== "object") return false;
-  return item.type === "proxy_tool_call" || item.type === "web_search_call";
+  return item.type === "proxy_tool_call";
+}
+
+function mergeToolUsageItems(items) {
+  const output = [];
+  const source = Array.isArray(items) ? items : [];
+  for (let index = 0; index < source.length; index += 1) {
+    const item = source[index];
+    if (!shouldEmitToolUsageMessage(item)) {
+      output.push(item);
+      continue;
+    }
+
+    const group = [item];
+    while (index + 1 < source.length && shouldEmitToolUsageMessage(source[index + 1])) {
+      index += 1;
+      group.push(source[index]);
+    }
+
+    const usage = toolUsageMessage(group);
+    if (usage) output.push(usage);
+    output.push(...group);
+  }
+  return output;
 }
 
 function toolDisplayName(item) {
@@ -228,15 +266,13 @@ function createResponseEmitter(res, seq, responseId, runtime) {
   const lifecycle = createToolLifecycleTracer(runtime, responseId);
 
   async function emitItems(items) {
-    for (const item of Array.isArray(items) ? items : []) {
+    for (const item of mergeToolUsageItems(items)) {
       await emitItem(item);
     }
   }
 
   async function emitItem(item) {
     if (!item || typeof item !== "object") return;
-
-    if (shouldEmitToolUsageMessage(item)) await emitToolUsageItem(item);
 
     const currentIndex = outputIndex;
     outputIndex += 1;
@@ -359,15 +395,6 @@ function createResponseEmitter(res, seq, responseId, runtime) {
       item,
       sequence_number: seq.next(),
     });
-  }
-
-  async function emitToolUsageItem(toolItem) {
-    const item = toolUsageMessage(toolItem);
-    if (!item) return;
-    const currentIndex = outputIndex;
-    outputIndex += 1;
-    await emitMessageItem(item, currentIndex);
-    output.push(item);
   }
 
   async function emitFunctionCallItem(item, currentIndex) {

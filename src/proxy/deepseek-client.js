@@ -1,6 +1,6 @@
 const { readCodexAuthApiKey, rememberAuthorizationHeader } = require("../shared/codex-auth");
 const { httpError, makeId, parseJsonResponse } = require("../shared/http");
-const { resolveDispatcher } = require("./web-search-executor");
+const { resolveDispatcher } = require("./network-dispatcher");
 
 function buildDeepSeekPayload(requestBody, messages, toolContext, config, overrides = {}) {
   const payload = {

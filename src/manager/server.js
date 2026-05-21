@@ -1,24 +1,23 @@
 const http = require("node:http");
 const { execFile } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const { readCodexAuthApiKey } = require("../shared/codex-auth");
-const { DATA_DIR, ROOT_DIR, defaultEventLogFile, loadProxyConfig } = require("../shared/config");
+const { DATA_DIR, ROOT_DIR, loadProxyConfig, normalizeCatalogMode, normalizeUpstreamModelOverride } = require("../shared/config");
 const { addCorsHeaders, enforceLocalAccess, handleHttpError, httpError, parseJsonResponse, readJsonBody, sendJson } = require("../shared/http");
-const { appendJsonl, readJson } = require("../shared/json-store");
+const { readJson } = require("../shared/json-store");
 const { appendEventLog, eventLogDir, eventLogPath: datedEventLogPath, readEventLogTail } = require("../shared/event-log");
 const { buildCodeSeeXCatalog, codeSeeXUserDir, codexAdapterCatalogPath, codexCliInvocation, TARGET_MODELS, validateCodeSeeXCatalog } = require("../codex/model-catalog");
 const { createProxyContext, handleRequest: handleProxyRequest, markProxyRunning, markProxyStopped } = require("../proxy/server");
 const { PRODUCT_DESCRIPTION, PRODUCT_NAME } = require("../shared/product");
 const { repairMojibakeText } = require("../shared/text-encoding");
-const { listPublicTools, sanitizeToolConfig, toolDefaultConfig } = require("../shared/tool-registry");
+const { listPublicTools, normalizeToolRuntimeConfig, sanitizeToolConfig, toolDefaultConfig } = require("../shared/tool-registry");
 const { toolAssetFilePath } = require("../tools");
-const { resolveDispatcher } = require("../proxy/web-search-executor");
 const { mergeEnv, readEnvFile, writeEnvFile } = require("./env-file");
-const { DEFAULT_LANGUAGE_ID, LANG_DIR, languageFilePath, listLanguages } = require("./languages");
+const { DEFAULT_LANGUAGE_ID, LANG_DIR, SYSTEM_LANGUAGE_ID, languageFilePath, listLanguages } = require("./languages");
 const { contentTypeFor, readIndexPage, staticFilePath } = require("./page");
-const { cleanupStaleProxyProcesses } = require("./process-cleanup");
 
 const HOST = "127.0.0.1";
 const PORT = 8787;
@@ -29,11 +28,18 @@ const CODEX_ADAPTER_STATUS_IDLE = "idle";
 const CODEX_ADAPTER_STATUS_READY = "ready";
 const CODEX_ADAPTER_STATUS_GENERATING = "generating";
 const CODEX_ADAPTER_STATUS_ERROR = "error";
+const UPDATE_CHECK_TTL_MS = 30 * 60 * 1000;
+const UPDATE_CHECK_TIMEOUT_MS = 8000;
+const BACKGROUND_MAINTENANCE_DELAY_MS = 3000;
+const DEFAULT_CATALOG_MODE = "default";
+const DEFAULT_UPSTREAM_MODEL_OVERRIDE = "default";
+const DEFAULT_AUTO_START = "false";
 const LICENSE_DISPLAY_NAMES = {
   "GPL-3.0-only": "GPLv3",
   "AGPL-3.0-only": "AGPLv3",
 };
 let cachedPackageJson = null;
+let cachedUpdateCheck = null;
 const catalogMaintenanceByDataDir = new Map();
 
 function main(options = {}) {
@@ -46,17 +52,15 @@ function main(options = {}) {
 function startManager(options = {}) {
   const rootDir = options.rootDir || ROOT_DIR;
   const dataDir = options.dataDir || DATA_DIR;
-  const initialEnv = loadProxyEnv(dataDir, rootDir);
-  const host = options.host || initialEnv.PROXY_HOST || process.env.PROXY_HOST || HOST;
-  const requestedPort = options.port !== undefined ? options.port : initialEnv.PROXY_PORT;
+  const bootstrapEnv = loadBootstrapEnv(dataDir, rootDir);
+  const host = options.host || bootstrapEnv.PROXY_HOST || process.env.PROXY_HOST || HOST;
+  const requestedPort = options.port !== undefined ? options.port : bootstrapEnv.PROXY_PORT;
   const port = clampPort(requestedPort, PORT);
   const exitOnClose = options.exitOnClose !== false;
 
   ensureRuntimeDirectories(dataDir);
   ensureProxyEnv(dataDir, rootDir);
-  ensureCodexAdapterBootstrapCatalog(dataDir, rootDir);
-  const proxyEnv = loadProxyEnv(dataDir, rootDir);
-  cleanupStaleSinglePortProcesses({ rootDir, dataDir, port });
+  const proxyEnv = loadLightProxyEnv(dataDir, rootDir);
   notifyConfigChanged({ onConfigChanged: options.onConfigChanged }, publicConfig(proxyEnv));
   const embeddedProxy = options.embeddedProxy || createEmbeddedProxy(rootDir, dataDir, proxyEnv);
   const controller = options.controller || embeddedProxy;
@@ -82,13 +86,19 @@ function startManager(options = {}) {
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : port;
       const url = "http://" + host + ":" + actualPort;
+      scheduleStartupBackgroundTasks({ dataDir, rootDir });
       embeddedProxy.start({ host, port: actualPort });
-      scheduleCodexAdapterMaintenance(dataDir, rootDir);
       appendManagerEvent(dataDir, rootDir, "manager_started", "success", "Manager service started.", {
         url,
       });
       console.log("[manager] UI available at " + url);
-      resolve({ close: () => closeManager(exitOnClose), controller, dataDir, server, url });
+      resolve({
+        close: () => closeManager(exitOnClose),
+        controller,
+        dataDir,
+        server,
+        url,
+      });
     });
   });
 
@@ -153,36 +163,83 @@ function isProxyRoute(req) {
     || pathname.startsWith("/responses/");
 }
 
+function scheduleStartupBackgroundTasks(options = {}) {
+  const { dataDir, rootDir } = options;
+  const bootstrap = setImmediate(() => {
+    ensureCodexAdapterBootstrapCatalog(dataDir, rootDir);
+  });
+  if (bootstrap && typeof bootstrap.unref === "function") bootstrap.unref();
+
+  const timer = setTimeout(() => {
+    scheduleCodexAdapterMaintenance(dataDir, rootDir);
+  }, BACKGROUND_MAINTENANCE_DELAY_MS);
+  if (timer && typeof timer.unref === "function") timer.unref();
+}
+
+function embeddedStatusRuntime(runtime, state = {}) {
+  const endpoint = state.endpoint || {};
+  const baseRuntime = runtime && typeof runtime === "object" ? Object.assign({}, runtime) : {};
+  if (state.running && baseRuntime.status === "running") return baseRuntime;
+  if (state.starting) {
+    return Object.assign(baseRuntime, {
+      status: "starting",
+      pid: process.pid,
+      host: baseRuntime.host || endpoint.host || "127.0.0.1",
+      port: baseRuntime.port || endpoint.port || null,
+      base_url: baseRuntime.base_url || (endpoint.host && endpoint.port ? "http://" + endpoint.host + ":" + endpoint.port + "/v1" : null),
+    });
+  }
+  if (baseRuntime.status === "running") {
+    return Object.assign(baseRuntime, {
+      status: "stopped",
+      pid: null,
+      active_requests: 0,
+    });
+  }
+  return Object.keys(baseRuntime).length > 0 ? baseRuntime : null;
+}
+
 function createEmbeddedProxy(rootDir, dataDir, env) {
-  let proxyContext = createProxyContext(loadProxyConfigForManager(rootDir, dataDir, env));
-  let listenEndpoint = { host: proxyContext.config.host, port: proxyContext.config.port };
+  let proxyContext = null;
+  let initialEnv = Object.assign({}, env || {});
+  let listenEndpoint = {
+    host: initialEnv.PROXY_HOST || "127.0.0.1",
+    port: clampPort(initialEnv.PROXY_PORT, PORT),
+  };
   let running = false;
+  let starting = false;
   let lastError = null;
   const stdout = [];
   const stderr = [];
 
   function start(nextEnv = {}) {
     if (running) return status();
-    if (nextEnv && Object.keys(nextEnv).length > 0 && !nextEnv.host && !nextEnv.port) {
-      proxyContext = createProxyContext(loadProxyConfigForManager(rootDir, dataDir, nextEnv));
+    if (starting) return status();
+    starting = true;
+    mergeStartOptions(nextEnv);
+    try {
+      refreshProxyEnvForStart();
+      ensureProxyContext();
+      const host = listenEndpoint.host || proxyContext.config.host;
+      const port = listenEndpoint.port || proxyContext.config.port;
+      markProxyRunning(proxyContext, { host, port, message: "Embedded proxy service started." });
+      running = true;
+      lastError = null;
+      pushControllerLine(stdout, "[proxy] Embedded proxy service started at " + proxyContext.runtime.base_url);
+    } catch (error) {
+      lastError = error && error.message ? error.message : String(error);
+      markEmbeddedProxyError(proxyContext, lastError);
+      pushControllerLine(stderr, "[proxy] Failed to start embedded proxy: " + lastError);
+    } finally {
+      starting = false;
     }
-    if (nextEnv.host || nextEnv.port) {
-      listenEndpoint = {
-        host: nextEnv.host || listenEndpoint.host || proxyContext.config.host,
-        port: nextEnv.port || listenEndpoint.port || proxyContext.config.port,
-      };
-    }
-    const host = listenEndpoint.host || proxyContext.config.host;
-    const port = listenEndpoint.port || proxyContext.config.port;
-    markProxyRunning(proxyContext, { host, port, message: "Embedded proxy service started." });
-    running = true;
-    lastError = null;
-    pushControllerLine(stdout, "[proxy] Embedded proxy service started at " + proxyContext.runtime.base_url);
     return status();
   }
 
   function stop() {
-    if (!running) return status();
+    if (!running && !starting) return status();
+    starting = false;
+    if (!proxyContext) return status();
     markProxyStopped(proxyContext, { message: "Embedded proxy service stopped." });
     running = false;
     pushControllerLine(stdout, "[proxy] Embedded proxy service stopped");
@@ -192,31 +249,40 @@ function createEmbeddedProxy(rootDir, dataDir, env) {
   function restart(nextEnv = {}) {
     stop();
     if (nextEnv && Object.keys(nextEnv).length > 0) {
-      proxyContext = createProxyContext(loadProxyConfigForManager(rootDir, dataDir, nextEnv));
+      initialEnv = Object.assign({}, initialEnv, nextEnv);
+      proxyContext = null;
     }
     return start({});
   }
 
   function updateConfig(nextEnv = {}) {
-    const nextConfig = loadProxyConfigForManager(rootDir, dataDir, nextEnv);
-    Object.assign(proxyContext.config, nextConfig);
+    initialEnv = Object.assign({}, initialEnv, nextEnv);
+    if (proxyContext) {
+      const nextConfig = loadProxyConfigForManager(rootDir, dataDir, initialEnv);
+      Object.assign(proxyContext.config, nextConfig);
+    }
     return status();
   }
 
   function status() {
-    const runtime = proxyContext.runtime || readJson(path.join(dataDir, "runtime.json"), null);
+    const runtime = proxyContext ? proxyContext.runtime : readJson(path.join(dataDir, "runtime.json"), null);
+    const runningRuntime = runtime && runtime.status === "running";
+    const statusRuntime = embeddedStatusRuntime(runtime, { running, starting, endpoint: listenEndpoint });
     return {
       mode: "embedded",
-      running: Boolean(running && runtime && runtime.status === "running"),
-      pid: running ? process.pid : null,
+      running: Boolean(running && runningRuntime),
+      pid: running || starting ? process.pid : null,
       last_error: lastError,
       stdout: stdout.slice(-80),
       stderr: stderr.slice(-80),
-      runtime,
+      runtime: statusRuntime,
     };
   }
 
   function handleRequest(req, res) {
+    if (!running) {
+      start({});
+    }
     if (!running) {
       sendJson(res, 503, { error: { message: "Proxy service is stopped.", type: "server_error", code: "proxy_stopped" } });
       return;
@@ -224,7 +290,42 @@ function createEmbeddedProxy(rootDir, dataDir, env) {
     return handleProxyRequest(req, res, proxyContext);
   }
 
+  function mergeStartOptions(nextEnv = {}) {
+    if (nextEnv && Object.keys(nextEnv).length > 0 && !nextEnv.host && !nextEnv.port) {
+      initialEnv = Object.assign({}, initialEnv, nextEnv);
+      proxyContext = null;
+    }
+    if (nextEnv && (nextEnv.host || nextEnv.port)) {
+      listenEndpoint = {
+        host: nextEnv.host || listenEndpoint.host,
+        port: nextEnv.port || listenEndpoint.port,
+      };
+    }
+  }
+
+  function ensureProxyContext() {
+    if (!proxyContext) {
+      proxyContext = createProxyContext(loadProxyConfigForManager(rootDir, dataDir, initialEnv));
+    }
+    return proxyContext;
+  }
+
+  function refreshProxyEnvForStart() {
+    initialEnv = Object.assign({}, initialEnv, loadLightProxyEnv(dataDir, rootDir));
+    proxyContext = null;
+  }
+
   return { dataDir, rootDir, handleRequest, restart, start, status, stop, updateConfig };
+}
+
+function markEmbeddedProxyError(proxyContext, message) {
+  try {
+    if (!proxyContext || !proxyContext.runtime || !proxyContext.config) return;
+    proxyContext.runtime.status = "error";
+    proxyContext.runtime.stopped_at = new Date().toISOString();
+    proxyContext.runtime.error = { message: message || "Embedded proxy failed to start.", code: "embedded_proxy_start_failed" };
+    require("../proxy/runtime").writeRuntime(proxyContext.config, proxyContext.runtime);
+  } catch {}
 }
 
 function loadProxyConfigForManager(rootDir, dataDir, env = {}) {
@@ -236,22 +337,6 @@ function loadProxyConfigForManager(rootDir, dataDir, env = {}) {
     PROXY_DEBUG_DIR: env.PROXY_DEBUG_DIR || path.join(dataDir, "debug"),
     PROXY_PARENT_PID: "0",
   }));
-}
-
-function cleanupStaleSinglePortProcesses({ rootDir, dataDir, port }) {
-  try {
-    if (!port) return;
-    cleanupStaleProxyProcesses({
-      rootDir,
-      dataDir,
-      runtimeFile: path.join(dataDir, "runtime.json"),
-      ports: [port],
-      includeProxy: true,
-      includeManager: true,
-      includeDesktop: false,
-      excludePids: [process.pid],
-    });
-  } catch {}
 }
 
 function pushControllerLine(target, line) {
@@ -317,6 +402,11 @@ async function handleRequest(req, res, context) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/update-check") {
+      sendJson(res, 200, await gatherUpdateCheck(context));
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/start") {
       appendManagerEvent(dataDir, context.rootDir, "manager_start_requested", "info", "User requested proxy start.", null);
       await Promise.resolve(controller.start(loadProxyEnv(dataDir, context.rootDir)));
@@ -346,18 +436,35 @@ async function handleRequest(req, res, context) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/desktop/login-item") {
+      const body = await readJsonBody(req, 4096);
+      const enabled = normalizeBoolString(body && body.enabled);
+      const next = mergeEnv(loadProxyEnv(dataDir, context.rootDir), { AUTO_START: enabled });
+      writeEnvFile(proxyEnvPath(dataDir), next, proxyEnvOptions(dataDir, context.rootDir));
+      notifyConfigChanged(context, publicConfig(next));
+      handleWindowAction("login-item", context, { enabled: enabled === "true" });
+      sendJson(res, 200, { ok: true, enabled: enabled === "true" });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/config") {
-      sendJson(res, 200, publicConfig(loadProxyEnv(dataDir, context.rootDir)));
+      sendJson(res, 200, Object.assign(publicConfig(loadLightProxyEnv(dataDir, context.rootDir)), {
+        config_version: configVersion(dataDir),
+      }));
       return;
     }
 
     if (req.method === "POST" && url.pathname === "/api/config") {
       const body = await readJsonBody(req, 1024 * 1024);
-      const next = mergeEnv(loadProxyEnv(dataDir, context.rootDir), sanitizeConfig(body, context.rootDir, dataDir));
+      const previous = loadProxyEnv(dataDir, context.rootDir);
+      const next = mergeEnv(previous, sanitizeConfig(body, context.rootDir, dataDir));
       writeEnvFile(proxyEnvPath(dataDir), next, proxyEnvOptions(dataDir, context.rootDir));
       appendManagerEvent(dataDir, context.rootDir, "manager_config_saved", "success", "Configuration saved.", null);
       notifyConfigChanged(context, publicConfig(next));
       if (context.embeddedProxy && typeof context.embeddedProxy.updateConfig === "function") context.embeddedProxy.updateConfig(next);
+      if (normalizeCatalogMode(previous.CATALOG_MODE) !== normalizeCatalogMode(next.CATALOG_MODE)) {
+        await generateCodexAdapterCatalog(dataDir, context.rootDir, { force: true });
+      }
       sendJson(res, 200, gatherStatus(controller, dataDir, context.rootDir));
       return;
     }
@@ -391,6 +498,74 @@ function gatherAppInfo(context) {
   };
 }
 
+async function gatherUpdateCheck(context) {
+  const packageJson = readPackageJson(context.rootDir);
+  const currentVersion = normalizeVersion(packageJson.version || "0.0.0");
+  const repositoryUrl = normalizeRepositoryUrl(packageJson.repository);
+  const releasesUrl = repositoryUrl ? repositoryUrl.replace(/\/$/, "") + "/releases" : null;
+  const apiUrl = githubLatestReleaseApiUrl(repositoryUrl);
+  const now = Date.now();
+  if (!apiUrl) {
+    return updateCheckResult(false, currentVersion, "", releasesUrl, "No release API is configured.");
+  }
+  if (cachedUpdateCheck && cachedUpdateCheck.apiUrl === apiUrl && now - cachedUpdateCheck.checkedAtMs < UPDATE_CHECK_TTL_MS) {
+    return cachedUpdateCheck.value;
+  }
+
+  const checkedAt = new Date().toISOString();
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeout = setTimeout(() => controller && controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
+  try {
+    const response = await fetch(apiUrl, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "CodeSeeX/" + currentVersion,
+      },
+      signal: controller ? controller.signal : undefined,
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(body && body.message ? body.message : "Release request failed with HTTP " + response.status + ".");
+    }
+    const latestVersion = normalizeVersion(body && (body.tag_name || body.name) || "");
+    const result = {
+      ok: true,
+      has_update: compareVersions(latestVersion, currentVersion) > 0,
+      latest_version: latestVersion,
+      current_version: currentVersion,
+      url: (body && body.html_url) || releasesUrl || "",
+      checked_at: checkedAt,
+      error: "",
+    };
+    cachedUpdateCheck = { apiUrl, checkedAtMs: now, value: result };
+    return result;
+  } catch (error) {
+    const result = updateCheckResult(false, currentVersion, "", releasesUrl, error && error.message ? error.message : String(error), checkedAt);
+    cachedUpdateCheck = { apiUrl, checkedAtMs: now, value: result };
+    return result;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function updateCheckResult(ok, currentVersion, latestVersion, url, error, checkedAt = new Date().toISOString()) {
+  return {
+    ok,
+    has_update: false,
+    latest_version: latestVersion || "",
+    current_version: currentVersion || "",
+    url: url || "",
+    checked_at: checkedAt,
+    error: error || "",
+  };
+}
+
+function githubLatestReleaseApiUrl(repositoryUrl) {
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/i.exec(String(repositoryUrl || "").replace(/\/$/, ""));
+  if (!match) return "";
+  return "https://api.github.com/repos/" + encodeURIComponent(match[1]) + "/" + encodeURIComponent(match[2]) + "/releases/latest";
+}
+
 function scheduleCodexAdapterMaintenance(dataDir, rootDir = ROOT_DIR) {
   const key = path.resolve(dataDir);
   if (catalogMaintenanceByDataDir.has(key)) return;
@@ -401,7 +576,9 @@ function scheduleCodexAdapterMaintenance(dataDir, rootDir = ROOT_DIR) {
 }
 
 function ensureCodexAdapterBootstrapCatalog(dataDir, rootDir = ROOT_DIR) {
-  if (isCodexAdapterReady(dataDir) && isCodexAdapterKnownSource(dataDir)) return;
+  const env = loadProxyEnv(dataDir, rootDir);
+  const catalogMode = normalizeCatalogMode(env.CATALOG_MODE);
+  if (isCodexAdapterReady(dataDir) && isCodexAdapterKnownSource(dataDir) && readCodexAdapterStatus(dataDir).catalog_mode === catalogMode) return;
   try {
     const catalogPath = codexAdapterCatalogPath(dataDir);
     const result = buildCodeSeeXCatalog({
@@ -409,10 +586,12 @@ function ensureCodexAdapterBootstrapCatalog(dataDir, rootDir = ROOT_DIR) {
       rootDir,
       nativeCatalog: null,
       nativeError: new Error("Native Codex catalog has not been loaded yet."),
+      allowFallback: true,
     });
     writeCodexAdapterStatus(dataDir, {
       status: CODEX_ADAPTER_STATUS_READY,
       updated_at: new Date().toISOString(),
+      catalog_mode: catalogMode,
       error: "",
       base_model: result.baseModel || "",
       fallback: Boolean(result.fallback),
@@ -421,32 +600,46 @@ function ensureCodexAdapterBootstrapCatalog(dataDir, rootDir = ROOT_DIR) {
       target_models: result.targetModels || [],
     });
   } catch (error) {
-    writeCodexAdapterError(dataDir, error);
+    writeCodexAdapterError(dataDir, error, rootDir);
   }
 }
 
 async function generateCodexAdapterCatalog(dataDir, rootDir = ROOT_DIR, options = {}) {
   const catalogPath = codexAdapterCatalogPath(dataDir);
-  if (!options.force && isCodexAdapterReady(dataDir) && isCodexAdapterNative(dataDir)) return gatherCodexAdapter(dataDir, rootDir);
+  const env = loadProxyEnv(dataDir, rootDir);
+  const catalogMode = normalizeCatalogMode(env.CATALOG_MODE);
+  const status = readCodexAdapterStatus(dataDir);
+  if (!options.force && isCodexAdapterReady(dataDir) && isCodexAdapterKnownSource(dataDir) && status.catalog_mode === catalogMode) {
+    if (catalogMode === "builtin" || isCodexAdapterNative(dataDir)) return gatherCodexAdapter(dataDir, rootDir);
+  }
   writeCodexAdapterStatus(dataDir, {
     status: CODEX_ADAPTER_STATUS_GENERATING,
     updated_at: new Date().toISOString(),
+    catalog_mode: catalogMode,
     error: "",
-    base_model: "",
+    base_model: status.base_model || "",
+    fallback: Boolean(status.fallback),
+    source: status.source || "",
+    warning: status.warning || "",
     target_models: TARGET_MODELS.map((model) => model.slug),
   });
   let nativeCatalog = null;
   let nativeError = null;
-  try {
-    nativeCatalog = await readNativeCodexCatalogAsync();
-  } catch (error) {
-    nativeError = error;
+  if (catalogMode === "auto" || catalogMode === "default") {
+    try {
+      nativeCatalog = await readNativeCodexCatalogAsync();
+    } catch (error) {
+      nativeError = error;
+    }
+  } else {
+    nativeError = new Error("Catalog mode is builtin; native Codex catalog lookup skipped.");
   }
   try {
-    const result = buildCodeSeeXCatalog({ outputPath: catalogPath, rootDir, nativeCatalog, nativeError });
+    const result = buildCodeSeeXCatalog({ outputPath: catalogPath, rootDir, nativeCatalog, nativeError, allowFallback: true });
     writeCodexAdapterStatus(dataDir, {
       status: CODEX_ADAPTER_STATUS_READY,
       updated_at: new Date().toISOString(),
+      catalog_mode: catalogMode,
       error: "",
       base_model: result.baseModel || "",
       fallback: Boolean(result.fallback),
@@ -455,7 +648,7 @@ async function generateCodexAdapterCatalog(dataDir, rootDir = ROOT_DIR, options 
       target_models: result.targetModels || [],
     });
   } catch (error) {
-    writeCodexAdapterError(dataDir, error);
+    writeCodexAdapterError(dataDir, error, rootDir);
   }
   return gatherCodexAdapter(dataDir, rootDir);
 }
@@ -510,8 +703,9 @@ function isCodexAdapterNative(dataDir) {
 
 function gatherCodexAdapter(dataDir, rootDir = ROOT_DIR) {
   const catalogPath = codexAdapterCatalogPath(dataDir);
-  const config = publicConfig(loadProxyEnv(dataDir, rootDir));
+  const config = publicConfig(loadLightProxyEnv(dataDir, rootDir));
   const status = readCodexAdapterStatus(dataDir);
+  const catalogMode = normalizeCatalogMode(config.CATALOG_MODE);
   let ready = false;
   let baseModel = "";
   let models = TARGET_MODELS.map((model) => model.slug);
@@ -538,6 +732,7 @@ function gatherCodexAdapter(dataDir, rootDir = ROOT_DIR) {
     ready,
     status: statusValue,
     catalog_path: catalogPath,
+    catalog_mode: catalogMode,
     provider_id: CODEX_ADAPTER_PROVIDER_ID,
     models,
     context_window: 1000000,
@@ -546,13 +741,15 @@ function gatherCodexAdapter(dataDir, rootDir = ROOT_DIR) {
     fallback,
     source,
     warning,
-    toml_snippet: codexTomlSnippet(catalogPath, proxyBaseUrl(config)),
+    toml_snippet: codexTomlSnippet(catalogPath, proxyBaseUrl(config), config.UPSTREAM_MODEL_OVERRIDE),
     error: ready ? "" : error,
   };
 }
 
 function readCodexAdapterStatus(dataDir) {
-  return readJson(codexAdapterStatusPath(dataDir), { status: CODEX_ADAPTER_STATUS_IDLE, error: "", base_model: "" }) || { status: CODEX_ADAPTER_STATUS_IDLE, error: "", base_model: "" };
+  const status = readJson(codexAdapterStatusPath(dataDir), { status: CODEX_ADAPTER_STATUS_IDLE, error: "", base_model: "" }) || { status: CODEX_ADAPTER_STATUS_IDLE, error: "", base_model: "" };
+  if (!status.catalog_mode) status.catalog_mode = DEFAULT_CATALOG_MODE;
+  return status;
 }
 
 function writeCodexAdapterStatus(dataDir, value) {
@@ -563,10 +760,11 @@ function writeCodexAdapterStatus(dataDir, value) {
   } catch {}
 }
 
-function writeCodexAdapterError(dataDir, error) {
+function writeCodexAdapterError(dataDir, error, rootDir = ROOT_DIR) {
   writeCodexAdapterStatus(dataDir, {
     updated_at: new Date().toISOString(),
     status: CODEX_ADAPTER_STATUS_ERROR,
+    catalog_mode: normalizeCatalogMode(loadProxyEnv(dataDir, rootDir).CATALOG_MODE),
     error: error && error.message ? error.message : String(error),
     base_model: "",
     fallback: false,
@@ -579,10 +777,11 @@ function codexAdapterStatusPath(dataDir) {
   return path.join(codeSeeXUserDir(dataDir), "model-catalog.status.json");
 }
 
-function codexTomlSnippet(catalogPath, baseUrl) {
+function codexTomlSnippet(catalogPath, baseUrl, upstreamModelOverride = DEFAULT_UPSTREAM_MODEL_OVERRIDE) {
+  const model = tomlModelForOverride(upstreamModelOverride);
   return [
     'model_provider = "' + CODEX_ADAPTER_PROVIDER_ID + '"',
-    'model = "deepseek-v4-pro"',
+    'model = "' + model + '"',
     "disable_response_storage = true",
     'model_reasoning_effort = "xhigh"',
     "model_catalog_json = " + tomlLiteral(catalogPath),
@@ -593,7 +792,8 @@ function codexTomlSnippet(catalogPath, baseUrl) {
     "requires_openai_auth = true",
     'base_url = "' + String(baseUrl || "http://127.0.0.1:8787/v1").replace(/"/g, '\\"') + '"',
     "",
-    "# To use the flash model, change:",
+    "# CodeSeeX upstream override is configured in the CodeSeeX app, not in this TOML.",
+    "# To use the flash model in Codex UI, change:",
     '# model = "deepseek-v4-flash"',
   ].join("\n");
 }
@@ -602,11 +802,46 @@ function tomlLiteral(value) {
   return "'" + String(value || "").replace(/'/g, "''") + "'";
 }
 
+function tomlModelForOverride(value) {
+  const normalized = normalizeUpstreamModelOverride(value);
+  return normalized === "deepseek-v4-flash" ? "deepseek-v4-flash" : "deepseek-v4-pro";
+}
+
 function gatherLanguages(dataDir) {
   return {
     default_language: DEFAULT_LANGUAGE_ID,
+    system_language: SYSTEM_LANGUAGE_ID,
+    system_locale: normalizeSystemLocale(osLocale()),
+    system_locales: systemLocaleCandidates(),
     languages: listLanguages(languageDirs(dataDir)),
   };
+}
+
+function osLocale() {
+  return Intl.DateTimeFormat().resolvedOptions().locale
+    || process.env.LC_ALL
+    || process.env.LC_MESSAGES
+    || process.env.LANG
+    || "";
+}
+
+function systemLocaleCandidates() {
+  const values = [
+    osLocale(),
+    process.env.LC_ALL,
+    process.env.LC_MESSAGES,
+    process.env.LANG,
+    process.env.LANGUAGE,
+  ].map(normalizeSystemLocale).filter(Boolean);
+  return Array.from(new Set(values));
+}
+
+function normalizeSystemLocale(value) {
+  return String(value || "")
+    .split(/[.:]/)[0]
+    .trim()
+    .replace(/-/g, "_")
+    .toLowerCase();
 }
 
 function readPackageJson(rootDir) {
@@ -633,7 +868,7 @@ function displayLicenseName(license) {
 function gatherStatus(controller, dataDir, rootDir = ROOT_DIR) {
   const proxy = controller.status();
   const runtime = proxy.runtime || readJson(path.join(dataDir, "runtime.json"), null);
-  const config = publicConfig(loadProxyEnv(dataDir, rootDir));
+  const config = publicConfig(loadLightProxyEnv(dataDir, rootDir));
   const events = collectRuntimeEvents(runtime, proxy, dataDir, rootDir, { limit: 30, audience: "user" });
   return {
     running: proxy.running,
@@ -644,6 +879,7 @@ function gatherStatus(controller, dataDir, rootDir = ROOT_DIR) {
     runtime: publicRuntime(runtime),
     runtime_status: runtime ? runtime.status : "unknown",
     base_url: runtime && runtime.status === "running" ? runtime.base_url : proxyBaseUrl(config),
+    config_version: configVersion(dataDir),
     events,
   };
 }
@@ -810,11 +1046,23 @@ function repairEventDetail(detail) {
 }
 
 function publicConfig(config) {
-  const output = Object.assign({}, config || {});
+  const output = normalizeToolRuntimeConfig(config || {}, { rootDir: config && config.PROXY_ROOT_DIR || ROOT_DIR, extensionDir: config && config.PROXY_EXTENSION_DIR || extensionDir(DATA_DIR) });
   for (const key of Object.keys(output)) {
     if (isSensitiveConfigKey(key)) delete output[key];
   }
+  output.CATALOG_MODE = normalizeCatalogMode(output.CATALOG_MODE || DEFAULT_CATALOG_MODE);
+  output.UPSTREAM_MODEL_OVERRIDE = normalizeUpstreamModelOverride(output.UPSTREAM_MODEL_OVERRIDE || DEFAULT_UPSTREAM_MODEL_OVERRIDE);
+  output.AUTO_START = normalizeBoolString(output.AUTO_START || DEFAULT_AUTO_START);
   return output;
+}
+
+function configVersion(dataDir) {
+  try {
+    const stat = fs.statSync(proxyEnvPath(dataDir));
+    return String(stat.mtimeMs);
+  } catch {
+    return "";
+  }
 }
 
 function isSensitiveConfigKey(key) {
@@ -827,6 +1075,9 @@ function sanitizeConfig(body, rootDir = ROOT_DIR, dataDir = rootDir) {
   const allowed = new Set([
     "PROXY_HOST",
     "PROXY_PORT",
+    "CATALOG_MODE",
+    "UPSTREAM_MODEL_OVERRIDE",
+    "AUTO_START",
     "DEEPSEEK_THINKING",
     "SHOW_THINKING",
     "UI_THEME",
@@ -843,27 +1094,92 @@ function sanitizeConfig(body, rootDir = ROOT_DIR, dataDir = rootDir) {
     if (!allowed.has(key)) continue;
     if (key === "UI_LANGUAGE") result[key] = normalizeLanguageId(value);
     else if (key === "UI_CLOSE_BEHAVIOR") result[key] = normalizeCloseBehavior(value);
+    else if (key === "CATALOG_MODE") result[key] = normalizeCatalogMode(value);
+    else if (key === "UPSTREAM_MODEL_OVERRIDE") result[key] = normalizeUpstreamModelOverride(value);
+    else if (key === "AUTO_START") result[key] = normalizeBoolString(value);
     else result[key] = String(value);
   }
   return result;
 }
 
 function normalizeLanguageId(value) {
-  return String(value || DEFAULT_LANGUAGE_ID).trim().replace(/-/g, "_").toLowerCase() || DEFAULT_LANGUAGE_ID;
+  const normalized = String(value || DEFAULT_LANGUAGE_ID).trim().replace(/-/g, "_").toLowerCase();
+  return normalized || DEFAULT_LANGUAGE_ID;
+}
+
+function normalizeStoredLanguageId(value, fallback = DEFAULT_LANGUAGE_ID) {
+  const normalized = normalizeLanguageId(value || fallback);
+  return normalized === "zh_cn" && !value ? DEFAULT_LANGUAGE_ID : normalized;
 }
 
 function normalizeCloseBehavior(value) {
   return String(value || "exit") === "tray" ? "tray" : "exit";
 }
 
+function normalizeBoolString(value) {
+  return /^(1|true|yes|on|enabled)$/i.test(String(value || "").trim()) ? "true" : "false";
+}
+
 function ensureProxyEnv(dataDir, rootDir = ROOT_DIR) {
   const filePath = proxyEnvPath(dataDir);
+  if (fs.existsSync(filePath)) return;
+  const current = {};
+  const defaults = defaultProxyEnv(rootDir, dataDir);
+  const merged = Object.assign(mergeEnv(defaults, current), {
+    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
+    THINKING_TITLE: FIXED_THINKING_TITLE,
+    COMMUNITY_TOOL_CODE_ENABLED: "false",
+    PROXY_EXTENSION_DIR: extensionDir(dataDir),
+    CATALOG_MODE: normalizeCatalogMode(current.CATALOG_MODE || defaults.CATALOG_MODE),
+    UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(current.UPSTREAM_MODEL_OVERRIDE || defaults.UPSTREAM_MODEL_OVERRIDE),
+    AUTO_START: normalizeBoolString(current.AUTO_START || defaults.AUTO_START),
+    UI_LANGUAGE: normalizeStoredLanguageId(current.UI_LANGUAGE, defaults.UI_LANGUAGE),
+    UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(current.UI_CLOSE_BEHAVIOR || defaults.UI_CLOSE_BEHAVIOR),
+    LOG_RETENTION_DAYS: normalizeRetentionDays(current.LOG_RETENTION_DAYS || defaults.LOG_RETENTION_DAYS),
+  });
+  writeEnvFile(filePath, merged);
+}
+
+function loadBootstrapEnv(dataDir, rootDir = ROOT_DIR) {
+  return Object.assign(defaultProxyEnv(rootDir, dataDir), readEnvFile(path.join(rootDir, "proxy.env")), readEnvFile(proxyEnvPath(dataDir)));
+}
+
+function loadLightProxyEnv(dataDir, rootDir = ROOT_DIR) {
+  const rootEnv = readEnvFile(path.join(rootDir, "proxy.env"));
+  const dataEnv = readEnvFile(proxyEnvPath(dataDir));
+  return normalizeLoadedProxyEnv(Object.assign({}, defaultProxyEnv(rootDir, dataDir), rootEnv, dataEnv), rootEnv, dataEnv, dataDir, rootDir);
+}
+
+function loadProxyEnv(dataDir, rootDir = ROOT_DIR) {
   const envOptions = proxyEnvOptions(dataDir, rootDir);
-  const current = readEnvFile(filePath, envOptions);
-  const defaults = Object.assign({
+  const rootEnv = readEnvFile(path.join(rootDir, "proxy.env"), envOptions);
+  const dataEnv = readEnvFile(proxyEnvPath(dataDir), envOptions);
+  return normalizeLoadedProxyEnv(Object.assign({}, defaultProxyEnv(rootDir, dataDir), rootEnv, dataEnv), rootEnv, dataEnv, dataDir, rootDir);
+}
+
+function normalizeLoadedProxyEnv(env, rootEnv = {}, dataEnv = {}, dataDir = DATA_DIR, rootDir = ROOT_DIR) {
+  return normalizeToolRuntimeConfig(Object.assign({}, env, {
+    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
+    THINKING_TITLE: FIXED_THINKING_TITLE,
+    PROXY_EXTENSION_DIR: env.PROXY_EXTENSION_DIR || extensionDir(dataDir),
+    CATALOG_MODE: normalizeCatalogMode(dataEnv.CATALOG_MODE || rootEnv.CATALOG_MODE || DEFAULT_CATALOG_MODE),
+    UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(dataEnv.UPSTREAM_MODEL_OVERRIDE || rootEnv.UPSTREAM_MODEL_OVERRIDE || DEFAULT_UPSTREAM_MODEL_OVERRIDE),
+    AUTO_START: normalizeBoolString(dataEnv.AUTO_START || rootEnv.AUTO_START || DEFAULT_AUTO_START),
+    COMMUNITY_TOOL_CODE_ENABLED: dataEnv.COMMUNITY_TOOL_CODE_ENABLED || rootEnv.COMMUNITY_TOOL_CODE_ENABLED || "false",
+    UI_LANGUAGE: normalizeStoredLanguageId(dataEnv.UI_LANGUAGE || rootEnv.UI_LANGUAGE, DEFAULT_LANGUAGE_ID),
+    UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(dataEnv.UI_CLOSE_BEHAVIOR || rootEnv.UI_CLOSE_BEHAVIOR || "exit"),
+    LOG_RETENTION_DAYS: normalizeRetentionDays(dataEnv.LOG_RETENTION_DAYS || rootEnv.LOG_RETENTION_DAYS || "7"),
+  }), { rootDir, extensionDir: extensionDir(dataDir) });
+}
+
+function defaultProxyEnv(rootDir = ROOT_DIR, dataDir = DATA_DIR) {
+  return Object.assign({
     DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
     PROXY_HOST: "127.0.0.1",
     PROXY_PORT: "8787",
+    CATALOG_MODE: DEFAULT_CATALOG_MODE,
+    UPSTREAM_MODEL_OVERRIDE: DEFAULT_UPSTREAM_MODEL_OVERRIDE,
+    AUTO_START: DEFAULT_AUTO_START,
     DEEPSEEK_THINKING: "auto",
     SHOW_THINKING: "true",
     THINKING_TITLE: FIXED_THINKING_TITLE,
@@ -874,31 +1190,8 @@ function ensureProxyEnv(dataDir, rootDir = ROOT_DIR) {
     BILLING_CACHE_MISS_INPUT_CNY: "3",
     BILLING_OUTPUT_CNY: "6",
     LOG_RETENTION_DAYS: "7",
-  }, toolDefaultConfig({ rootDir, extensionDir: extensionDir(dataDir) }));
-  const merged = Object.assign(mergeEnv(defaults, current), {
-    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
-    THINKING_TITLE: FIXED_THINKING_TITLE,
     COMMUNITY_TOOL_CODE_ENABLED: "false",
-    PROXY_EXTENSION_DIR: extensionDir(dataDir),
-    UI_LANGUAGE: normalizeLanguageId(current.UI_LANGUAGE || defaults.UI_LANGUAGE),
-    UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(current.UI_CLOSE_BEHAVIOR || defaults.UI_CLOSE_BEHAVIOR),
-    LOG_RETENTION_DAYS: normalizeRetentionDays(current.LOG_RETENTION_DAYS || defaults.LOG_RETENTION_DAYS),
-  });
-  writeEnvFile(filePath, merged, envOptions);
-}
-
-function loadProxyEnv(dataDir, rootDir = ROOT_DIR) {
-  const envOptions = proxyEnvOptions(dataDir, rootDir);
-  const rootEnv = readEnvFile(path.join(rootDir, "proxy.env"), envOptions);
-  const dataEnv = readEnvFile(proxyEnvPath(dataDir), envOptions);
-  return Object.assign({}, rootEnv, dataEnv, {
-    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
-    THINKING_TITLE: FIXED_THINKING_TITLE,
-    PROXY_EXTENSION_DIR: extensionDir(dataDir),
-    COMMUNITY_TOOL_CODE_ENABLED: dataEnv.COMMUNITY_TOOL_CODE_ENABLED || rootEnv.COMMUNITY_TOOL_CODE_ENABLED || "false",
-    UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(dataEnv.UI_CLOSE_BEHAVIOR || rootEnv.UI_CLOSE_BEHAVIOR || "exit"),
-    LOG_RETENTION_DAYS: normalizeRetentionDays(dataEnv.LOG_RETENTION_DAYS || rootEnv.LOG_RETENTION_DAYS || "7"),
-  });
+  }, toolDefaultConfig({ rootDir, extensionDir: extensionDir(dataDir) }));
 }
 
 function proxyEnvOptions(dataDir, rootDir = ROOT_DIR) {
@@ -914,7 +1207,7 @@ async function fetchDeepSeekBalance(config) {
   }
 
   const url = deepSeekBalanceUrl(config.DEEPSEEK_BASE_URL || FIXED_DEEPSEEK_BASE_URL);
-  const dispatcher = resolveDispatcher(config);
+  const dispatcher = resolveBalanceDispatcher(config);
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeout = setTimeout(() => controller && controller.abort(), 30000);
   try {
@@ -957,6 +1250,14 @@ function resolveApiKey(config) {
   return codexKey;
 }
 
+function resolveBalanceDispatcher(config) {
+  try {
+    return require("../proxy/network-dispatcher").resolveDispatcher(config);
+  } catch {
+    return undefined;
+  }
+}
+
 function deepSeekBalanceUrl(baseUrl) {
   try {
     const url = new URL(baseUrl || FIXED_DEEPSEEK_BASE_URL);
@@ -992,10 +1293,6 @@ function eventLogDirectory(rootDir, dataDir = rootDir) {
 
 function extensionDir(dataDir) {
   return path.join(dataDir, "extension");
-}
-
-function extensionDirFromRoot(rootDir) {
-  return path.join(rootDir, "extension");
 }
 
 function languageDirs(dataDir) {
@@ -1035,7 +1332,7 @@ function notifyConfigChanged(context, config) {
 }
 
 function handleWindowAction(action, context, body) {
-  if (!["minimize", "maximize", "close", "theme"].includes(action)) {
+  if (!["minimize", "maximize", "close", "theme", "login-item"].includes(action)) {
     throw httpError(404, "Window action not found.", "invalid_request_error", "not_found");
   }
   if (!context || typeof context.onWindowAction !== "function") {
@@ -1094,6 +1391,22 @@ function clampInt(value, fallback, min, max) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
+function normalizeVersion(value) {
+  const match = String(value || "").trim().match(/v?(\d+(?:\.\d+){0,3})/i);
+  return match ? match[1] : "0.0.0";
+}
+
+function compareVersions(left, right) {
+  const a = normalizeVersion(left).split(".").map((part) => Number(part) || 0);
+  const b = normalizeVersion(right).split(".").map((part) => Number(part) || 0);
+  const length = Math.max(a.length, b.length, 3);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (a[index] || 0) - (b[index] || 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
 }
 
 function normalizeRetentionDays(value) {

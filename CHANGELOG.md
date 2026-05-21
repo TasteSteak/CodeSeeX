@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.3.0 - 2026-05-21
+
+This release focuses on release readiness and client experience: configuration flow, startup reliability, tool management, update indicators, and cross-platform runtime data handling.
+
+### Added
+
+- Added a dedicated proxy settings page for listen port, billing rates, catalog mode, upstream model override, and generated `config.toml`.
+- Added a read-only `config.toml` card with copy support for Codex `base_url` and `model_catalog_json` setup.
+- Added catalog modes: default, auto, and builtin.
+- Added upstream model override options: default, Flash, and Pro.
+- Added login auto-start configuration in the client settings page.
+- Added tray shortcuts for model override and thinking mode.
+- Added silent update checks with red-dot indicators.
+- Added `start-desktop.cmd` for quick local desktop testing.
+- Added the community tool directory convention: `~/.codeseex/extension/tools/<tool>/`.
+
+### Changed
+
+- Switched default runtime data storage to the user's `~/.codeseex` directory to avoid install-directory permission issues.
+- Added Electron single-instance locking to reduce duplicate startup, port conflicts, and intermittent EACCES errors.
+- Improved startup flow so the client appears sooner and less work blocks first paint.
+- Improved dark-mode contrast for cards, switches, usage details, and settings panels.
+- Refined the tools page so system tools are fixed while other tools use individual enable switches.
+- Simplified tool toggle storage to `ENABLED_TOOLS=[...]`.
+- Grouped consecutive proxy tool display messages into a single "used N tools" UI-only summary.
+- Changed update checks to report status inside the About page instead of opening the releases page directly.
+- Added update result states for latest version, available update, and temporary access failure.
+- Added per-version read state for update red dots.
+- Improved system-language detection and completed language key coverage.
+- Updated README, tool authoring docs, and release notes for 0.3.0.
+
+### Fixed
+
+- Fixed tray setting changes not syncing back to the main window.
+- Fixed first-run language display issues for some users.
+- Fixed a macOS title-bar right-click crash path.
+- Fixed catalog generation for users without an existing native Codex catalog.
+- Fixed several configuration save and status refresh edge cases.
+- Fixed built-in/community tool labels and toggle behavior.
+- Fixed autosave writing an empty `ENABLED_TOOLS` list before the tools page was loaded.
+- Tightened About page update-link rendering so only the controlled version link uses HTML.
+
+### Notes
+
+- Changing the listen port still requires restarting CodeSeeX and updating the Codex TOML `base_url`.
+- CodeSeeX does not store DeepSeek API keys in `proxy.env`; balance checks and chat requests use the user's Codex auth configuration.
+
 ## 0.2.1 - 2026-05-19
 
 ### Changed

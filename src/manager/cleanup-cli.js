@@ -34,9 +34,7 @@ function cleanupPorts(args, rootDir, dataDir) {
     readEnvFile(path.join(dataDir, "proxy.env")),
     process.env,
   );
-  const ports = [env.PROXY_PORT || "8787"];
-  if ((args["include-manager"] || args["include-desktop"]) && env.MANAGER_PORT) ports.push(env.MANAGER_PORT);
-  return ports.join(",");
+  return env.PROXY_PORT || "8787";
 }
 
 function parseArgs(argv) {

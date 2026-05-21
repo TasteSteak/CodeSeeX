@@ -1,7 +1,6 @@
 const crypto = require("node:crypto");
 const dns = require("node:dns").promises;
 const net = require("node:net");
-const { ProxyAgent } = require("undici");
 const { execFileSync } = require("node:child_process");
 const { detectEncoding, decodeBuffer, repairAnyMojibake } = require("../shared/text-encoding");
 
@@ -17,11 +16,13 @@ const DEFAULT_MAX_EXCERPTS_PER_PAGE = 3;
 const DEFAULT_SEARCH_TIMEOUT_MS = 12000;
 const DEFAULT_QUALITY_THRESHOLD = 0.34;
 const SEARCH_USER_AGENT = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+let ProxyAgentCtor = null;
 
 function resolveDispatcher(config = {}) {
   const proxy = resolveProxyUrl(config);
   if (!proxy) return undefined;
   try {
+    const ProxyAgent = getProxyAgent();
     const allowInsecureTls = /^(1|true|yes|on|enabled)$/i.test(String((config && config.ALLOW_INSECURE_PROXY_TLS) || process.env.ALLOW_INSECURE_PROXY_TLS || "").trim());
     return allowInsecureTls
       ? new ProxyAgent({ uri: proxy, requestTls: { rejectUnauthorized: false } })
@@ -29,6 +30,13 @@ function resolveDispatcher(config = {}) {
   } catch {
     return undefined;
   }
+}
+
+function getProxyAgent() {
+  if (!ProxyAgentCtor) {
+    ProxyAgentCtor = require("undici").ProxyAgent;
+  }
+  return ProxyAgentCtor;
 }
 
 async function executeProxyWebSearch(queryOrAction, config = {}, options = {}) {

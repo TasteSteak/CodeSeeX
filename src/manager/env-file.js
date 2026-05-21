@@ -9,6 +9,9 @@ const RUNTIME_ENV_KEYS = [
   "DEEPSEEK_THINKING",
   "SHOW_THINKING",
   "THINKING_TITLE",
+  "CATALOG_MODE",
+  "UPSTREAM_MODEL_OVERRIDE",
+  "AUTO_START",
   "UI_THEME",
   "UI_LANGUAGE",
   "UI_CLOSE_BEHAVIOR",
@@ -16,6 +19,7 @@ const RUNTIME_ENV_KEYS = [
   "BILLING_CACHE_MISS_INPUT_CNY",
   "BILLING_OUTPUT_CNY",
   "COMMUNITY_TOOL_CODE_ENABLED",
+  "ENABLED_TOOLS",
   "WORKSPACE_TOOL_FILE_ACCESS",
   "WORKSPACE_ROOTS",
 ];
@@ -79,7 +83,8 @@ function decodeEnvValue(value) {
 }
 
 function isRuntimeEnvKey(key, options = {}) {
-  return envKeySet(options).has(String(key || ""));
+  const normalized = String(key || "");
+  return envKeySet(options).has(normalized);
 }
 
 function envKeyOrder(options = {}) {

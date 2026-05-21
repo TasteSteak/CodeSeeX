@@ -1,4 +1,5 @@
 const { makeId } = require("../shared/http");
+const { isToolEnabledByConfig } = require("../shared/tool-registry");
 const { applyPatch, listToolModules } = require("../tools");
 const { chatToolCallFromAdaptedResponseItem, registerInputToolAdapter, responseItemFromAdaptedChatTool } = require("./tool-adapters");
 
@@ -82,11 +83,16 @@ function registerAutoTools(state, options = {}) {
     communityToolCodeEnabled: options.communityToolCodeEnabled,
   })) {
     if (!tool || !tool.manifest || normalizeToolId(tool.manifest.id) === applyPatch.TOOL_NAME) continue;
+    if (!toolEnabled(tool.manifest, options.toolConfig || {})) continue;
     if (tool.autoRegister === false) continue;
     if (typeof tool.registerInputTool !== "function") continue;
     const declaration = tool.defaultInputTool || { type: tool.manifest.id };
     tool.registerInputTool(declaration, state, options);
   }
+}
+
+function toolEnabled(manifest, config = {}) {
+  return isToolEnabledByConfig(manifest, config);
 }
 
 function normalizeToolChoice(toolChoice, toolContext) {

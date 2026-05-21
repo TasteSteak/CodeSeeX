@@ -10,13 +10,14 @@ const applyPatch = require("./apply-patch");
 // - matchesInputTool/registerInputTool: optional proxy registration hooks.
 // - matchesChatTool/responseItemFromChatTool: optional chat-completions to Responses mapping.
 // - matchesResponseItem/chatToolCallFromResponseItem: optional history replay mapping.
-// Dropping tools/<tool>/manifest.json plus optional index.js into the project root is enough for discovery.
+// Drop community tools into <dataDir>/extension/tools/<tool>/.
+// Development can point PROXY_DATA_DIR at a scratch runtime directory.
 function listToolModules(options = {}) {
   const includeCommunity = options.includeCommunity !== false;
   const rootDir = options.rootDir || process.env.PROXY_ROOT_DIR || path.resolve(__dirname, "..", "..");
   const extensionDir = options.extensionDir || process.env.PROXY_EXTENSION_DIR || path.join(rootDir, "extension");
   const modules = discoverBuiltInToolModules(options);
-  if (includeCommunity) modules.push(...discoverCommunityToolModules(rootDir, extensionDir));
+  if (includeCommunity) modules.push(...discoverCommunityToolModules(extensionDir));
   return dedupeToolModules(modules);
 }
 
@@ -51,10 +52,8 @@ function discoverBuiltInToolModules(options = {}) {
     .filter(Boolean);
 }
 
-function discoverCommunityToolModules(rootDir, extensionDir) {
-  const toolDirs = []
-    .concat(discoverToolPackageDirs(path.join(extensionDir, "tools")))
-    .concat(discoverToolPackageDirs(path.join(rootDir, "tools")));
+function discoverCommunityToolModules(extensionDir) {
+  const toolDirs = discoverToolPackageDirs(path.join(extensionDir, "tools"));
   return toolDirs.map((toolDir) => loadToolPackage(toolDir, "community")).filter(Boolean);
 }
 
@@ -77,6 +76,7 @@ function loadToolPackage(toolDir, source, options = {}) {
   const manifestPath = path.join(toolDir, "manifest.json");
   const entryPath = path.join(toolDir, "index.js");
   const manifest = readManifest(manifestPath);
+  if (source === "community" && !manifest) return null;
   if (!manifest && !fs.existsSync(entryPath)) return null;
   const allowCode = source !== "community" || communityToolCodeEnabled(options);
   const metadata = manifest && manifest.metadata && typeof manifest.metadata === "object" ? Object.assign({}, manifest.metadata) : {};
@@ -84,7 +84,7 @@ function loadToolPackage(toolDir, source, options = {}) {
     metadata.code_present = true;
     metadata.code_enabled = false;
     return {
-      manifest: Object.assign({}, manifest || fallbackManifest(toolDir), { metadata }),
+      manifest: Object.assign({}, manifest, { metadata }),
       source,
       __toolDir: toolDir,
     };
@@ -99,16 +99,14 @@ function loadToolPackage(toolDir, source, options = {}) {
       __toolDir: toolDir,
     });
   } catch (error) {
+    const failedManifest = manifest || fallbackManifest(toolDir);
     return {
-      manifest: {
-        id: path.basename(toolDir),
-        kind: "tool",
+      manifest: Object.assign({}, failedManifest, {
         source,
         enabled: false,
-        name: path.basename(toolDir),
         description: "Tool failed to load: " + (error && error.message ? error.message : String(error)),
-        metadata: { load_error: true },
-      },
+        metadata: Object.assign({}, failedManifest.metadata || {}, { load_error: true }),
+      }),
       source,
       __toolDir: toolDir,
     };
@@ -204,7 +202,10 @@ module.exports = {
   listToolManifests,
   listToolModules,
   toolAssetFilePath,
-  toolAdapters: listToolAdapters(),
-  toolManifests: listToolManifests(),
-  toolModules: listToolModules(),
 };
+
+Object.defineProperties(module.exports, {
+  toolAdapters: { enumerable: true, get: () => listToolAdapters() },
+  toolManifests: { enumerable: true, get: () => listToolManifests() },
+  toolModules: { enumerable: true, get: () => listToolModules() },
+});

@@ -1,9 +1,6 @@
-const { listToolManifests } = require("../tools");
-
 const registeredTools = new Map();
 const discoveredToolIds = new Set();
-
-registerBuiltInTools();
+const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
 
 function registerTool(manifest) {
   const normalized = normalizeToolManifest(manifest);
@@ -25,7 +22,7 @@ function listToolRegistry(options = {}) {
 
 function listPublicTools(config = {}, options = {}) {
   refreshDiscoveredTools(options);
-  return Array.from(registeredTools.values()).map((tool) => {
+  return Array.from(registeredTools.values()).sort(compareTools).map((tool) => {
     const copy = cloneTool(tool);
     copy.config = copy.config.map((field) => Object.assign({}, field, {
       value: resolveFieldValue(field, config),
@@ -47,7 +44,9 @@ function listToolConfigKeys(options = {}) {
 
 function toolDefaultConfig(options = {}) {
   refreshDiscoveredTools(options);
-  const defaults = {};
+  const defaults = {
+    [ENABLED_TOOLS_KEY]: stringifyEnabledToolIds(defaultEnabledToolIds()),
+  };
   for (const tool of registeredTools.values()) {
     for (const field of tool.config || []) {
       if (!field.key) continue;
@@ -59,12 +58,101 @@ function toolDefaultConfig(options = {}) {
 
 function sanitizeToolConfig(body = {}, options = {}) {
   const allowed = new Set(listToolConfigKeys(options));
+  allowed.add(ENABLED_TOOLS_KEY);
   const output = {};
+  const nextEnabledTools = normalizeEnabledToolConfig(body, options);
+  if (nextEnabledTools !== null) output[ENABLED_TOOLS_KEY] = stringifyEnabledToolIds(nextEnabledTools);
   for (const [key, value] of Object.entries(body || {})) {
     if (!allowed.has(key)) continue;
+    if (key === ENABLED_TOOLS_KEY) continue;
     output[key] = normalizeConfigValue(key, value);
   }
   return output;
+}
+
+function normalizeToolRuntimeConfig(config = {}, options = {}) {
+  refreshDiscoveredTools(options);
+  const output = {};
+  const enabledTools = normalizeEnabledToolConfig(config, options);
+  output[ENABLED_TOOLS_KEY] = stringifyEnabledToolIds(enabledTools || defaultEnabledToolIds());
+  for (const [key, value] of Object.entries(config || {})) {
+    if (/^TOOL_[A-Z0-9_]+_ENABLED$/.test(String(key || ""))) continue;
+    if (key === ENABLED_TOOLS_KEY) continue;
+    output[key] = value;
+  }
+  return output;
+}
+
+function isSystemTool(tool) {
+  return isSystemToolId(tool && tool.id);
+}
+
+function isSystemToolId(id) {
+  return id === "apply_patch" || id === "web_search";
+}
+
+function defaultToolEnabledValue(tool) {
+  if (!tool || tool.enabled === false) return "false";
+  return tool.source === "community" ? "false" : "true";
+}
+
+function defaultEnabledToolIds() {
+  const ids = [];
+  for (const tool of registeredTools.values()) {
+    if (isSystemTool(tool)) continue;
+    if (defaultToolEnabledValue(tool) === "true") ids.push(tool.id);
+  }
+  return ids.sort();
+}
+
+function normalizeEnabledToolConfig(config = {}, options = {}) {
+  refreshDiscoveredTools(options);
+  const explicit = parseEnabledToolIds(config[ENABLED_TOOLS_KEY]);
+  if (explicit !== null) return filterKnownConfigurableToolIds(explicit);
+  return null;
+}
+
+function isToolEnabledByConfig(tool, config = {}, options = {}) {
+  if (isSystemTool(tool)) return true;
+  const enabledTools = normalizeEnabledToolConfig(config, options);
+  if (enabledTools !== null) return enabledTools.includes(normalizeId(tool && tool.id));
+  return defaultToolEnabledValue(tool) === "true";
+}
+
+function parseEnabledToolIds(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (Array.isArray(value)) return value.map(normalizeId).filter(Boolean);
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.map(normalizeId).filter(Boolean);
+  } catch {}
+  return text.split(",").map(normalizeId).filter(Boolean);
+}
+
+function stringifyEnabledToolIds(ids) {
+  const seen = new Set();
+  const normalized = [];
+  for (const id of Array.isArray(ids) ? ids : []) {
+    const normalizedId = normalizeId(id);
+    if (!normalizedId || seen.has(normalizedId)) continue;
+    seen.add(normalizedId);
+    normalized.push(normalizedId);
+  }
+  normalized.sort();
+  return JSON.stringify(normalized);
+}
+
+function filterKnownConfigurableToolIds(ids) {
+  const allowed = new Set();
+  for (const tool of registeredTools.values()) {
+    if (!isSystemTool(tool)) allowed.add(tool.id);
+  }
+  return (Array.isArray(ids) ? ids : [])
+    .map(normalizeId)
+    .filter((id, index, list) => id && allowed.has(id) && list.indexOf(id) === index)
+    .sort();
 }
 
 function getRegisteredTool(id) {
@@ -88,7 +176,7 @@ function normalizeToolManifest(manifest) {
     iconPath: manifest.iconPath ? normalizeAssetPath(manifest.iconPath) : "",
     name: String(manifest.name || id),
     description: String(manifest.description || ""),
-    labels: normalizeToolLabels(manifest.labels, source),
+    labels: normalizeToolLabels(manifest.labels, source, id),
     config: normalizeConfigFields(manifest.config),
     metadata: clonePlainObject(manifest.metadata || {}),
   };
@@ -99,7 +187,7 @@ function normalizeToolSource(value) {
   return source || "community";
 }
 
-function normalizeToolLabels(labels, source) {
+function normalizeToolLabels(labels, source, toolId) {
   const output = [];
   const seen = new Set();
   const add = (label) => {
@@ -109,9 +197,26 @@ function normalizeToolLabels(labels, source) {
     output.push(normalized);
   };
 
-  if (source === "built-in") add({ id: "built_in", labelKey: "toolLabelBuiltIn", label: "Built-in" });
+  if (source === "built-in") {
+    if (isSystemToolId(toolId)) add({ id: "system", labelKey: "toolLabelSystem", label: "System" });
+    add({ id: "built_in", labelKey: "toolLabelBuiltIn", label: "Built-in" });
+  }
   for (const label of Array.isArray(labels) ? labels : []) add(label);
   return output;
+}
+
+function compareTools(left, right) {
+  const leftPriority = toolSortPriority(left);
+  const rightPriority = toolSortPriority(right);
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+  return String(left.name || left.id).localeCompare(String(right.name || right.id));
+}
+
+function toolSortPriority(tool) {
+  if (!tool) return 100;
+  if (tool.id === "apply_patch") return 1;
+  if (tool.id === "web_search") return 2;
+  return 10;
 }
 
 function normalizeToolLabel(label) {
@@ -286,6 +391,7 @@ function registerBuiltInTools() {
 }
 
 function refreshDiscoveredTools(options = {}) {
+  const { listToolManifests } = require("../tools");
   const manifests = listToolManifests(options);
   for (const manifest of manifests) {
     const normalized = normalizeToolManifest(manifest);
@@ -298,12 +404,18 @@ function refreshDiscoveredTools(options = {}) {
 }
 
 module.exports = {
+  ENABLED_TOOLS_KEY,
   getRegisteredTool,
+  isToolEnabledByConfig,
   listPublicTools,
   listToolConfigKeys,
   listToolRegistry,
+  normalizeEnabledToolConfig,
+  normalizeToolRuntimeConfig,
+  parseEnabledToolIds,
   registerTool,
   sanitizeToolConfig,
+  stringifyEnabledToolIds,
   toolDefaultConfig,
   unregisterTool,
 };

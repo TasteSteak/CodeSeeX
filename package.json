@@ -1,6 +1,6 @@
 {
   "name": "codeseex",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Local Codex-compatible DeepSeek bridge with a desktop manager.",
   "author": "TasteSteak",
@@ -19,7 +19,7 @@
     "start:manager": "node manager.js",
     "start:proxy": "node proxy.js",
     "build:catalog-seed": "node scripts/build-catalog-seed.js",
-    "check": "node --check src/electron/main.js && node --check src/manager/server.js && node --check src/manager/process-control.js && node --check src/manager/process-cleanup.js && node --check src/manager/static/app.js && node --check src/shared/config.js && node --check src/shared/codex-auth.js && node --check src/proxy/server.js && node --check src/proxy/deepseek-client.js && node --check src/proxy/streaming/index.js && node --check src/proxy/web-search-executor.js && node --check src/tools/apply-patch/index.js && node --check src/codex/model-catalog.js",
+    "check": "node --check src/electron/main.js && node --check src/manager/server.js && node --check src/manager/process-control.js && node --check src/manager/process-cleanup.js && node --check src/manager/static/app.js && node --check src/shared/config.js && node --check src/shared/codex-auth.js && node --check src/proxy/server.js && node --check src/proxy/deepseek-client.js && node --check src/proxy/network-dispatcher.js && node --check src/proxy/streaming/index.js && node --check src/proxy/web-search-executor.js && node --check src/tools/apply-patch/index.js && node --check src/codex/model-catalog.js",
     "dist": "npm run build:catalog-seed && electron-builder",
     "dist:win": "npm run build:catalog-seed && electron-builder --win nsis portable",
     "dist:mac": "npm run build:catalog-seed && electron-builder --mac dmg zip",

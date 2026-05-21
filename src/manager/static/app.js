@@ -11,13 +11,20 @@ const REFRESH_IDLE_MS = 5000;
 const REFRESH_HIDDEN_MS = 10000;
 const SLOW_RENDER_MS = 80;
 const LANGUAGE_LOAD_TIMEOUT_MS = 1200;
+const CONFIG_CHANGED_EVENT = "codeseex-config-changed";
+const RUNTIME_STATUS_STARTING = "starting";
+const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
+const UPDATE_NOTICE_STORAGE_KEY = "version";
 const RESTART_REQUIRED_KEYS = new Set([
   "PROXY_PORT",
 ]);
-const DEFAULT_LANGUAGE = "zh_cn";
+const SYSTEM_LANGUAGE = "system";
+const FALLBACK_LANGUAGE = "en_us";
+const DEFAULT_LANGUAGE = SYSTEM_LANGUAGE;
 
 const els = {
   aboutStatus: byId("aboutStatus"),
+  aboutUpdateDot: byId("aboutUpdateDot"),
   activeRequests: byId("activeRequests"),
   appDescription: byId("appDescription"),
   appLicense: byId("appLicense"),
@@ -34,7 +41,11 @@ const els = {
   billingCacheMissInput: byId("BILLING_CACHE_MISS_INPUT_CNY"),
   billingOutput: byId("BILLING_OUTPUT_CNY"),
   completedTurns: byId("completedTurns"),
-  communityToolCodeEnabled: byId("COMMUNITY_TOOL_CODE_ENABLED"),
+  autoStart: byId("AUTO_START"),
+  configTomlCode: byId("configTomlCode"),
+  configTomlCopyStatus: byId("configTomlCopyStatus"),
+  configTomlStatus: byId("configTomlStatus"),
+  copyTomlButton: byId("copyTomlButton"),
   failedTurns: byId("failedTurns"),
   lastCompletedAt: byId("lastCompletedAt"),
   lastTurnCard: byId("lastTurnCard"),
@@ -63,6 +74,7 @@ const els = {
   usageRows: byId("usageRows"),
   usageTotalCost: byId("usageTotalCost"),
   usageTotalTurns: byId("usageTotalTurns"),
+  updateButtonDot: byId("updateButtonDot"),
   workspace: byId("workspace"),
 };
 
@@ -75,6 +87,7 @@ let currentConfigTab = "client";
 let currentTools = [];
 let currentToolsSignature = "";
 let currentConfigSignature = "";
+let currentAdapterSignature = "";
 let currentToolValuesSignature = "";
 let refreshInFlight = false;
 let refreshQueuedOptions = null;
@@ -82,21 +95,29 @@ let refreshTimer = null;
 let toolsLoaded = false;
 let i18n = {};
 let languages = [];
+let systemLanguageHints = [];
+let configuredLanguage = DEFAULT_LANGUAGE;
 let lastSavedConfig = null;
 let pendingConfig = null;
 let restartRequired = false;
 let latestRunning = false;
+let latestStarting = true;
 let logDividers = [];
 let logEvents = [];
 let logHasMore = false;
 let logLoadingOlder = false;
 let logRenderState = { signature: "", start: 0, end: 0, scrollTop: 0 };
+let lastBalanceData = null;
 let lastStatusSignature = "";
 let lastUsageSignature = "";
 let lastLogRenderSignature = "";
 let lastTurnSignature = "";
+let latestAdapter = null;
+let latestUpdateCheck = null;
+let latestConfigVersion = "";
+let externalConfigSyncTimer = null;
 let themePreviewSeq = 0;
-let uiLanguage = DEFAULT_LANGUAGE;
+let uiLanguage = FALLBACK_LANGUAGE;
 
 init();
 
@@ -106,16 +127,25 @@ function byId(id) {
 
 async function init() {
   const config = await loadConfig({ render: false }).catch(() => ({}));
-  const configuredLanguage = normalizeLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
+  configuredLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
   i18n = await loadI18n(configuredLanguage);
   bind();
+  applyLanguage(configuredLanguage);
   renderConfig(config || {});
   setView("console");
-  const appInfoPromise = loadAppInfo();
-  const refreshPromise = refresh();
-  await Promise.allSettled([appInfoPromise, refreshPromise]);
-  refreshBalance();
-  scheduleNextRefresh();
+  await Promise.allSettled([loadAppInfo(), refresh()]);
+  runSoon(loadCodexAdapter);
+  runSoon(() => checkForUpdates({ silent: true }));
+  runSoon(refreshBalance);
+}
+
+function runSoon(task) {
+  const run = () => Promise.resolve().then(task).catch(() => {});
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(run, { timeout: 1500 });
+    return;
+  }
+  setTimeout(run, 0);
 }
 
 async function loadI18n(targetLanguage) {
@@ -123,20 +153,26 @@ async function loadI18n(targetLanguage) {
     const manifestResponse = await fetch("/api/languages", { cache: "no-store" });
     if (!manifestResponse.ok) throw new Error("Failed to load languages");
     const manifest = await manifestResponse.json();
+    systemLanguageHints = languageHintsFromManifest(manifest);
     const loadedLanguages = Array.isArray(manifest.languages) ? manifest.languages : [];
     languages = loadedLanguages.length > 0
       ? loadedLanguages.map((language) => ({ id: normalizeLanguageId(language.id), name: language.name || language.id, url: language.url || "" })).filter((language) => language.id)
       : [];
     renderLanguageOptions();
-    const languageId = normalizeLanguageId(targetLanguage);
+    const languageId = resolveLanguageId(targetLanguage);
     const pack = await fetchLanguagePack(languageId);
     if (pack) languages = mergeLanguageName(languages, languageId, pack.languageName || languageId);
     uiLanguage = languageId;
+    configuredLanguage = normalizeConfiguredLanguageId(targetLanguage);
+    i18n = pack ? { [languageId]: pack } : {};
     renderLanguageOptions();
-    return pack ? { [languageId]: pack } : {};
+    return i18n;
   } catch {
-    uiLanguage = normalizeLanguageId(targetLanguage);
+    configuredLanguage = normalizeConfiguredLanguageId(targetLanguage);
+    uiLanguage = resolveLanguageId(targetLanguage);
     languages = [];
+    systemLanguageHints = [];
+    i18n = {};
     renderLanguageOptions();
     return {};
   }
@@ -147,20 +183,25 @@ function bind() {
   els.restartButton.addEventListener("click", () => actionPost("/api/restart", t("restartingTitle"), t("restartingDetail")));
   els.stopButton.addEventListener("click", () => actionPost("/api/stop", t("stoppingTitle"), t("stoppingDetail")));
   if (els.refreshBalanceButton) els.refreshBalanceButton.addEventListener("click", refreshBalance);
+  if (els.copyTomlButton) els.copyTomlButton.addEventListener("click", copyConfigToml);
   if (els.logStream) els.logStream.addEventListener("scroll", handleLogScroll);
+  document.querySelector(".windowbar")?.addEventListener("contextmenu", (event) => event.preventDefault());
   document.addEventListener("visibilitychange", () => scheduleNextRefresh(0));
+  window.addEventListener(CONFIG_CHANGED_EVENT, () => scheduleExternalConfigSync());
   if (els.toolConfigList) {
     els.toolConfigList.addEventListener("input", handleConfigInput);
     els.toolConfigList.addEventListener("change", handleConfigInput);
   }
 
-  [els.showThinking, els.communityToolCodeEnabled, els.uiLanguage, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput].forEach((input) => {
+  [els.showThinking, els.autoStart, els.uiLanguage, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
   });
 
   onRadioChange("CONFIG_TAB", setConfigTab);
+  onRadioChange("CATALOG_MODE", handleConfigInput);
+  onRadioChange("UPSTREAM_MODEL_OVERRIDE", handleConfigInput);
   onRadioChange("DEEPSEEK_THINKING", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
@@ -181,6 +222,7 @@ function bind() {
     item.addEventListener("click", (event) => {
       event.preventDefault();
       setView(item.dataset.view || "console");
+      if (currentView === "about") markUpdateNoticeSeen();
       if (currentView === "config" && currentConfigTab === "tools") ensureToolsLoaded();
     });
   });
@@ -240,13 +282,16 @@ async function saveConfig() {
       body: JSON.stringify(payload),
     });
     if (!response.ok) throw new Error("Config save failed");
+    const status = await response.json().catch(() => null);
     const needsRestart = hasRestartRequiredChanges(payload);
     lastSavedConfig = normalizeConfigPayload(payload);
     pendingConfig = null;
     if (needsRestart) restartRequired = true;
+    if (status && status.config_version) latestConfigVersion = String(status.config_version);
     renderConfigSaveState(restartRequired ? "savedRestart" : "saved");
     configSaving = false;
     await loadConfig();
+    await loadCodexAdapter().catch(() => {});
     if (toolsLoaded) await loadTools();
     await refresh({ forceLogs: true, force: true });
   } catch (error) {
@@ -267,13 +312,16 @@ async function refresh(options = {}) {
   const started = performance.now();
   try {
     const data = await (await fetch("/api/status", { cache: "no-store" })).json();
+    await syncConfigIfChanged(data.config_version);
     renderStatus(data);
     renderUsage(data.runtime || {});
     updateLatestLogs(data.events || [], { force: Boolean(options.forceLogs) });
   } catch (error) {
     latestRunning = false;
+    latestStarting = false;
     els.running.textContent = t("unavailable");
     els.statusPill.classList.remove("running");
+    els.statusPill.classList.remove("starting");
     renderButtons();
     updateLatestLogs([{
       ts: new Date().toISOString(),
@@ -292,10 +340,36 @@ async function refresh(options = {}) {
   }
 }
 
-async function loadConfig() {
+async function syncConfigIfChanged(configVersion) {
+  const version = String(configVersion || "");
+  if (!version || version === latestConfigVersion || pendingConfig || configSaving) return;
+  latestConfigVersion = version;
+  await loadConfig().catch(() => null);
+  await loadCodexAdapter().catch(() => null);
+}
+
+function scheduleExternalConfigSync() {
+  if (externalConfigSyncTimer) clearTimeout(externalConfigSyncTimer);
+  externalConfigSyncTimer = setTimeout(() => {
+    externalConfigSyncTimer = null;
+    syncExternalConfig().catch(() => {});
+  }, 40);
+}
+
+async function syncExternalConfig() {
+  if (pendingConfig || configSaving) return;
+  currentConfigSignature = "";
+  await loadConfig();
+  await loadCodexAdapter().catch(() => null);
+  if (toolsLoaded) await loadTools().catch(() => null);
+  await refresh({ force: true, forceLogs: true });
+}
+
+async function loadConfig(options = {}) {
   const started = performance.now();
   const config = await (await fetch("/api/config", { cache: "no-store" })).json();
-  renderConfig(config || {});
+  if (config && config.config_version) latestConfigVersion = String(config.config_version);
+  if (options.render !== false) renderConfig(config || {});
   noteSlow("loadConfig", performance.now() - started);
   return config;
 }
@@ -310,13 +384,29 @@ async function loadTools() {
   return data.tools || [];
 }
 
+async function loadCodexAdapter() {
+  const data = await (await fetch("/api/codex-adapter", { cache: "no-store" })).json();
+  renderCodexAdapter(data || {});
+  return data || {};
+}
+
+async function checkForUpdates(options = {}) {
+  try {
+    latestUpdateCheck = await (await fetch("/api/update-check", { cache: "no-store" })).json();
+  } catch (error) {
+    latestUpdateCheck = { ok: false, has_update: false, error: error.message || String(error) };
+  }
+  renderUpdateState({ silent: Boolean(options.silent) });
+  return latestUpdateCheck;
+}
+
 async function ensureToolsLoaded() {
   if (toolsLoaded && currentTools.length > 0) return currentTools;
   return loadTools();
 }
 
 async function ensureLanguageLoaded(languageId) {
-  const target = normalizeLanguageId(languageId);
+  const target = resolveLanguageId(languageId);
   if (i18n[target]) return i18n[target];
   const pack = await fetchLanguagePack(target);
   if (!pack) return null;
@@ -329,9 +419,17 @@ async function ensureLanguageLoaded(languageId) {
 async function fetchLanguagePack(languageId) {
   const target = normalizeLanguageId(languageId);
   if (!target) return null;
-  const manifest = await fetch("/api/languages", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null);
-  const language = Array.isArray(manifest && manifest.languages)
-    ? manifest.languages.find((item) => normalizeLanguageId(item && item.id) === target)
+  let loadedLanguages = languages;
+  if (!Array.isArray(loadedLanguages) || loadedLanguages.length === 0) {
+    const manifest = await fetch("/api/languages", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null);
+    systemLanguageHints = languageHintsFromManifest(manifest);
+    loadedLanguages = Array.isArray(manifest && manifest.languages)
+      ? manifest.languages.map((language) => ({ id: normalizeLanguageId(language.id), name: language.name || language.id, url: language.url || "" })).filter((language) => language.id)
+      : [];
+    languages = loadedLanguages;
+  }
+  const language = Array.isArray(loadedLanguages)
+    ? loadedLanguages.find((item) => normalizeLanguageId(item && item.id) === target)
     : null;
   if (!language || !language.url) return null;
   const response = await fetch(language.url, { cache: "no-store" }).catch(() => null);
@@ -423,8 +521,11 @@ async function loadOlderLogs() {
 
 function renderStatus(data) {
   const runtime = data.runtime || {};
+  const runtimeStatus = String(data.runtime_status || runtime.status || "").toLowerCase();
+  const isStarting = !data.running && runtimeStatus === RUNTIME_STATUS_STARTING;
   const signature = stableStringify({
     running: Boolean(data.running),
+    runtime_status: runtimeStatus,
     pid: data.pid || "",
     process_label: data.process_label || "",
     active_requests: runtime.active_requests || 0,
@@ -435,8 +536,10 @@ function renderStatus(data) {
   if (signature === lastStatusSignature) return;
   lastStatusSignature = signature;
   latestRunning = Boolean(data.running);
+  latestStarting = isStarting;
   els.statusPill.classList.toggle("running", latestRunning);
-  els.running.textContent = latestRunning ? t("running") : t("stopped");
+  els.statusPill.classList.toggle("starting", latestStarting);
+  els.running.textContent = latestRunning ? t("running") : (latestStarting ? t("starting") : t("stopped"));
   els.pidLabel.textContent = data.process_label || (data.process_mode === "inline" ? t("appPid") : t("proxyPid"));
   els.pid.textContent = data.pid || "-";
   els.activeRequests.textContent = formatNumber(runtime.active_requests || 0);
@@ -448,9 +551,9 @@ function renderStatus(data) {
 }
 
 function renderButtons() {
-  els.startButton.disabled = busy || latestRunning;
+  els.startButton.disabled = busy || latestRunning || latestStarting;
   els.restartButton.disabled = busy || !latestRunning;
-  els.stopButton.disabled = busy || !latestRunning;
+  els.stopButton.disabled = busy || (!latestRunning && !latestStarting);
   els.startButton.textContent = latestRunning ? t("started") : t("start");
   els.restartButton.textContent = t("restart");
   els.stopButton.textContent = t("stop");
@@ -466,24 +569,143 @@ function renderConfig(config) {
   currentConfigSignature = configSignature;
 
   setRadioValue("DEEPSEEK_THINKING", config.DEEPSEEK_THINKING || "auto");
+  setRadioValue("CATALOG_MODE", normalizeCatalogMode(config.CATALOG_MODE));
+  setRadioValue("UPSTREAM_MODEL_OVERRIDE", normalizeUpstreamModelOverride(config.UPSTREAM_MODEL_OVERRIDE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
   const nextTheme = config.UI_THEME || "system";
   setRadioValue("UI_THEME", nextTheme);
   els.showThinking.checked = !/^(0|false|no|off|disabled)$/i.test(String(config.SHOW_THINKING || "true"));
-  if (els.communityToolCodeEnabled) els.communityToolCodeEnabled.checked = isTruthy(config.COMMUNITY_TOOL_CODE_ENABLED || "false");
+  if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
-  const nextLanguage = normalizeLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
+  const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
   if (document.activeElement !== els.uiLanguage) els.uiLanguage.value = nextLanguage;
   els.billingCachedInput.value = config.BILLING_CACHED_INPUT_CNY || "0.025";
   els.billingCacheMissInput.value = config.BILLING_CACHE_MISS_INPUT_CNY || "3";
   els.billingOutput.value = config.BILLING_OUTPUT_CNY || "6";
+  currentAdapterSignature = "";
   applyTheme(nextTheme);
-  if (nextLanguage !== uiLanguage) applyLanguage(nextLanguage);
+  if (resolveLanguageId(nextLanguage) !== uiLanguage || nextLanguage !== configuredLanguage) applyLanguage(nextLanguage);
   lastSavedConfig = normalizeConfigPayload(buildConfigPayload());
   lastUsageSignature = "";
   lastTurnSignature = "";
   if (!restartRequired) renderConfigSaveState("clean");
+  renderCodexAdapter(latestAdapter || {});
+}
+
+function renderCodexAdapter(adapter) {
+  latestAdapter = adapter || {};
+  const signature = stableStringify({
+    adapter: latestAdapter,
+    model: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE") || (lastSavedConfig && lastSavedConfig.UPSTREAM_MODEL_OVERRIDE)),
+    catalogMode: normalizeCatalogMode(getRadioValue("CATALOG_MODE") || (lastSavedConfig && lastSavedConfig.CATALOG_MODE)),
+  });
+  if (signature === currentAdapterSignature) return;
+  currentAdapterSignature = signature;
+  const toml = String(latestAdapter.toml_snippet || "");
+  if (els.configTomlCode) els.configTomlCode.textContent = toml || "-";
+  if (els.configTomlStatus) {
+    if (latestAdapter.ready) {
+      els.configTomlStatus.textContent = [
+        t("codexAdapterReady"),
+        latestAdapter.catalog_mode ? t("catalogMode") + ": " + catalogModeLabel(latestAdapter.catalog_mode) : "",
+        latestAdapter.catalog_path ? latestAdapter.catalog_path : "",
+      ].filter(Boolean).join(" · ");
+    } else {
+      els.configTomlStatus.textContent = latestAdapter.error || t("codexAdapterMissing");
+    }
+  }
+}
+
+function catalogModeLabel(value) {
+  const mode = normalizeCatalogMode(value);
+  if (mode === "auto") return t("catalogModeAuto");
+  if (mode === "builtin") return t("catalogModeBuiltin");
+  return t("catalogModeDefault");
+}
+
+async function copyConfigToml() {
+  const text = configTomlCopyText(els.configTomlCode ? els.configTomlCode.textContent : "");
+  if (!text || text === "-") {
+    if (els.configTomlCopyStatus) els.configTomlCopyStatus.textContent = t("codexAdapterMissing");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    if (els.configTomlCopyStatus) {
+      els.configTomlCopyStatus.textContent = t("copied");
+      window.setTimeout(() => {
+        if (els.configTomlCopyStatus) els.configTomlCopyStatus.textContent = "";
+      }, 1800);
+    }
+  } catch {
+    if (els.configTomlCopyStatus) els.configTomlCopyStatus.textContent = t("copyFailed");
+  }
+}
+
+function configTomlCopyText(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n")
+    .trim();
+}
+
+function renderUpdateState(options = {}) {
+  const hasUpdate = Boolean(latestUpdateCheck && latestUpdateCheck.has_update);
+  if (els.aboutUpdateDot) els.aboutUpdateDot.hidden = !hasUpdate || isUpdateNoticeSeen(latestUpdateCheck);
+  if (els.updateButtonDot) els.updateButtonDot.hidden = !hasUpdate;
+  if (!els.aboutStatus || !latestUpdateCheck || options.silent) return;
+
+  if (hasUpdate) {
+    setAboutStatus(renderUpdateAvailableMessage(latestUpdateCheck), false, { html: true });
+  } else if (latestUpdateCheck.ok) {
+    setAboutStatus(updateMessage("updateCurrent", latestUpdateCheck), false);
+  } else {
+    setAboutStatus(updateMessage("updateCheckFailed", latestUpdateCheck), true);
+  }
+}
+
+function updateNoticeVersion(data = latestUpdateCheck) {
+  return String(data && (data.latest_version || data.current_version) || "").trim();
+}
+
+function isUpdateNoticeSeen(data = latestUpdateCheck) {
+  const version = updateNoticeVersion(data);
+  return Boolean(version && localStorage.getItem(UPDATE_NOTICE_STORAGE_KEY) === version);
+}
+
+function markUpdateNoticeSeen() {
+  const version = updateNoticeVersion();
+  if (!version) return;
+  localStorage.setItem(UPDATE_NOTICE_STORAGE_KEY, version);
+  renderUpdateState({ silent: true });
+}
+
+function renderUpdateAvailableMessage(data = {}) {
+  const url = data.url || (appInfo && appInfo.urls && appInfo.urls.releases) || "";
+  const version = data.latest_version || data.current_version || "-";
+  const prefix = t("updateAvailablePrefix");
+  if (!url) return updateMessage("updateAvailable", data);
+  return `${escapeHtml(prefix)} <a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(version)}</a>`;
+}
+
+function updateMessage(key, data = {}) {
+  return t(key)
+    .replace("{version}", data.latest_version || data.current_version || "-")
+    .replace("{current}", data.current_version || "-")
+    .replace("{error}", data.error || t("unknownError"));
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function renderTools(tools, config) {
@@ -495,6 +717,7 @@ function renderTools(tools, config) {
     description: tool.description,
     icon: tool.icon,
     iconPath: tool.iconPath,
+    systemTool: isSystemTool(tool),
     labels: Array.isArray(tool.labels) ? tool.labels.map((label) => ({
       id: label.id,
       labelKey: label.labelKey,
@@ -529,6 +752,7 @@ function renderToolCard(tool) {
   const card = document.createElement("section");
   card.className = "tool-card";
   card.dataset.toolId = tool.id || "";
+  const systemTool = isSystemTool(tool);
 
   const header = document.createElement("div");
   header.className = "tool-card-header";
@@ -559,24 +783,40 @@ function renderToolCard(tool) {
 
   header.appendChild(icon);
   header.appendChild(titleWrap);
+  if (!systemTool) header.appendChild(renderToolEnableSwitch(tool));
   card.appendChild(header);
 
   const body = document.createElement("div");
   body.className = "tool-card-body";
-  const fields = Array.isArray(tool.config) ? tool.config : [];
-  if (fields.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "tool-empty";
-    empty.textContent = t("toolNoOptions");
-    body.appendChild(empty);
-  } else {
+  const fields = systemTool ? [] : (Array.isArray(tool.config) ? tool.config : []);
+  if (fields.length > 0) {
     fields.forEach((field, index) => {
       if (index > 0) body.appendChild(settingDivider());
       body.appendChild(renderToolField(field));
     });
   }
-  card.appendChild(body);
+  if (fields.length > 0) card.appendChild(body);
   return card;
+}
+
+function isSystemTool(tool) {
+  const id = String(tool && tool.id || "");
+  return id === "apply_patch" || id === "web_search";
+}
+
+function renderToolEnableSwitch(tool) {
+  const label = document.createElement("label");
+  label.className = "toggle-switch tool-card-switch";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.name = ENABLED_TOOLS_KEY;
+  input.dataset.toolId = normalizeToolId(tool && tool.id);
+  input.checked = defaultToolEnabled(tool);
+  const slider = document.createElement("span");
+  slider.className = "slider";
+  label.appendChild(input);
+  label.appendChild(slider);
+  return label;
 }
 
 function normalizeToolLabels(labels) {
@@ -708,6 +948,13 @@ function renderTextAreaField(field) {
 }
 
 function applyToolConfigValues(config) {
+  const enabledTools = parseEnabledTools(config && config[ENABLED_TOOLS_KEY], currentTools);
+  for (const tool of currentTools) {
+    if (isSystemTool(tool)) continue;
+    const id = normalizeToolId(tool && tool.id);
+    const input = document.querySelector(`[name="${cssEscape(ENABLED_TOOLS_KEY)}"][data-tool-id="${cssEscape(id)}"]`);
+    if (input) input.checked = enabledTools.includes(id);
+  }
   for (const field of toolConfigFields()) {
     const value = config[field.key] !== undefined ? String(config[field.key]) : String(field.defaultValue || "");
     if (field.type === "segmented") setRadioValue(field.key, value);
@@ -724,6 +971,15 @@ function applyToolConfigValues(config) {
 
 function collectToolConfigPayload() {
   const payload = {};
+  if (!toolsLoaded || currentTools.length === 0) return payload;
+  const enabledTools = [];
+  for (const tool of currentTools) {
+    if (isSystemTool(tool)) continue;
+    const id = normalizeToolId(tool && tool.id);
+    const input = document.querySelector(`[name="${cssEscape(ENABLED_TOOLS_KEY)}"][data-tool-id="${cssEscape(id)}"]`);
+    if (input && input.checked) enabledTools.push(id);
+  }
+  payload[ENABLED_TOOLS_KEY] = stringifyEnabledTools(enabledTools);
   for (const field of toolConfigFields()) {
     if (!field.key) continue;
     if (field.type === "segmented") payload[field.key] = getRadioValue(field.key) || field.defaultValue || "";
@@ -742,9 +998,53 @@ function collectToolConfigPayload() {
 function toolConfigFields() {
   const fields = [];
   for (const tool of currentTools) {
+    if (isSystemTool(tool)) continue;
     for (const field of Array.isArray(tool.config) ? tool.config : []) fields.push(field);
   }
   return fields;
+}
+
+function defaultToolEnabled(tool) {
+  if (!tool || tool.enabled === false) return false;
+  return String(tool.source || "").trim().toLowerCase() !== "community";
+}
+
+function parseEnabledTools(value, tools = currentTools) {
+  if (value === undefined || value === null || value === "") {
+    return (Array.isArray(tools) ? tools : [])
+      .filter((tool) => !isSystemTool(tool) && defaultToolEnabled(tool))
+      .map((tool) => normalizeToolId(tool && tool.id))
+      .filter(Boolean)
+      .sort();
+  }
+  if (Array.isArray(value)) return uniqueToolIds(value);
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return uniqueToolIds(parsed);
+  } catch {}
+  return uniqueToolIds(text.split(","));
+}
+
+function stringifyEnabledTools(ids) {
+  return JSON.stringify(uniqueToolIds(ids));
+}
+
+function uniqueToolIds(ids) {
+  const seen = new Set();
+  const output = [];
+  for (const id of Array.isArray(ids) ? ids : []) {
+    const normalized = normalizeToolId(id);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output.sort();
+}
+
+function normalizeToolId(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 64);
 }
 
 function settingDivider() {
@@ -1062,6 +1362,7 @@ function renderAppInfo(info) {
 }
 
 function renderBalance(data) {
+  lastBalanceData = data || null;
   if (!data || !data.ok) {
     const code = data && data.code;
     const message = code === "missing_api_key" ? t("balanceNoApiKey") : t("balanceFailed");
@@ -1098,7 +1399,15 @@ function handleAboutAction(action) {
   if (action === "feedback") return openOrExplain(urls.feedback, t("feedbackUnavailable"));
   if (action === "source") return openOrExplain(urls.source, t("sourceUnavailable"));
   if (action === "license") return openOrExplain(urls.license, t("licenseUnavailable"));
-  if (action === "update") return openOrExplain(urls.releases, t("updateUnavailable"));
+  if (action === "update") return handleUpdateCheck();
+}
+
+async function handleUpdateCheck() {
+  markUpdateNoticeSeen();
+  setAboutStatus(t("checkingUpdate"), false);
+  const update = await checkForUpdates();
+  renderUpdateState();
+  return update;
 }
 
 async function handleWindowAction(action) {
@@ -1114,8 +1423,9 @@ function openOrExplain(url, fallback) {
   setAboutStatus(t("openExternal"), false);
 }
 
-function setAboutStatus(message, warning) {
-  els.aboutStatus.textContent = message;
+function setAboutStatus(message, warning, options = {}) {
+  if (options.html) els.aboutStatus.innerHTML = message;
+  else els.aboutStatus.textContent = message;
   els.aboutStatus.classList.toggle("warning", Boolean(warning));
 }
 
@@ -1141,11 +1451,14 @@ function buildConfigPayload() {
   return {
     ...collectToolConfigPayload(),
     DEEPSEEK_THINKING: getRadioValue("DEEPSEEK_THINKING") || "auto",
-    COMMUNITY_TOOL_CODE_ENABLED: els.communityToolCodeEnabled && els.communityToolCodeEnabled.checked ? "true" : "false",
+    CATALOG_MODE: normalizeCatalogMode(getRadioValue("CATALOG_MODE")),
+    UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE")),
+    AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
+    COMMUNITY_TOOL_CODE_ENABLED: "false",
     SHOW_THINKING: els.showThinking && els.showThinking.checked ? "true" : "false",
     UI_THEME: getRadioValue("UI_THEME") || "system",
     UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(getRadioValue("UI_CLOSE_BEHAVIOR")),
-    UI_LANGUAGE: els.uiLanguage ? normalizeLanguageId(els.uiLanguage.value) : DEFAULT_LANGUAGE,
+    UI_LANGUAGE: els.uiLanguage ? normalizeConfiguredLanguageId(els.uiLanguage.value) : DEFAULT_LANGUAGE,
     PROXY_PORT: normalizePort(els.proxyPort ? els.proxyPort.value : "", 8787),
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
     BILLING_CACHED_INPUT_CNY: normalizeRateInput(els.billingCachedInput ? els.billingCachedInput.value : "", 0.025),
@@ -1233,21 +1546,28 @@ async function previewWindowTheme(theme) {
 
 function applyLanguage(value) {
   const previousLanguage = uiLanguage;
+  const previousConfiguredLanguage = configuredLanguage;
   const toolValues = collectToolConfigPayload();
-  const requested = normalizeLanguageId(value);
-  uiLanguage = i18n[requested] ? requested : DEFAULT_LANGUAGE;
-  if (uiLanguage === previousLanguage && document.documentElement.lang === uiLanguage) return;
+  const requested = normalizeConfiguredLanguageId(value);
+  const resolved = resolveLanguageId(requested);
+  configuredLanguage = requested;
+  uiLanguage = resolved;
+  if (uiLanguage === previousLanguage && configuredLanguage === previousConfiguredLanguage && document.documentElement.lang === uiLanguage) return;
   document.documentElement.lang = uiLanguage;
   document.querySelectorAll("[data-i18n]").forEach((node) => {
     node.textContent = t(node.dataset.i18n);
   });
-  if (els.uiLanguage && els.uiLanguage.value !== uiLanguage) els.uiLanguage.value = uiLanguage;
+  if (els.uiLanguage && els.uiLanguage.value !== configuredLanguage) els.uiLanguage.value = configuredLanguage;
   setView(currentView);
   renderButtons();
+  if (lastBalanceData) renderBalance(lastBalanceData);
   lastStatusSignature = "";
   lastUsageSignature = "";
   lastLogRenderSignature = "";
   lastTurnSignature = "";
+  currentAdapterSignature = "";
+  renderCodexAdapter(latestAdapter || {});
+  renderUpdateState({ silent: true });
   if (currentTools.length > 0) {
     currentToolsSignature = "";
     renderTools(currentTools, toolValues);
@@ -1257,26 +1577,99 @@ function applyLanguage(value) {
 
 function renderLanguageOptions() {
   if (!els.uiLanguage) return;
-  const previous = normalizeLanguageId(els.uiLanguage.value || uiLanguage || DEFAULT_LANGUAGE);
+  const previous = normalizeConfiguredLanguageId(els.uiLanguage.value || configuredLanguage || DEFAULT_LANGUAGE);
   els.uiLanguage.replaceChildren();
+  const systemOption = document.createElement("option");
+  systemOption.value = SYSTEM_LANGUAGE;
+  systemOption.textContent = systemLanguageLabel();
+  els.uiLanguage.appendChild(systemOption);
   for (const language of languages) {
     const option = document.createElement("option");
     option.value = language.id;
     option.textContent = language.name;
     els.uiLanguage.appendChild(option);
   }
-  els.uiLanguage.value = languages.some((language) => language.id === previous) ? previous : DEFAULT_LANGUAGE;
+  els.uiLanguage.value = previous === SYSTEM_LANGUAGE || languages.some((language) => language.id === previous) ? previous : DEFAULT_LANGUAGE;
 }
 
-function languageOptions(packs) {
-  return Object.entries(packs || {})
-    .filter(([, pack]) => pack && typeof pack === "object")
-    .map(([id, pack]) => ({ id, name: pack.languageName || id }))
-    .sort((left, right) => left.id.localeCompare(right.id));
+function languageHintsFromManifest(manifest) {
+  const hints = [];
+  const add = (value) => {
+    const normalized = normalizeLocaleId(value);
+    if (normalized && !hints.includes(normalized)) hints.push(normalized);
+  };
+  add(manifest && manifest.system_locale);
+  if (Array.isArray(manifest && manifest.system_locales)) manifest.system_locales.forEach(add);
+  return hints;
 }
 
 function normalizeLanguageId(value) {
-  return String(value || DEFAULT_LANGUAGE).trim().replace(/-/g, "_").toLowerCase() || DEFAULT_LANGUAGE;
+  const normalized = String(value || FALLBACK_LANGUAGE).trim().replace(/-/g, "_").toLowerCase();
+  return normalized && normalized !== SYSTEM_LANGUAGE ? normalized : FALLBACK_LANGUAGE;
+}
+
+function normalizeLocaleId(value) {
+  return String(value || "").trim().replace(/-/g, "_").toLowerCase();
+}
+
+function normalizeConfiguredLanguageId(value) {
+  const normalized = String(value || DEFAULT_LANGUAGE).trim().replace(/-/g, "_").toLowerCase();
+  return normalized || DEFAULT_LANGUAGE;
+}
+
+function resolveLanguageId(value) {
+  const requested = normalizeConfiguredLanguageId(value);
+  if (requested !== SYSTEM_LANGUAGE) return normalizeLanguageId(requested);
+  const available = languages.map((language) => normalizeLanguageId(language && language.id)).filter(Boolean);
+  const availableSet = new Set(available);
+  for (const locale of systemLanguageIds()) {
+    if (availableSet.has(locale)) return locale;
+    const preferred = preferredLanguageForPrefix(locale, availableSet);
+    if (preferred) return preferred;
+  }
+  return availableSet.has(FALLBACK_LANGUAGE) ? FALLBACK_LANGUAGE : (available[0] || FALLBACK_LANGUAGE);
+}
+
+function preferredLanguageForPrefix(locale, availableSet) {
+  const prefix = String(locale || "").split("_")[0];
+  if (!prefix) return "";
+  const preferredByPrefix = {
+    zh: ["zh_cn", "zh_hans", "zh_tw", "zh_hk"],
+    en: ["en_us", "en_gb"],
+    ja: ["ja_jp"],
+    ko: ["ko_kr"],
+    fr: ["fr_fr"],
+    de: ["de_de"],
+    ru: ["ru_ru"],
+  };
+  for (const id of preferredByPrefix[prefix] || []) {
+    if (availableSet.has(id)) return id;
+  }
+  return Array.from(availableSet).find((id) => id === prefix || id.startsWith(prefix + "_")) || "";
+}
+
+function navigatorLanguageIds() {
+  const values = [];
+  if (Array.isArray(navigator.languages)) values.push(...navigator.languages);
+  values.push(navigator.language || navigator.userLanguage || "");
+  return values.map(normalizeLocaleId).filter(Boolean);
+}
+
+function systemLanguageIds() {
+  const output = [];
+  for (const id of systemLanguageHints.concat(navigatorLanguageIds())) {
+    const normalized = normalizeLocaleId(id);
+    if (!normalized || output.includes(normalized)) continue;
+    output.push(normalized);
+  }
+  return output;
+}
+
+function systemLanguageLabel() {
+  const resolved = resolveLanguageId(SYSTEM_LANGUAGE);
+  const matched = languages.find((language) => normalizeLanguageId(language && language.id) === resolved);
+  const label = t("languageSystem");
+  return label + (matched && matched.name ? " (" + matched.name + ")" : "");
 }
 
 function t(key) {
@@ -1317,6 +1710,20 @@ function normalizePort(value, fallback = 8787) {
 function normalizeRetentionDays(value) {
   const raw = String(value || "7");
   return raw === "1" || raw === "3" || raw === "7" || raw === "30" ? raw : "7";
+}
+
+function normalizeCatalogMode(value) {
+  const normalized = String(value || "default").trim().toLowerCase();
+  if (normalized === "auto" || normalized === "dynamic") return "auto";
+  if (normalized === "builtin") return "builtin";
+  return "default";
+}
+
+function normalizeUpstreamModelOverride(value) {
+  const normalized = String(value || "default").trim().toLowerCase();
+  if (normalized === "flash" || normalized === "deepseek-v4-flash") return "deepseek-v4-flash";
+  if (normalized === "pro" || normalized === "deepseek-v4-pro") return "deepseek-v4-pro";
+  return "default";
 }
 
 function normalizeCloseBehavior(value) {
@@ -1377,7 +1784,11 @@ function formatLogDetail(type, detail) {
     ].filter(Boolean).join("\n");
   }
   if (type === "model_alias_applied") {
-    return detail.model ? t("model") + ": " + detail.model : "";
+    return [
+      detail.requested_model ? "requested_model: " + detail.requested_model : "",
+      detail.model ? t("model") + ": " + detail.model : "",
+      detail.source ? "source: " + detail.source : "",
+    ].filter(Boolean).join("\n");
   }
   return formatDetail(detail);
 }

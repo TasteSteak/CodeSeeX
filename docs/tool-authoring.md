@@ -3,20 +3,21 @@
 CodeSeeX discovers tools from two places:
 
 - Built-in tools under `src/tools/<tool>/`
-- Community tools under `extension/tools/<tool>/`
+- Community tools under `~/.codeseex/extension/tools/<tool>/` by default
 
-For community tools, installation should be lightweight: drop a folder into `extension/tools/` next to `CodeSeeX.exe` and restart CodeSeeX. In development, use `extension/tools/` in the project root.
+For community tools, installation should be lightweight: drop a folder into `~/.codeseex/extension/tools/` and restart CodeSeeX. In development, set `PROXY_DATA_DIR` if you want to test a separate runtime data directory.
 
 ## Folder Layout
 
 ```text
-extension/
-  tools/
-    my-tool/
-      manifest.json
-      index.js
-      assets/
-        icon.svg
+~/.codeseex/
+  extension/
+    tools/
+      my-tool/
+        manifest.json
+        index.js
+        assets/
+          icon.svg
 ```
 
 Only `manifest.json` is required for the tool to appear in the client. Add `index.js` only when the tool needs proxy/runtime behavior. Add `assets/icon.svg` or `assets/icon.png` when the tool needs a custom icon.

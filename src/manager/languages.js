@@ -1,7 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const DEFAULT_LANGUAGE_ID = "zh_cn";
+const SYSTEM_LANGUAGE_ID = "system";
+const DEFAULT_LANGUAGE_ID = SYSTEM_LANGUAGE_ID;
+const FALLBACK_LANGUAGE_ID = "en_us";
 const LANG_DIR = path.join(__dirname, "static", "lang");
 
 function listLanguages(langDir = LANG_DIR) {
@@ -75,7 +77,9 @@ function stringField(value) {
 
 module.exports = {
   DEFAULT_LANGUAGE_ID,
+  FALLBACK_LANGUAGE_ID,
   LANG_DIR,
+  SYSTEM_LANGUAGE_ID,
   languageIdFromFilename,
   languageFilePath,
   listLanguages,

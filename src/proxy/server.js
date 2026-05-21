@@ -10,7 +10,6 @@ const { assistantForStorage, buildConversation, buildResponseRecord, buildStored
 const { createToolContext, splitToolCalls } = require("./tools");
 const { streamDeepSeekResponseV2, turnOutputFromAssistant } = require("./streaming");
 const { mapUsage, mergeUsage } = require("./usage");
-const { executeProxyWebSearch } = require("./web-search-executor");
 const { executeListDirectory, executeReadFileRange, executeWorkspaceSearch } = require("./workspace-tools");
 
 const DEBUG_MAX_BYTES = 256 * 1024;
@@ -254,7 +253,12 @@ async function handleResponsesCreate(req, res, requestBody, context) {
     const workspaceScope = resolveWorkspaceScope(requestBody, normalizedInput, config);
     const currentMessages = inputToMessages(normalizedInput);
     const conversationMessages = buildConversation(requestBody, previousRecord, currentMessages);
-    const toolContext = createToolContext(requestBody.tools || [], { rootDir: workspaceScope.rootDir, extensionDir: config.extensionDir });
+    const toolContext = createToolContext(requestBody.tools || [], {
+      rootDir: workspaceScope.rootDir,
+      extensionDir: config.extensionDir,
+      communityToolCodeEnabled: config.communityToolCodeEnabled,
+      toolConfig: config,
+    });
     const contextDiagnostic = captureContextDiagnostic(context, {
       requestBody,
       previousRecord,
@@ -427,18 +431,20 @@ async function handleResponsesCreate(req, res, requestBody, context) {
 
 function applyCodexModelAlias(requestBody, config, runtime) {
   const requestedModel = String(requestBody && requestBody.model || "");
-  const mappedModel = resolveCodexModelAlias(requestedModel, config);
+  const overrideModel = resolveUpstreamModelOverride(config);
+  const mappedModel = overrideModel || resolveCodexModelAlias(requestedModel, config);
   if (!mappedModel || mappedModel === requestedModel) {
     return { requestBody, requestedModel, model: requestedModel, aliased: false };
   }
   pushEvent(runtime, {
     type: "model_alias_applied",
     level: "info",
-    message: "Codex official model request mapped to CodeSeeX model.",
+    message: overrideModel ? "CodeSeeX upstream model override applied." : "Codex official model request mapped to CodeSeeX model.",
     audience: "user",
     detail: {
       requested_model: requestedModel,
       model: mappedModel,
+      source: overrideModel ? "override" : "alias",
     },
   });
   return {
@@ -447,6 +453,13 @@ function applyCodexModelAlias(requestBody, config, runtime) {
     model: mappedModel,
     aliased: true,
   };
+}
+
+function resolveUpstreamModelOverride(config = {}) {
+  const value = String(config.upstreamModelOverride || config.UPSTREAM_MODEL_OVERRIDE || "default").trim().toLowerCase();
+  if (value === "flash" || value === "deepseek-v4-flash") return "deepseek-v4-flash";
+  if (value === "pro" || value === "deepseek-v4-pro") return "deepseek-v4-pro";
+  return "";
 }
 
 function resolveWorkspaceScope(requestBody, normalizedInput, config = {}) {
@@ -1061,6 +1074,7 @@ async function proxyHostedToolContent(item, config, messages = []) {
 
 async function proxyWebSearchToolContent(item, config, messages = []) {
   const action = item && item.action ? item.action : {};
+  const { executeProxyWebSearch } = require("./web-search-executor");
   const result = await executeProxyWebSearch(action, config, { messages });
   if (!result.ok) {
     return {
