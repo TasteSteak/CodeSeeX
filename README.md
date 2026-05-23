@@ -76,6 +76,10 @@ CodeSeeX reads API credentials from the user's Codex auth configuration. It does
 
 If you self-host a DeepSeek-compatible service, set the upstream URL in `Settings -> Proxy`. Leave it blank to use the official DeepSeek API.
 
+<p align="center">
+  <img alt="CodeSeeX proxy settings with generated config.toml" src="docs/img/config-toml.png">
+</p>
+
 ## Features
 
 - Codex-compatible local API for `/v1/responses` and related model calls.
