@@ -7,7 +7,7 @@ This release focuses on MCP compatibility and upstream configuration for users r
 ### Added
 
 - Added native MCP bridge discovery for Codex-configured stdio, streamable HTTP, and legacy SSE MCP servers.
-- Added MCP smoke tests covering tools, resources, resource templates, prompts, HTTP transport, and legacy SSE transport.
+- Added MCP smoke tests covering tools, resources, resource templates, MCP prompt endpoints, HTTP transport, and legacy SSE transport.
 - Added a custom DeepSeek upstream URL field in `Settings -> Proxy` for self-hosted OpenAI-compatible endpoints.
 - Added README dashboard imagery and updated setup notes for custom upstream usage.
 
