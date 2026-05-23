@@ -88,7 +88,7 @@ function isSystemTool(tool) {
 }
 
 function isSystemToolId(id) {
-  return id === "apply_patch" || id === "web_search";
+  return id === "apply_patch" || id === "web_search" || id === "mcp_server";
 }
 
 function defaultToolEnabledValue(tool) {
@@ -166,11 +166,14 @@ function normalizeToolManifest(manifest) {
   const id = normalizeId(manifest.id);
   if (!id) return null;
   const source = normalizeToolSource(manifest.source);
+  const system = isSystemToolId(id);
   return {
     id,
     version: String(manifest.version || "1"),
     kind: String(manifest.kind || "tool"),
     source,
+    system,
+    configurable: system ? false : manifest.configurable !== false,
     enabled: manifest.enabled !== false,
     icon: manifest.icon ? String(manifest.icon) : id.slice(0, 2).toUpperCase(),
     iconPath: manifest.iconPath ? normalizeAssetPath(manifest.iconPath) : "",
@@ -216,6 +219,7 @@ function toolSortPriority(tool) {
   if (!tool) return 100;
   if (tool.id === "apply_patch") return 1;
   if (tool.id === "web_search") return 2;
+  if (tool.id === "mcp_server") return 3;
   return 10;
 }
 
@@ -340,6 +344,8 @@ function cloneTool(tool) {
     version: tool.version,
     kind: tool.kind,
     source: tool.source,
+    system: Boolean(tool.system),
+    configurable: tool.configurable !== false,
     enabled: tool.enabled,
     icon: tool.icon,
     iconPath: tool.iconPath,

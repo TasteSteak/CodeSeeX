@@ -1,27 +1,30 @@
 # Changelog
 
-## 0.3.1 - 2026-05-23
+## 0.3.2 - 2026-05-23
 
-This release focuses on MCP compatibility and upstream configuration for users running official or self-hosted DeepSeek-compatible services.
+This release focuses on self-hosted upstream configuration, README imagery, and native MCP passthrough so Codex MCP tools stay on the Codex app tool layer.
 
 ### Added
 
-- Added native MCP bridge discovery for Codex-configured stdio, streamable HTTP, and legacy SSE MCP servers.
-- Added MCP smoke tests covering tools, resources, resource templates, MCP prompt endpoints, HTTP transport, and legacy SSE transport.
+- Added an `MCP Server` system built-in tool card in the desktop Tools page.
+- Added native MCP passthrough for Codex-provided MCP tool declarations so Codex can execute and display MCP calls itself.
+- Added MCP passthrough tests covering namespace tool mapping, `type=mcp` declarations, collision handling, history replay, and non-hosted execution.
 - Added a custom DeepSeek upstream URL field in `Settings -> Proxy` for self-hosted OpenAI-compatible endpoints.
 - Added README dashboard imagery and updated setup notes for custom upstream usage.
 
 ### Changed
 
+- Changed MCP handling from CodeSeeX proxy-hosted execution to native passthrough.
 - DeepSeek upstream configuration now leaves the UI field blank for the official default and uses `https://api.deepseek.com/` at runtime.
 - Legacy official upstream values such as `https://api.deepseek.com/v1` are treated as the default and no longer appear as custom values in the UI.
 - Updated `proxy.env.example` so the upstream URL is blank by default.
 
 ### Fixed
 
-- Fixed MCP tools not being discovered or exposed when CodeSeeX was used between Codex and DeepSeek.
+- Fixed MCP calls appearing as CodeSeeX proxy custom tools instead of Codex native MCP tool usage.
+- Fixed MCP tools not being exposed to DeepSeek when CodeSeeX was used between Codex and DeepSeek.
 - Fixed MCP tool name mapping and history replay so child tool names are restored without polluting model-visible history.
-- Fixed hosted MCP tool execution for helper calls and server tool calls across streaming and non-streaming turns.
+- Fixed MCP calls being treated as CodeSeeX proxy-hosted tools instead of returning to the Codex native MCP layer.
 
 ## 0.3.0 - 2026-05-21
 

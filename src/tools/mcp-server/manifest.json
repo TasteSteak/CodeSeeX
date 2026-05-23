@@ -1,0 +1,9 @@
+{
+  "id": "mcp_server",
+  "kind": "mcp",
+  "source": "built-in",
+  "icon": "MS",
+  "name": "MCP Server",
+  "description": "Codex native MCP server tools. CodeSeeX keeps these calls on the Codex tool layer so the app can execute and display them natively.",
+  "config": []
+}

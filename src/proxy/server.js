@@ -7,7 +7,6 @@ const { addCorsHeaders, enforceLocalAccess, handleHttpError, httpError, makeId, 
 const { buildDeepSeekPayload, callDeepSeekJson, getAssistantMessage } = require("./deepseek-client");
 const { beginRequest, createRuntime, finishRequest, pushEvent, writeRuntime } = require("./runtime");
 const { assistantForStorage, buildConversation, buildResponseRecord, buildStoredRecord, estimateTokensForInput, inputToMessages, normalizeAssistant, normalizeInput, sanitizeToolContent } = require("./conversation");
-const { buildMcpInputTools, discoverCodexMcpTools, executeMcpHelperCall, executeMcpToolCall } = require("./mcp-bridge");
 const { createToolContext, splitToolCalls } = require("./tools");
 const { streamDeepSeekResponseV2, turnOutputFromAssistant } = require("./streaming");
 const { mapUsage, mergeUsage } = require("./usage");
@@ -69,7 +68,6 @@ function createProxyService(config, options = {}) {
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : config.port;
       markProxyRunning(context, { host: config.host, port: actualPort, message: "Proxy process started." });
-      warmMcpBridge(config);
       console.log("[proxy] Listening on " + runtime.base_url);
       console.log("[proxy] DeepSeek upstream: " + config.deepseekBaseUrl + "/chat/completions");
     });
@@ -146,12 +144,6 @@ function markProxyRunning(context, options = {}) {
     },
   });
   writeRuntime(config, runtime);
-}
-
-function warmMcpBridge(config) {
-  setTimeout(() => {
-    discoverCodexMcpTools(config).catch(() => {});
-  }, 100).unref();
 }
 
 function markProxyStopped(context, options = {}) {
@@ -261,14 +253,11 @@ async function handleResponsesCreate(req, res, requestBody, context) {
     const workspaceScope = resolveWorkspaceScope(requestBody, normalizedInput, config);
     const currentMessages = inputToMessages(normalizedInput);
     const conversationMessages = buildConversation(requestBody, previousRecord, currentMessages);
-    const mcpBridge = await discoverCodexMcpTools(config);
-    const mcpTools = buildMcpInputTools(mcpBridge);
     const toolContext = createToolContext(requestBody.tools || [], {
       rootDir: workspaceScope.rootDir,
       extensionDir: config.extensionDir,
       communityToolCodeEnabled: config.communityToolCodeEnabled,
       toolConfig: config,
-      extraTools: mcpTools,
     });
     const contextDiagnostic = captureContextDiagnostic(context, {
       requestBody,
@@ -289,14 +278,6 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       upstream_messages: conversationMessages,
       tools: toolContext.upstreamTools,
       response_tools: requestBody.tools || [],
-      mcp_bridge: {
-        ok: Boolean(mcpBridge && mcpBridge.ok),
-        servers: (mcpBridge && Array.isArray(mcpBridge.servers) ? mcpBridge.servers : []).map((server) => ({
-          name: server.name,
-          tool_count: Array.isArray(server.tools) ? server.tools.length : 0,
-        })),
-        errors: mcpBridge && Array.isArray(mcpBridge.errors) ? mcpBridge.errors : [],
-      },
       workspace_scope: workspaceScope,
     });
 
@@ -307,7 +288,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
         requestBody,
         messages: conversationMessages,
         toolContext,
-        config: Object.assign({}, config, { workspaceScope, mcpBridge }),
+        config: Object.assign({}, config, { workspaceScope }),
         runtime,
         authorization: req.headers.authorization || "",
         toVisibleAssistant,
@@ -371,7 +352,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       requestBody,
       messages: conversationMessages,
       toolContext,
-      config: Object.assign({}, config, { workspaceScope, mcpBridge }),
+      config: Object.assign({}, config, { workspaceScope }),
       runtime,
       authorization: req.headers.authorization || "",
     });
@@ -1079,12 +1060,6 @@ function flushRuntime(config, runtime) {
 }
 
 async function proxyHostedToolContent(item, config, messages = []) {
-  if (item && item.type === "proxy_tool_call" && item.namespace === "codeseex_mcp") {
-    return executeMcpHelperCall(item, config);
-  }
-  if (item && item.type === "proxy_tool_call" && item.mcp_server) {
-    return executeMcpToolCall(item, config);
-  }
   if (item && (item.type === "function_call" || item.type === "proxy_tool_call") && item.name === "workspace_search") {
     return executeWorkspaceSearch(item.arguments, config);
   }

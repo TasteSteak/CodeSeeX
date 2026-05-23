@@ -72,7 +72,6 @@ function normalizeTools(tools, options = {}) {
         nativeTool: tool,
         namespace: declaration.namespace || "",
         responseName,
-        mcpServer: declaration.mcpServer || "",
       });
     }
   }
@@ -157,7 +156,6 @@ function responseToolItemFromChat(toolCall, toolContext) {
   if (entry && entry.namespace) item.namespace = entry.namespace;
   if (entry && isHostedKind(entry.kind)) {
     item.type = "proxy_tool_call";
-    item.mcp_server = entry.mcpServer || entry.namespace || "";
   }
   return item;
 }
@@ -277,8 +275,7 @@ function normalizeModelFunctionTool(tool, index = 0, namespace = "") {
     description,
     parameters: normalizeSchema(parameters),
     namespace,
-    kind: tool.mcp_helper ? "hosted_mcp_helper" : (tool.mcp_server || tool.server ? "hosted_mcp" : ""),
-    mcpServer: tool.mcp_server || tool.server || namespace,
+    kind: "",
   };
 }
 
@@ -336,23 +333,7 @@ function uniqueToolName(name, namespace, byName) {
 }
 
 function selectModelToolName(responseName, declaration, byName, upstreamTools) {
-  const base = sanitizeToolName(responseName);
-  if (declaration && declaration.kind === "hosted_mcp_helper") {
-    const existing = byName && byName.get(base);
-    if (!existing || existing.kind === "function") {
-      if (existing) removeUpstreamTool(upstreamTools, base);
-      if (byName) byName.delete(base);
-      return base;
-    }
-  }
   return uniqueToolName(responseName, declaration.namespace, byName);
-}
-
-function removeUpstreamTool(upstreamTools, name) {
-  const index = (Array.isArray(upstreamTools) ? upstreamTools : []).findIndex((tool) => (
-    tool && tool.function && tool.function.name === name
-  ));
-  if (index >= 0) upstreamTools.splice(index, 1);
 }
 
 function normalizeToolId(value) {

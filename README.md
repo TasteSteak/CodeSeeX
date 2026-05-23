@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.3.1" src="https://img.shields.io/badge/version-0.3.1-1f6feb">
+  <img alt="Version 0.3.2" src="https://img.shields.io/badge/version-0.3.2-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -30,7 +30,7 @@ Codex Desktop  ->  CodeSeeX local API  ->  DeepSeek API
 ## What You Get
 
 - DeepSeek V4 with 1M context: expose `deepseek-v4-pro` and `deepseek-v4-flash` to Codex with million-token catalog metadata.
-- Codex tool compatibility: keep Codex workflows such as Apply Patch, MCP, Skills, Plugins, and discovered MCP tools available through the bridge.
+- Codex tool compatibility: keep Codex workflows such as Apply Patch, MCP, Skills, Plugins, and native MCP tools available through the bridge.
 - Built-in tool layer: use CodeSeeX Web Search, workspace search, file reading, and patch support out of the box.
 - Generated setup: copy a ready-to-use `config.toml` from the CodeSeeX proxy settings page.
 - Custom upstream support: point CodeSeeX at the official DeepSeek API or a self-hosted OpenAI-compatible endpoint.
@@ -81,7 +81,7 @@ If you self-host a DeepSeek-compatible service, set the upstream URL in `Setting
 - Codex-compatible local API for `/v1/responses` and related model calls.
 - DeepSeek V4 adapter catalog for `deepseek-v4-flash` and `deepseek-v4-pro` with `1M` context metadata.
 - Compatibility with Codex built-in tool flows, including Apply Patch, MCP, Skills, and Plugins.
-- MCP bridge discovery for Codex-configured stdio, streamable HTTP, and legacy SSE MCP servers.
+- Native MCP passthrough so Codex-configured MCP tools remain executed and displayed by the Codex app tool layer.
 - Single configurable local port for the desktop manager, `/api/*`, and `/v1/*`.
 - Proxy settings for catalog mode, upstream model override, custom upstream URL, billing rates, and generated `config.toml`.
 - Streaming answer display with reasoning visibility controls and grouped proxy tool summaries.
@@ -101,7 +101,7 @@ Important runtime paths:
 
 Community tools are disabled unless enabled in configuration. Enabling community tool code means running local code from that tool package, so only use tools you trust. See [docs/tool-authoring.md](docs/tool-authoring.md) for the tool package format.
 
-MCP servers are discovered from the user's Codex MCP configuration. CodeSeeX forwards discovered MCP tools to DeepSeek and handles resource/prompt helper calls locally.
+MCP servers stay on the user's Codex configuration. CodeSeeX translates Codex-provided MCP tool declarations for DeepSeek, then returns native `function_call` items so Codex can execute and display MCP calls itself.
 
 ## Troubleshooting
 

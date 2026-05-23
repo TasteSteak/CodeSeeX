@@ -719,7 +719,8 @@ function renderTools(tools, config) {
     description: tool.description,
     icon: tool.icon,
     iconPath: tool.iconPath,
-    systemTool: isSystemTool(tool),
+    system: Boolean(tool.system),
+    configurable: tool.configurable !== false,
     labels: Array.isArray(tool.labels) ? tool.labels.map((label) => ({
       id: label.id,
       labelKey: label.labelKey,
@@ -785,7 +786,7 @@ function renderToolCard(tool) {
 
   header.appendChild(icon);
   header.appendChild(titleWrap);
-  if (!systemTool) header.appendChild(renderToolEnableSwitch(tool));
+  if (tool.configurable !== false && !systemTool) header.appendChild(renderToolEnableSwitch(tool));
   card.appendChild(header);
 
   const body = document.createElement("div");
@@ -802,8 +803,7 @@ function renderToolCard(tool) {
 }
 
 function isSystemTool(tool) {
-  const id = String(tool && tool.id || "");
-  return id === "apply_patch" || id === "web_search";
+  return Boolean(tool && tool.system);
 }
 
 function renderToolEnableSwitch(tool) {
