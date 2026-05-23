@@ -201,6 +201,8 @@ body { font-family: system-ui, -apple-system, sans-serif; background-color: var(
 .config-section-title:first-child { margin-top: 0; }
 .setting-item { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 13px 0; }
 .setting-item > span, .setting-item > label { font-size: 14px; font-weight: 500; color: var(--text-main); transition: var(--theme-transition); }
+.setting-item > span:has(small) { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.setting-item > span small { display: block; font-size: 12px; font-weight: 400; line-height: 1.45; }
 .setting-divider { height: 1px; background-color: var(--border-color); margin: 0; transition: var(--theme-transition); }
 
 .segmented-control { display: inline-flex; background: var(--ctrl-bg); padding: 3px; border-radius: 8px; border: 1px solid var(--border-color); transition: var(--theme-transition); }
@@ -211,6 +213,7 @@ body { font-family: system-ui, -apple-system, sans-serif; background-color: var(
 .inline-control { min-height: 34px; padding: 7px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); font-size: 13px; line-height: 1.2; color: var(--text-main); background: var(--bg-panel); outline: none; transition: var(--theme-transition); }
 select.inline-control { text-align: center; text-align-last: center; padding-right: 28px; }
 .inline-control:focus { border-color: var(--info); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1); }
+.wide-control { width: min(420px, 52vw); max-width: 100%; }
 
 .setting-item-block { align-items: flex-start; flex-direction: column; width: 100%; }
 .config-toml-card { margin-top: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-panel); overflow: hidden; transition: var(--theme-transition); }

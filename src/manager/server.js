@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { readCodexAuthApiKey } = require("../shared/codex-auth");
-const { DATA_DIR, ROOT_DIR, loadProxyConfig, normalizeCatalogMode, normalizeUpstreamModelOverride } = require("../shared/config");
+const { DATA_DIR, ROOT_DIR, loadProxyConfig, normalizeCatalogMode, normalizeDeepSeekBaseUrl, normalizeUpstreamModelOverride } = require("../shared/config");
 const { addCorsHeaders, enforceLocalAccess, handleHttpError, httpError, parseJsonResponse, readJsonBody, sendJson } = require("../shared/http");
 const { readJson } = require("../shared/json-store");
 const { appendEventLog, eventLogDir, eventLogPath: datedEventLogPath, readEventLogTail } = require("../shared/event-log");
@@ -21,7 +21,7 @@ const { contentTypeFor, readIndexPage, staticFilePath } = require("./page");
 
 const HOST = "127.0.0.1";
 const PORT = 8787;
-const FIXED_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
+const FIXED_DEEPSEEK_BASE_URL = "https://api.deepseek.com/";
 const FIXED_THINKING_TITLE = "DeepSeek Thinking";
 const CODEX_ADAPTER_PROVIDER_ID = "custom";
 const CODEX_ADAPTER_STATUS_IDLE = "idle";
@@ -1050,6 +1050,7 @@ function publicConfig(config) {
   for (const key of Object.keys(output)) {
     if (isSensitiveConfigKey(key)) delete output[key];
   }
+  output.DEEPSEEK_BASE_URL = displayDeepSeekBaseUrl(output.DEEPSEEK_BASE_URL);
   output.CATALOG_MODE = normalizeCatalogMode(output.CATALOG_MODE || DEFAULT_CATALOG_MODE);
   output.UPSTREAM_MODEL_OVERRIDE = normalizeUpstreamModelOverride(output.UPSTREAM_MODEL_OVERRIDE || DEFAULT_UPSTREAM_MODEL_OVERRIDE);
   output.AUTO_START = normalizeBoolString(output.AUTO_START || DEFAULT_AUTO_START);
@@ -1075,6 +1076,7 @@ function sanitizeConfig(body, rootDir = ROOT_DIR, dataDir = rootDir) {
   const allowed = new Set([
     "PROXY_HOST",
     "PROXY_PORT",
+    "DEEPSEEK_BASE_URL",
     "CATALOG_MODE",
     "UPSTREAM_MODEL_OVERRIDE",
     "AUTO_START",
@@ -1094,6 +1096,7 @@ function sanitizeConfig(body, rootDir = ROOT_DIR, dataDir = rootDir) {
     if (!allowed.has(key)) continue;
     if (key === "UI_LANGUAGE") result[key] = normalizeLanguageId(value);
     else if (key === "UI_CLOSE_BEHAVIOR") result[key] = normalizeCloseBehavior(value);
+    else if (key === "DEEPSEEK_BASE_URL") result[key] = normalizeStoredDeepSeekBaseUrl(value);
     else if (key === "CATALOG_MODE") result[key] = normalizeCatalogMode(value);
     else if (key === "UPSTREAM_MODEL_OVERRIDE") result[key] = normalizeUpstreamModelOverride(value);
     else if (key === "AUTO_START") result[key] = normalizeBoolString(value);
@@ -1126,7 +1129,7 @@ function ensureProxyEnv(dataDir, rootDir = ROOT_DIR) {
   const current = {};
   const defaults = defaultProxyEnv(rootDir, dataDir);
   const merged = Object.assign(mergeEnv(defaults, current), {
-    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
+    DEEPSEEK_BASE_URL: normalizeStoredDeepSeekBaseUrl(current.DEEPSEEK_BASE_URL || defaults.DEEPSEEK_BASE_URL),
     THINKING_TITLE: FIXED_THINKING_TITLE,
     COMMUNITY_TOOL_CODE_ENABLED: "false",
     PROXY_EXTENSION_DIR: extensionDir(dataDir),
@@ -1159,7 +1162,7 @@ function loadProxyEnv(dataDir, rootDir = ROOT_DIR) {
 
 function normalizeLoadedProxyEnv(env, rootEnv = {}, dataEnv = {}, dataDir = DATA_DIR, rootDir = ROOT_DIR) {
   return normalizeToolRuntimeConfig(Object.assign({}, env, {
-    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
+    DEEPSEEK_BASE_URL: normalizeManagerDeepSeekBaseUrl(dataEnv.DEEPSEEK_BASE_URL || rootEnv.DEEPSEEK_BASE_URL || env.DEEPSEEK_BASE_URL),
     THINKING_TITLE: FIXED_THINKING_TITLE,
     PROXY_EXTENSION_DIR: env.PROXY_EXTENSION_DIR || extensionDir(dataDir),
     CATALOG_MODE: normalizeCatalogMode(dataEnv.CATALOG_MODE || rootEnv.CATALOG_MODE || DEFAULT_CATALOG_MODE),
@@ -1174,7 +1177,7 @@ function normalizeLoadedProxyEnv(env, rootEnv = {}, dataEnv = {}, dataDir = DATA
 
 function defaultProxyEnv(rootDir = ROOT_DIR, dataDir = DATA_DIR) {
   return Object.assign({
-    DEEPSEEK_BASE_URL: FIXED_DEEPSEEK_BASE_URL,
+    DEEPSEEK_BASE_URL: "",
     PROXY_HOST: "127.0.0.1",
     PROXY_PORT: "8787",
     CATALOG_MODE: DEFAULT_CATALOG_MODE,
@@ -1192,6 +1195,44 @@ function defaultProxyEnv(rootDir = ROOT_DIR, dataDir = DATA_DIR) {
     LOG_RETENTION_DAYS: "7",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
   }, toolDefaultConfig({ rootDir, extensionDir: extensionDir(dataDir) }));
+}
+
+function normalizeManagerDeepSeekBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return FIXED_DEEPSEEK_BASE_URL;
+  try {
+    const normalized = normalizeDeepSeekBaseUrl(raw);
+    const url = new URL(normalized);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return FIXED_DEEPSEEK_BASE_URL;
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return FIXED_DEEPSEEK_BASE_URL;
+  }
+}
+
+function isOfficialDeepSeekBaseUrl(value) {
+  try {
+    const normalized = normalizeDeepSeekBaseUrl(value || FIXED_DEEPSEEK_BASE_URL);
+    const url = new URL(normalized);
+    return url.protocol === "https:"
+      && url.hostname.toLowerCase() === "api.deepseek.com"
+      && (!url.pathname || url.pathname === "/")
+      && !url.search
+      && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeStoredDeepSeekBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const normalized = normalizeManagerDeepSeekBaseUrl(raw);
+  return isOfficialDeepSeekBaseUrl(normalized) ? "" : normalized;
+}
+
+function displayDeepSeekBaseUrl(value) {
+  return normalizeStoredDeepSeekBaseUrl(value);
 }
 
 function proxyEnvOptions(dataDir, rootDir = ROOT_DIR) {

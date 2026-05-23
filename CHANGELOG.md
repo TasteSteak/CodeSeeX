@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.1 - 2026-05-23
+
+This release focuses on MCP compatibility and upstream configuration for users running official or self-hosted DeepSeek-compatible services.
+
+### Added
+
+- Added native MCP bridge discovery for Codex-configured stdio, streamable HTTP, and legacy SSE MCP servers.
+- Added MCP smoke tests covering tools, resources, resource templates, prompts, HTTP transport, and legacy SSE transport.
+- Added a custom DeepSeek upstream URL field in `Settings -> Proxy` for self-hosted OpenAI-compatible endpoints.
+- Added README dashboard imagery and updated setup notes for custom upstream usage.
+
+### Changed
+
+- DeepSeek upstream configuration now leaves the UI field blank for the official default and uses `https://api.deepseek.com/` at runtime.
+- Legacy official upstream values such as `https://api.deepseek.com/v1` are treated as the default and no longer appear as custom values in the UI.
+- Updated `proxy.env.example` so the upstream URL is blank by default.
+
+### Fixed
+
+- Fixed MCP tools not being discovered or exposed when CodeSeeX was used between Codex and DeepSeek.
+- Fixed MCP tool name mapping and history replay so child tool names are restored without polluting model-visible history.
+- Fixed hosted MCP tool execution for helper calls and server tool calls across streaming and non-streaming turns.
+
 ## 0.3.0 - 2026-05-21
 
 This release focuses on release readiness and client experience: configuration flow, startup reliability, tool management, update indicators, and cross-platform runtime data handling.

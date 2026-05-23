@@ -21,14 +21,20 @@ function splitList(value) {
 }
 
 function normalizeDeepSeekBaseUrl(value) {
-  const raw = String(value || "https://api.deepseek.com/v1").replace(/\/+$/, "");
+  const raw = String(value || "https://api.deepseek.com/").replace(/\/+$/, "");
   try {
     const url = new URL(raw);
-    if (!url.pathname || url.pathname === "/") url.pathname = "/v1";
+    if (isOfficialDeepSeekUrl(url)) url.pathname = "/";
     return url.toString().replace(/\/+$/, "");
   } catch {
     return raw;
   }
+}
+
+function isOfficialDeepSeekUrl(url) {
+  if (!url || url.protocol !== "https:" || url.hostname.toLowerCase() !== "api.deepseek.com") return false;
+  const pathname = String(url.pathname || "/").replace(/\/+$/, "").toLowerCase();
+  return pathname === "" || pathname === "/" || pathname === "/v1";
 }
 
 function loadProxyConfig(env = process.env) {
@@ -41,7 +47,7 @@ function loadProxyConfig(env = process.env) {
     extensionDir: env.PROXY_EXTENSION_DIR || path.join(dataDir, "extension"),
     host: env.PROXY_HOST || "127.0.0.1",
     port: clampInt(env.PROXY_PORT, 8787, 1, 65535),
-    deepseekBaseUrl: normalizeDeepSeekBaseUrl(env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1"),
+    deepseekBaseUrl: normalizeDeepSeekBaseUrl(env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/"),
     requestTimeoutMs: clampInt(env.UPSTREAM_REQUEST_TIMEOUT_MS, 120000, 5000, 1800000),
     requestBodyLimitBytes: clampInt(env.REQUEST_BODY_LIMIT_BYTES, 10 * 1024 * 1024, 1024, 100 * 1024 * 1024),
     maxStoredResponses: clampInt(env.MAX_STORED_RESPONSES, 200, 10, 5000),

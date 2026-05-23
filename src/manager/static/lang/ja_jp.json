@@ -25,6 +25,8 @@
   "billingOutput": "出力",
   "billingUnit": "単位：CNY / 100万トークン",
   "brandSubtitle": "DeepSeek Bridge",
+  "deepseekBaseUrl": "DeepSeek upstream URL",
+  "deepseekBaseUrlHint": "Leave blank to use the official DeepSeek API. For self-hosted deployments, enter your OpenAI-compatible endpoint, for example http://127.0.0.1:8000/v1.",
   "busyDetail": "お待ちください...",
   "busyTitle": "処理中",
   "cacheHit": "キャッシュヒット",

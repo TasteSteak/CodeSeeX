@@ -25,6 +25,8 @@
   "billingOutput": "출력",
   "billingUnit": "단위: CNY / 백만 토큰",
   "brandSubtitle": "DeepSeek Bridge",
+  "deepseekBaseUrl": "DeepSeek upstream URL",
+  "deepseekBaseUrlHint": "Leave blank to use the official DeepSeek API. For self-hosted deployments, enter your OpenAI-compatible endpoint, for example http://127.0.0.1:8000/v1.",
   "busyDetail": "잠시 기다려주세요...",
   "busyTitle": "처리 중",
   "cacheHit": "캐시 히트",

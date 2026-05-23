@@ -25,6 +25,8 @@
   "billingOutput": "输出",
   "billingUnit": "单位：CNY / 每百万 Tokens",
   "brandSubtitle": "DeepSeek Bridge",
+  "deepseekBaseUrl": "DeepSeek 上游接口地址",
+  "deepseekBaseUrlHint": "留空则使用官方 DeepSeek API。自部署时可填写 OpenAI 兼容接口，例如 http://127.0.0.1:8000/v1。",
   "busyDetail": "请稍候...",
   "busyTitle": "正在处理",
   "cacheHit": "缓存命中",

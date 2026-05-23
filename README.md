@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-1f6feb">
+  <img alt="Version 0.3.1" src="https://img.shields.io/badge/version-0.3.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -14,9 +14,9 @@
   Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, and search-provider terms.
 </p>
 
-<!-- Screenshot placeholder:
-![CodeSeeX dashboard](docs/img/dashboard.png)
--->
+<p align="center">
+  <img alt="CodeSeeX dashboard showing service status and balance" src="docs/img/dashboard-balance.png">
+</p>
 
 CodeSeeX gives Codex a local Responses API endpoint, forwards supported requests to DeepSeek, preserves the Codex tool workflow, and provides a desktop manager for setup, logs, usage, tools, and adapter configuration.
 
@@ -30,9 +30,10 @@ Codex Desktop  ->  CodeSeeX local API  ->  DeepSeek API
 ## What You Get
 
 - DeepSeek V4 with 1M context: expose `deepseek-v4-pro` and `deepseek-v4-flash` to Codex with million-token catalog metadata.
-- Codex tool compatibility: keep Codex workflows such as Apply Patch, MCP, Skills, and Plugins available through the bridge.
+- Codex tool compatibility: keep Codex workflows such as Apply Patch, MCP, Skills, Plugins, and discovered MCP tools available through the bridge.
 - Built-in tool layer: use CodeSeeX Web Search, workspace search, file reading, and patch support out of the box.
 - Generated setup: copy a ready-to-use `config.toml` from the CodeSeeX proxy settings page.
+- Custom upstream support: point CodeSeeX at the official DeepSeek API or a self-hosted OpenAI-compatible endpoint.
 - Local visibility: see service state, balance, usage estimates, user-level logs, and tool activity from the desktop UI.
 
 ## Quick Start
@@ -73,13 +74,16 @@ model = "deepseek-v4-flash"
 
 CodeSeeX reads API credentials from the user's Codex auth configuration. It does not store DeepSeek API keys in `proxy.env`.
 
+If you self-host a DeepSeek-compatible service, set the upstream URL in `Settings -> Proxy`. Leave it blank to use the official DeepSeek API.
+
 ## Features
 
 - Codex-compatible local API for `/v1/responses` and related model calls.
 - DeepSeek V4 adapter catalog for `deepseek-v4-flash` and `deepseek-v4-pro` with `1M` context metadata.
 - Compatibility with Codex built-in tool flows, including Apply Patch, MCP, Skills, and Plugins.
+- MCP bridge discovery for Codex-configured stdio, streamable HTTP, and legacy SSE MCP servers.
 - Single configurable local port for the desktop manager, `/api/*`, and `/v1/*`.
-- Proxy settings for catalog mode, upstream model override, billing rates, and generated `config.toml`.
+- Proxy settings for catalog mode, upstream model override, custom upstream URL, billing rates, and generated `config.toml`.
 - Streaming answer display with reasoning visibility controls and grouped proxy tool summaries.
 - User-level logs, daily log retention, balance checks, usage estimates, tray shortcuts, auto-start, and silent update indicators.
 - Built-in tools for Web Search, patching, workspace search, and file reading, plus optional community tools.
@@ -96,6 +100,8 @@ Important runtime paths:
 - `~/.codeseex/proxy.env`: non-secret local runtime settings.
 
 Community tools are disabled unless enabled in configuration. Enabling community tool code means running local code from that tool package, so only use tools you trust. See [docs/tool-authoring.md](docs/tool-authoring.md) for the tool package format.
+
+MCP servers are discovered from the user's Codex MCP configuration. CodeSeeX forwards discovered MCP tools to DeepSeek and handles resource/prompt helper calls locally.
 
 ## Troubleshooting
 
@@ -116,7 +122,8 @@ Community tools are disabled unless enabled in configuration. Enabling community
 
 - Check the CodeSeeX logs page for the upstream error.
 - Confirm Codex `base_url` points to CodeSeeX, for example `http://127.0.0.1:8787/v1`.
-- Test whether the machine can access `https://api.deepseek.com`.
+- If you use the official upstream, test whether the machine can access `https://api.deepseek.com`.
+- If you use a self-hosted upstream, confirm the URL is reachable and OpenAI-compatible.
 - Make sure no other process is using the configured CodeSeeX port.
 
 ## Development

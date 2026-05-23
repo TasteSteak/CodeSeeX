@@ -58,6 +58,7 @@ const els = {
   pageTitle: byId("pageTitle"),
   pid: byId("pid"),
   pidLabel: byId("pidLabel"),
+  deepseekBaseUrl: byId("DEEPSEEK_BASE_URL"),
   proxyPort: byId("PROXY_PORT"),
   refreshBalanceButton: byId("refreshBalanceButton"),
   restartButton: byId("restartButton"),
@@ -193,7 +194,7 @@ function bind() {
     els.toolConfigList.addEventListener("change", handleConfigInput);
   }
 
-  [els.showThinking, els.autoStart, els.uiLanguage, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput].forEach((input) => {
+  [els.showThinking, els.autoStart, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
@@ -562,7 +563,7 @@ function renderButtons() {
 function renderConfig(config) {
   if (pendingConfig || configSaving) return;
   const active = document.activeElement;
-  const textInputs = [els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput];
+  const textInputs = [els.deepseekBaseUrl, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput];
   if (textInputs.includes(active)) return;
   const configSignature = stableStringify(normalizeConfigPayload(config));
   if (configSignature === currentConfigSignature && lastSavedConfig) return;
@@ -577,6 +578,7 @@ function renderConfig(config) {
   setRadioValue("UI_THEME", nextTheme);
   els.showThinking.checked = !/^(0|false|no|off|disabled)$/i.test(String(config.SHOW_THINKING || "true"));
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
+  if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
   const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
   if (document.activeElement !== els.uiLanguage) els.uiLanguage.value = nextLanguage;
@@ -1459,6 +1461,7 @@ function buildConfigPayload() {
     UI_THEME: getRadioValue("UI_THEME") || "system",
     UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(getRadioValue("UI_CLOSE_BEHAVIOR")),
     UI_LANGUAGE: els.uiLanguage ? normalizeConfiguredLanguageId(els.uiLanguage.value) : DEFAULT_LANGUAGE,
+    DEEPSEEK_BASE_URL: normalizeDeepSeekBaseUrl(els.deepseekBaseUrl ? els.deepseekBaseUrl.value : ""),
     PROXY_PORT: normalizePort(els.proxyPort ? els.proxyPort.value : "", 8787),
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
     BILLING_CACHED_INPUT_CNY: normalizeRateInput(els.billingCachedInput ? els.billingCachedInput.value : "", 0.025),
@@ -1705,6 +1708,18 @@ function normalizePort(value, fallback = 8787) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return String(fallback);
   return String(Math.min(65535, Math.max(1, Math.floor(parsed))));
+}
+
+function normalizeDeepSeekBaseUrl(value) {
+  const raw = String(value || "").trim().replace(/\/+$/, "");
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return raw;
+  }
 }
 
 function normalizeRetentionDays(value) {

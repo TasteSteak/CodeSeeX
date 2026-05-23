@@ -39,8 +39,9 @@ function normalizeTools(tools, options = {}) {
   applyPatch.registerLegacyAlias(state);
   registerAutoTools(state, options);
 
-  for (let index = 0; index < (Array.isArray(tools) ? tools.length : 0); index += 1) {
-    const tool = tools[index];
+  const allTools = (Array.isArray(tools) ? tools : []).concat(Array.isArray(options.extraTools) ? options.extraTools : []);
+  for (let index = 0; index < allTools.length; index += 1) {
+    const tool = allTools[index];
     if (!tool || typeof tool !== "object") continue;
 
     if (applyPatch.matchesInputTool(tool)) {
@@ -49,23 +50,31 @@ function normalizeTools(tools, options = {}) {
     }
 
     if (registerInputToolAdapter(tool, state, options)) continue;
-    if (!isFunctionTool(tool)) continue;
 
-    const name = sanitizeToolName(tool.name || (tool.function ? tool.function.name : "") || tool.server_label || "tool_" + (index + 1));
-    if (applyPatch.isToolName(name)) {
-      applyPatch.registerInputTool(tool, state, options);
-      continue;
+    const declarations = normalizeModelFunctionTools(tool, index);
+    for (const declaration of declarations) {
+      const responseName = declaration.name;
+      const name = selectModelToolName(responseName, declaration, byName, upstreamTools);
+      if (applyPatch.isToolName(name)) {
+        applyPatch.registerInputTool(tool, state, options);
+        continue;
+      }
+      upstreamTools.push({
+        type: "function",
+        function: {
+          name,
+          description: declaration.description,
+          parameters: declaration.parameters,
+        },
+      });
+      byName.set(name, {
+        kind: declaration.kind || "function",
+        nativeTool: tool,
+        namespace: declaration.namespace || "",
+        responseName,
+        mcpServer: declaration.mcpServer || "",
+      });
     }
-    const parameters = tool.parameters || (tool.function ? tool.function.parameters : null) || tool.input_schema || { type: "object", properties: {} };
-    upstreamTools.push({
-      type: "function",
-      function: {
-        name,
-        description: tool.description || (tool.function ? tool.function.description : "") || name,
-        parameters: normalizeSchema(parameters),
-      },
-    });
-    byName.set(name, { kind: "function", nativeTool: tool });
   }
 
   return {
@@ -135,14 +144,22 @@ function responseToolItemFromChat(toolCall, toolContext) {
 
   const name = getToolName(toolCall);
   const args = getToolArguments(toolCall);
-  return {
+  const entry = toolContext && toolContext.byName ? toolContext.byName.get(name) : null;
+  const responseName = (entry && entry.responseName) || name;
+  const item = {
     id: makeId("fc"),
     type: "function_call",
     call_id: toolCall.id || makeId("call"),
-    name,
-    arguments: applyPatch.normalizeShellArguments(name, args),
+    name: responseName,
+    arguments: entry && isHostedKind(entry.kind) ? args : applyPatch.normalizeShellArguments(responseName, args),
     status: "completed",
   };
+  if (entry && entry.namespace) item.namespace = entry.namespace;
+  if (entry && isHostedKind(entry.kind)) {
+    item.type = "proxy_tool_call";
+    item.mcp_server = entry.mcpServer || entry.namespace || "";
+  }
+  return item;
 }
 
 function chatToolCallFromResponseItem(item) {
@@ -152,11 +169,13 @@ function chatToolCallFromResponseItem(item) {
   const adaptedToolCall = chatToolCallFromAdaptedResponseItem(item, { normalizeResponseToolArguments, parseJson });
   if (adaptedToolCall) return adaptedToolCall;
 
-  return {
+  const toolCall = {
     id: item.call_id || item.id || makeId("call"),
     type: "function",
     function: { name: item.name || "tool_call", arguments: normalizeResponseToolArguments(item) },
   };
+  if (item.namespace) toolCall.namespace = item.namespace;
+  return toolCall;
 }
 
 function expandApplyPatchToolCalls(toolCalls) {
@@ -172,7 +191,11 @@ function isInternalToolCall(toolCall, toolContext) {
 function isHostedToolCall(toolCall, toolContext) {
   const name = getToolName(toolCall);
   const entry = toolContext && toolContext.byName ? toolContext.byName.get(name) : null;
-  return Boolean(entry && String(entry.kind || "").startsWith("hosted_"));
+  return Boolean(entry && isHostedKind(entry.kind));
+}
+
+function isHostedKind(kind) {
+  return String(kind || "").startsWith("hosted_");
 }
 
 function internalPatchFromToolCall(toolCall, toolContext) {
@@ -182,11 +205,13 @@ function internalPatchFromToolCall(toolCall, toolContext) {
 }
 
 function getToolName(toolCall) {
-  return toolCall && toolCall.function ? toolCall.function.name || "" : "";
+  if (!toolCall || typeof toolCall !== "object") return "";
+  if (toolCall.function) return toolCall.function.name || "";
+  return toolCall.name || "";
 }
 
 function getToolArguments(toolCall) {
-  const args = toolCall && toolCall.function ? toolCall.function.arguments : "";
+  const args = toolCall && toolCall.function ? toolCall.function.arguments : toolCall && toolCall.arguments;
   if (typeof args === "string") return args;
   return JSON.stringify(args || {});
 }
@@ -212,12 +237,122 @@ function normalizeSchema(schema) {
   return schema;
 }
 
+function normalizeModelFunctionTools(tool, index = 0) {
+  if (!tool || typeof tool !== "object") return [];
+  const namespace = namespaceFromTool(tool);
+  const nestedTools = Array.isArray(tool.tools) ? tool.tools : [];
+  if (namespace && nestedTools.length > 0) {
+    return nestedTools
+      .map((nestedTool, nestedIndex) => normalizeModelFunctionTool(nestedTool, nestedIndex, namespace))
+      .filter(Boolean);
+  }
+  const declaration = normalizeModelFunctionTool(tool, index, namespace);
+  return declaration ? [declaration] : [];
+}
+
+function normalizeModelFunctionTool(tool, index = 0, namespace = "") {
+  if (!tool || typeof tool !== "object") return null;
+  const nestedTool = tool.tool && typeof tool.tool === "object" ? tool.tool : null;
+  const name = sanitizeToolName(
+    tool.name
+    || (tool.function ? tool.function.name : "")
+    || (nestedTool ? nestedTool.name : "")
+    || tool.server_label
+    || "tool_" + (index + 1)
+  );
+  const description = tool.description
+    || (tool.function ? tool.function.description : "")
+    || (nestedTool ? nestedTool.description : "")
+    || tool.title
+    || name;
+  const parameters = tool.parameters
+    || (tool.function ? tool.function.parameters : null)
+    || tool.input_schema
+    || tool.inputSchema
+    || schemaFromMcpTool(tool)
+    || { type: "object", properties: {} };
+  if (!isFunctionTool(tool) && !isModelCallableTool(tool, parameters)) return null;
+  return {
+    name,
+    description,
+    parameters: normalizeSchema(parameters),
+    namespace,
+    kind: tool.mcp_helper ? "hosted_mcp_helper" : (tool.mcp_server || tool.server ? "hosted_mcp" : ""),
+    mcpServer: tool.mcp_server || tool.server || namespace,
+  };
+}
+
+function namespaceFromTool(tool) {
+  const namespace = tool.namespace || tool.server_namespace || tool.server || "";
+  if (namespace) return String(namespace);
+  const type = String(tool.type || "").toLowerCase();
+  if (type === "namespace") return String(tool.name || tool.server_label || "");
+  if (type === "mcp" && Array.isArray(tool.tools)) return String(tool.name || tool.server_label || "");
+  return "";
+}
+
 function isFunctionTool(tool) {
   return tool.type === "function" || Boolean(tool.function);
 }
 
+function isModelCallableTool(tool, parameters) {
+  if (!tool || typeof tool !== "object") return false;
+  const type = String(tool.type || "").toLowerCase();
+  if (type === "mcp") return hasCallableShape(tool, parameters);
+  if (tool.name || tool.server_label) return hasCallableShape(tool, parameters);
+  return false;
+}
+
+function hasCallableShape(tool, parameters) {
+  if (!tool || typeof tool !== "object") return false;
+  if (tool.name) return true;
+  if (tool.server_label && (tool.description || parameters)) return true;
+  return false;
+}
+
+function schemaFromMcpTool(tool) {
+  if (!tool || typeof tool !== "object") return null;
+  if (tool.tool && typeof tool.tool === "object") {
+    return tool.tool.input_schema || tool.tool.inputSchema || tool.tool.parameters || null;
+  }
+  return null;
+}
+
 function sanitizeToolName(name) {
   return String(name || "tool").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
+}
+
+function uniqueToolName(name, namespace, byName) {
+  const base = sanitizeToolName(name);
+  if (!byName || !byName.has(base)) return base;
+  const prefix = namespace ? sanitizeToolName(namespace + "_" + base) : base;
+  let candidate = prefix;
+  let suffix = 2;
+  while (byName.has(candidate)) {
+    candidate = sanitizeToolName(prefix + "_" + suffix);
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function selectModelToolName(responseName, declaration, byName, upstreamTools) {
+  const base = sanitizeToolName(responseName);
+  if (declaration && declaration.kind === "hosted_mcp_helper") {
+    const existing = byName && byName.get(base);
+    if (!existing || existing.kind === "function") {
+      if (existing) removeUpstreamTool(upstreamTools, base);
+      if (byName) byName.delete(base);
+      return base;
+    }
+  }
+  return uniqueToolName(responseName, declaration.namespace, byName);
+}
+
+function removeUpstreamTool(upstreamTools, name) {
+  const index = (Array.isArray(upstreamTools) ? upstreamTools : []).findIndex((tool) => (
+    tool && tool.function && tool.function.name === name
+  ));
+  if (index >= 0) upstreamTools.splice(index, 1);
 }
 
 function normalizeToolId(value) {
