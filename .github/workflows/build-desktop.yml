@@ -39,27 +39,18 @@ jobs:
             artifact_name: CodeSeeX-Linux-x64
             artifact_paths: |
               dist/*.AppImage
-              dist/*.deb
-              dist/*.tar.gz
-              dist/*.yml
-              dist/*.blockmap
           - label: macOS arm64
             runner: macos-14
             npm_script: dist:mac
             artifact_name: CodeSeeX-MacOS-arm64
             artifact_paths: |
               dist/*.dmg
-              dist/*-mac.zip
-              dist/*.yml
-              dist/*.blockmap
           - label: Windows x64
             runner: windows-latest
             npm_script: dist:win
             artifact_name: CodeSeeX-Windows-x64
             artifact_paths: |
-              dist/*.exe
-              dist/*.yml
-              dist/*.blockmap
+              dist/*Setup*.exe
 
     steps:
       - name: Check out source
