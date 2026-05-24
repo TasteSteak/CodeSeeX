@@ -134,6 +134,54 @@ function main() {
   assert(mcpShapeItem.namespace === "codeseex_smoke", "native type=mcp declaration lost namespace");
   assert(!mcpShapeItem.mcp_server, "native type=mcp declarations must not be marked as proxy-hosted");
 
+  const nestedMcpToolContext = createToolContext([{
+    type: "mcp",
+    name: "codeseex_nested",
+    tools: [{
+      tool: {
+        name: "codeseex_nested_add",
+        description: "Add two numbers through a nested MCP tool declaration.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            a: { type: "number" },
+            b: { type: "number" },
+          },
+          required: ["a", "b"],
+        },
+      },
+    }],
+  }]);
+  assert(nestedMcpToolContext.upstreamTools.some((tool) => tool.function && tool.function.name === "codeseex_nested_add"), "nested MCP tool declaration was not exposed to DeepSeek");
+  const nestedMcpItem = responseToolItemFromChat({
+    id: "call_nested_mcp",
+    type: "function",
+    function: { name: "codeseex_nested_add", arguments: "{\"a\":19,\"b\":23}" },
+  }, nestedMcpToolContext);
+  assert(nestedMcpItem.type === "function_call", "nested MCP declarations must be returned as function_call");
+  assert(nestedMcpItem.name === "codeseex_nested_add", "nested MCP declaration lost child tool name");
+  assert(nestedMcpItem.namespace === "codeseex_nested", "nested MCP declaration lost namespace");
+  assert(!nestedMcpItem.mcp_server, "nested MCP declarations must not be marked as proxy-hosted");
+
+  const hostedContext = createToolContext([]);
+  const hostedSplit = splitToolCalls([{
+    id: "call_list",
+    type: "function",
+    function: { name: "list_directory", arguments: "{\"path\":\".\",\"depth\":1}" },
+  }], hostedContext);
+  assert(hostedSplit.hosted.length === 1, "CodeSeeX hosted tools must still be executed by the proxy");
+  const hostedItem = responseToolItemFromChat(hostedSplit.hosted[0], hostedContext);
+  assert(hostedItem.type === "proxy_tool_call", "CodeSeeX hosted tools must keep proxy display shape");
+  assert(hostedItem.name === "list_directory", "hosted proxy display item lost tool name");
+
+  const webContext = createToolContext([{ type: "web_search" }]);
+  const webItem = responseToolItemFromChat({
+    id: "call_web",
+    type: "function",
+    function: { name: "web_search", arguments: "{\"query\":\"CodeSeeX\"}" },
+  }, webContext);
+  assert(webItem.type === "web_search_call", "system web_search must keep native web_search_call shape");
+
   console.log("Native MCP passthrough test passed.");
   console.log("Model-facing tools:", names.filter((name) => name.includes("codeseex_smoke")).join(", "));
 }

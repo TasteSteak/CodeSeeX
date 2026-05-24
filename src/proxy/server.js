@@ -664,6 +664,7 @@ async function runDeepSeekTurn({ requestBody, messages, toolContext, config, run
   const workingMessages = messages.slice();
   let usage = null;
   const storedMessages = [];
+  const outputItems = [];
   let rawAssistant = { role: "assistant", content: "" };
 
   while (true) {
@@ -687,12 +688,13 @@ async function runDeepSeekTurn({ requestBody, messages, toolContext, config, run
       const hostedResult = await hostedToolResultMessages(hosted, toolContext, config, workingMessages);
       logToolResults(runtime, hostedResult.toolMessages, "hosted");
       flushRuntime(config, runtime);
+      outputItems.push(...turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "commentary" }));
       storedMessages.push(assistantForStorage(visibleAssistant));
       storedMessages.push(...hostedResult.toolMessages);
       if (external.length > 0 || internal.length > 0) {
         return {
           rawAssistant: visibleAssistant,
-          output: turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "commentary" }),
+          output: outputItems,
           usage,
           storedMessages,
         };
@@ -716,7 +718,7 @@ async function runDeepSeekTurn({ requestBody, messages, toolContext, config, run
     storedMessages.push(assistantForStorage(currentAssistant));
     return {
       rawAssistant,
-        output: turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "final_answer" }),
+      output: outputItems.concat(turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "final_answer" })),
       usage,
       storedMessages,
     };
@@ -1035,20 +1037,17 @@ function toolScopeLabel(scope) {
 function isIncomingToolCallItem(item) {
   return item.type === "function_call"
     || item.type === "custom_tool_call"
-    || item.type === "apply_patch_call"
     || item.type === "web_search_call";
 }
 
 function isIncomingToolOutputItem(item) {
   return item.type === "function_call_output"
     || item.type === "custom_tool_call_output"
-    || item.type === "apply_patch_call_output"
     || item.type === "web_search_call_output";
 }
 
 function incomingToolName(item) {
   if (item.name) return String(item.name);
-  if (item.type === "apply_patch_call" || item.type === "apply_patch_call_output") return "apply_patch";
   if (item.type === "web_search_call" || item.type === "web_search_call_output") return "web_search";
   if (item.type === "custom_tool_call" || item.type === "custom_tool_call_output") return "custom_tool";
   return "tool";
@@ -1060,16 +1059,23 @@ function flushRuntime(config, runtime) {
 }
 
 async function proxyHostedToolContent(item, config, messages = []) {
-  if (item && (item.type === "function_call" || item.type === "proxy_tool_call") && item.name === "workspace_search") {
+  if (isHostedExecutionItem(item, "workspace_search")) {
     return executeWorkspaceSearch(item.arguments, config);
   }
-  if (item && (item.type === "function_call" || item.type === "proxy_tool_call") && item.name === "read_file_range") {
+  if (isHostedExecutionItem(item, "read_file_range")) {
     return executeReadFileRange(item.arguments, config);
   }
-  if (item && (item.type === "function_call" || item.type === "proxy_tool_call") && item.name === "list_directory") {
+  if (isHostedExecutionItem(item, "list_directory")) {
     return executeListDirectory(item.arguments, config);
   }
   return proxyWebSearchToolContent(item, config, messages);
+}
+
+function isHostedExecutionItem(item, name) {
+  return Boolean(item && (
+    item.type === "function_call"
+    || item.type === "proxy_tool_call"
+  ) && item.name === name);
 }
 
 async function proxyWebSearchToolContent(item, config, messages = []) {

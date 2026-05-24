@@ -263,7 +263,6 @@ function toolDisplayName(item) {
 function createResponseEmitter(res, seq, responseId, runtime) {
   let outputIndex = 0;
   const output = [];
-  const lifecycle = createToolLifecycleTracer(runtime, responseId);
 
   async function emitItems(items) {
     for (const item of mergeToolUsageItems(items)) {
@@ -406,35 +405,7 @@ function createResponseEmitter(res, seq, responseId, runtime) {
       item: addedItem,
       sequence_number: seq.next(),
     });
-    lifecycle.record("output_item.added", item, {
-      output_index: currentIndex,
-      item_id: item.id,
-      call_id: item.call_id,
-      arguments_bytes: Buffer.byteLength(String(item.arguments || ""), "utf8"),
-    });
-    await emitFunctionCallArguments(res, seq, responseId, item, currentIndex, {
-      onArgumentDelta(delta, index, total) {
-        if (index === 0 || index === total - 1) {
-          lifecycle.record("arguments_delta", item, {
-            output_index: currentIndex,
-            item_id: item.id,
-            call_id: item.call_id,
-            delta_bytes: Buffer.byteLength(String(delta || ""), "utf8"),
-            chunk_index: index + 1,
-            chunk_count: total,
-          });
-        }
-      },
-      onArgumentsDone(args, chunks) {
-        lifecycle.record("arguments_done", item, {
-          output_index: currentIndex,
-          item_id: item.id,
-          call_id: item.call_id,
-          arguments_bytes: Buffer.byteLength(String(args || ""), "utf8"),
-          chunk_count: chunks,
-        });
-      },
-    });
+    await emitFunctionCallArguments(res, seq, responseId, item, currentIndex);
     emitAdaptedOutputEvents(item, (eventName, payload) => {
       emitSse(res, eventName, Object.assign({}, payload, {
         response_id: responseId,
@@ -448,12 +419,6 @@ function createResponseEmitter(res, seq, responseId, runtime) {
       output_index: currentIndex,
       item,
       sequence_number: seq.next(),
-    });
-    lifecycle.record("output_item.done", item, {
-      output_index: currentIndex,
-      item_id: item.id,
-      call_id: item.call_id,
-      arguments_bytes: Buffer.byteLength(String(item.arguments || ""), "utf8"),
     });
   }
 
@@ -482,7 +447,6 @@ function createResponseEmitter(res, seq, responseId, runtime) {
   }
 
   function complete(response) {
-    lifecycle.responseCompleted(output.length);
     emitSse(res, "response.completed", {
       type: "response.completed",
       response,
@@ -491,7 +455,6 @@ function createResponseEmitter(res, seq, responseId, runtime) {
   }
 
   function fail(response) {
-    lifecycle.responseCompleted(output.length);
     emitSse(res, "response.failed", {
       type: "response.failed",
       response,
@@ -973,74 +936,6 @@ function quoteThinkingDelta(delta, state) {
   return output;
 }
 
-function createToolLifecycleTracer(runtime, responseId) {
-  const startedAtByKey = new Map();
-  const activeByKey = new Map();
-  let tracedTools = 0;
-
-  function record(phase, item, detail = {}) {
-    if (!runtime || !isApplyPatchResponseItem(item)) return;
-    const key = detail.call_id || (item && item.call_id) || detail.item_id || (item && item.id) || "";
-    const now = Date.now();
-    if (phase === "output_item.added" && key && !startedAtByKey.has(key)) {
-      startedAtByKey.set(key, now);
-      activeByKey.set(key, true);
-      tracedTools += 1;
-    }
-    const startedAt = key ? startedAtByKey.get(key) : null;
-    if (phase === "output_item.done" && key) activeByKey.delete(key);
-
-    pushEvent(runtime, {
-      type: "tool_lifecycle",
-      level: "info",
-      message: "Tool lifecycle: " + phase,
-      audience: "diagnostic",
-      detail: compactLifecycleDetail({
-        response_id: responseId,
-        phase,
-        tool: "apply_patch",
-        name: (item && item.name) || "shell",
-        call_id: detail.call_id || (item && item.call_id) || "",
-        item_id: detail.item_id || (item && item.id) || "",
-        output_index: detail.output_index,
-        arguments_bytes: detail.arguments_bytes,
-        delta_bytes: detail.delta_bytes,
-        chunk_index: detail.chunk_index,
-        chunk_count: detail.chunk_count,
-        elapsed_ms: startedAt ? now - startedAt : 0,
-      }),
-    });
-  }
-
-  function responseCompleted(outputCount) {
-    if (!runtime || tracedTools === 0) return;
-    pushEvent(runtime, {
-      type: "tool_lifecycle",
-      level: "info",
-      message: "Tool lifecycle: response.completed",
-      audience: "diagnostic",
-      detail: {
-        response_id: responseId,
-        phase: "response.completed",
-        traced_tools: tracedTools,
-        active_tools: activeByKey.size,
-        output_count: outputCount,
-      },
-    });
-  }
-
-  return { record, responseCompleted };
-}
-
-function isApplyPatchResponseItem(item) {
-  if (!item || item.type !== "function_call") return false;
-  if (item.name === "apply_patch" || item.name === "apply_patch_proxy") return true;
-  if (item.name !== "shell") return false;
-  const args = parseJsonLoose(item.arguments);
-  const command = args && Array.isArray(args.command) ? args.command : null;
-  return Boolean(command && command[0] === "apply_patch");
-}
-
 function messageItem(text, phase) {
   const item = {
     id: makeId("msg"),
@@ -1062,27 +957,6 @@ function splitTextForStreaming(text, size) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function compactLifecycleDetail(detail) {
-  const output = {};
-  for (const [key, value] of Object.entries(detail || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    output[key] = value;
-  }
-  return output;
-}
-
-function parseJsonLoose(value) {
-  if (!value) return null;
-  if (typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return null;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
 }
 
 module.exports = {

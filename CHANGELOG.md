@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.3 - 2026-05-24
+
+This release focuses on native Apply Patch fidelity, MCP edge-case compatibility, and release documentation polish.
+
+### Added
+
+- Added native Apply Patch bridge tests for freeform patch mapping, history replay, failure output guidance, and complex patch payloads.
+- Added MCP passthrough test coverage for nested MCP tool declarations shaped as `{ tool: ... }`.
+- Added README usage imagery.
+
+### Changed
+
+- Changed `apply_patch` handling to return Codex native `custom_tool_call` items instead of shell-style wrappers.
+- Removed the old apply-patch proxy wrapper path and related lifecycle noise.
+- Removed the experimental proxy-tool-to-`mcp_call` UI mapping after testing showed Codex Desktop does not persist or render those response items as native MCP calls.
+- Kept ordinary CodeSeeX hosted tools on the stable proxy tool path while preserving native MCP passthrough for Codex-configured MCP servers.
+
+### Fixed
+
+- Fixed nested MCP tool declarations shaped as `{ tool: ... }` being skipped.
+- Fixed Apply Patch schema and prompt mismatch issues that could cause malformed patch calls or shell fallback behavior.
+- Added model-facing guidance after patch failures so retries re-read exact file content instead of relying on stale context.
+
+### Notes
+
+- `list_mcp_resources` returning an empty array does not necessarily mean MCP tools are unavailable. Some MCP servers expose tools without resources or resource templates; verify by calling an actual MCP tool and checking for Codex `mcp_tool_call_end` events.
+
 ## 0.3.2 - 2026-05-23
 
 This release focuses on self-hosted upstream configuration, README imagery, and native MCP passthrough so Codex MCP tools stay on the Codex app tool layer.

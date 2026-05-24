@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.3.2" src="https://img.shields.io/badge/version-0.3.2-1f6feb">
+  <img alt="Version 0.3.3" src="https://img.shields.io/badge/version-0.3.3-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -80,12 +80,17 @@ If you self-host a DeepSeek-compatible service, set the upstream URL in `Setting
   <img alt="CodeSeeX proxy settings with generated config.toml" src="docs/img/config-toml.png">
 </p>
 
+<p align="center">
+  <img alt="CodeSeeX usage view showing conversation token and cost details" src="docs/img/usage.png">
+</p>
+
 ## Features
 
 - Codex-compatible local API for `/v1/responses` and related model calls.
 - DeepSeek V4 adapter catalog for `deepseek-v4-flash` and `deepseek-v4-pro` with `1M` context metadata.
 - Compatibility with Codex built-in tool flows, including Apply Patch, MCP, Skills, and Plugins.
 - Native MCP passthrough so Codex-configured MCP tools remain executed and displayed by the Codex app tool layer.
+- Native Apply Patch bridge so DeepSeek tool calls are returned to Codex as the built-in freeform patch tool instead of a shell-style wrapper.
 - Single configurable local port for the desktop manager, `/api/*`, and `/v1/*`.
 - Proxy settings for catalog mode, upstream model override, custom upstream URL, billing rates, and generated `config.toml`.
 - Streaming answer display with reasoning visibility controls and grouped proxy tool summaries.

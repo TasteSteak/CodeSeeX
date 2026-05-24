@@ -16,9 +16,6 @@ function createToolContext(tools, options = {}) {
     isInternalToolCall(toolCall) {
       return isInternalToolCall(toolCall, context);
     },
-    internalPatchFromToolCall(toolCall) {
-      return internalPatchFromToolCall(toolCall, context);
-    },
     normalizeToolChoice(toolChoice) {
       return normalizeToolChoice(toolChoice, context);
     },
@@ -31,12 +28,12 @@ function createToolContext(tools, options = {}) {
 
 function normalizeTools(tools, options = {}) {
   const rootDir = options.rootDir || process.env.PROXY_ROOT_DIR || null;
-  const upstreamTools = [applyPatch.modelTool()];
+  const upstreamTools = [];
   const byName = new Map();
   const passthroughTools = [];
   const state = { upstreamTools, passthroughTools, byName };
 
-  applyPatch.registerLegacyAlias(state);
+  applyPatch.registerInputTool({ type: applyPatch.TOOL_NAME }, state, options);
   registerAutoTools(state, options);
 
   const allTools = (Array.isArray(tools) ? tools : []).concat(Array.isArray(options.extraTools) ? options.extraTools : []);
@@ -134,6 +131,9 @@ function splitToolCalls(toolCalls, toolContext) {
 }
 
 function responseToolItemFromChat(toolCall, toolContext) {
+  const name = getToolName(toolCall);
+  const entry = toolContext && toolContext.byName ? toolContext.byName.get(name) : null;
+
   if (isInternalToolCall(toolCall, toolContext)) {
     return applyPatch.responseItemFromChatTool(toolCall, Object.assign({ getToolArguments, getToolName }, toolContext));
   }
@@ -141,16 +141,14 @@ function responseToolItemFromChat(toolCall, toolContext) {
   const adaptedItem = responseItemFromAdaptedChatTool(toolCall, Object.assign({ getToolArguments, getToolName }, toolContext), { parseJson });
   if (adaptedItem) return adaptedItem;
 
-  const name = getToolName(toolCall);
   const args = getToolArguments(toolCall);
-  const entry = toolContext && toolContext.byName ? toolContext.byName.get(name) : null;
   const responseName = (entry && entry.responseName) || name;
   const item = {
     id: makeId("fc"),
     type: "function_call",
     call_id: toolCall.id || makeId("call"),
     name: responseName,
-    arguments: entry && isHostedKind(entry.kind) ? args : applyPatch.normalizeShellArguments(responseName, args),
+    arguments: args,
     status: "completed",
   };
   if (entry && entry.namespace) item.namespace = entry.namespace;
@@ -176,14 +174,11 @@ function chatToolCallFromResponseItem(item) {
   return toolCall;
 }
 
-function expandApplyPatchToolCalls(toolCalls) {
-  return Array.isArray(toolCalls) ? toolCalls : [];
-}
-
 function isInternalToolCall(toolCall, toolContext) {
   const name = getToolName(toolCall);
   if (applyPatch.isToolName(name)) return true;
-  return applyPatch.isShellPatchCall(toolCall, getToolName, getToolArguments);
+  const entry = toolContext && toolContext.byName ? toolContext.byName.get(name) : null;
+  return Boolean(entry && entry.kind === "internal_apply_patch");
 }
 
 function isHostedToolCall(toolCall, toolContext) {
@@ -194,12 +189,6 @@ function isHostedToolCall(toolCall, toolContext) {
 
 function isHostedKind(kind) {
   return String(kind || "").startsWith("hosted_");
-}
-
-function internalPatchFromToolCall(toolCall, toolContext) {
-  if (!isInternalToolCall(toolCall, toolContext)) return null;
-  const patch = applyPatch.patchTextFromToolCall(getToolName(toolCall), getToolArguments(toolCall));
-  return patch === null ? "" : patch;
 }
 
 function getToolName(toolCall) {
@@ -296,6 +285,7 @@ function isModelCallableTool(tool, parameters) {
   if (!tool || typeof tool !== "object") return false;
   const type = String(tool.type || "").toLowerCase();
   if (type === "mcp") return hasCallableShape(tool, parameters);
+  if (tool.tool && typeof tool.tool === "object") return hasCallableShape(tool.tool, parameters);
   if (tool.name || tool.server_label) return hasCallableShape(tool, parameters);
   return false;
 }
@@ -340,22 +330,28 @@ function normalizeToolId(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 64);
 }
 
-const parseJson = applyPatch.parseJson;
-const patchFromApplyPatchOperation = applyPatch.patchFromApplyPatchOperation;
-const repairApplyPatch = applyPatch.repairApplyPatch;
+function parseJson(value) {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 module.exports = {
   chatToolCallFromResponseItem,
   createToolContext,
-  expandApplyPatchToolCalls,
   getToolArguments,
   getToolName,
   isHostedToolCall,
+  isInternalToolCall,
   normalizeToolChoice,
   normalizeTools,
-  patchFromApplyPatchOperation,
   parseJson,
-  repairApplyPatch,
   responseToolItemFromChat,
   splitToolCalls,
 };

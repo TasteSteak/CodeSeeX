@@ -57,10 +57,6 @@ const DEFAULT_PROXY_COMPATIBILITY_INSTRUCTIONS = [
   "",
   "- Use the provided tools through structured tool calls. Do not print DSML, XML, or markdown-like tool call markup as plain text.",
   "- For web requests, call `web_search`. CodeSeeX executes it and returns tool results so you can answer in the same turn.",
-  "- For local text edits, use `apply_patch` with Codex-style patch text beginning with `*** Begin Patch` and ending with `*** End Patch`.",
-  "- In `apply_patch`, new files must use the exact header `*** Add File: <path>`; do not write `Create:`, `Create File:`, `Add:`, or other invented operation headers.",
-  "- In `apply_patch` add-file hunks, every new content line must begin with `+`.",
-  "- Do not use shell redirection, Out-File, Set-Content, WriteAllText, or similar full-file rewrites for routine text edits unless the user explicitly requests a non-patch repair or binary/non-text handling.",
 ].join("\n");
 
 function buildCodeSeeXCatalog(options = {}) {

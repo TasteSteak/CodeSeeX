@@ -3,7 +3,7 @@ const crypto = require("node:crypto");
 const { makeId } = require("../shared/http");
 const { cloneJson } = require("../shared/json-store");
 const { repairMojibakeText } = require("../shared/text-encoding");
-const { chatToolCallFromResponseItem, expandApplyPatchToolCalls, patchFromApplyPatchOperation } = require("./tools");
+const { chatToolCallFromResponseItem } = require("./tools");
 const { extractTaggedThinking, extractText, normalizeFileLinks, normalizeReasoningText, sanitizeToolXmlInText, stripDsmlToolBlocks } = require("./text-utils");
 
 const HIDDEN_REASONING_PREFIX = "codeseex-reasoning-v1:";
@@ -33,17 +33,15 @@ function normalizeInput(input) {
     if (raw.type === "message" || raw.role) {
       const text = extractText(raw.content);
       if (isDisplayOnlyText(text)) continue;
-      if (/^Warning:\s*apply_patch was requested via shell\./.test(text.trim())) continue;
       items.push(normalizeMessage(raw));
       continue;
     }
-    if (raw.type === "function_call" || raw.type === "custom_tool_call" || raw.type === "apply_patch_call" || raw.type === "web_search_call") {
+    if (raw.type === "function_call" || raw.type === "custom_tool_call" || raw.type === "web_search_call") {
       items.push(Object.assign({ id: raw.id || makeId("tc"), status: raw.status || "completed" }, raw));
       continue;
     }
-    if (raw.type === "function_call_output" || raw.type === "custom_tool_call_output" || raw.type === "apply_patch_call_output" || raw.type === "web_search_call_output") {
+    if (raw.type === "function_call_output" || raw.type === "custom_tool_call_output" || raw.type === "web_search_call_output") {
       if (!raw.call_id) continue;
-      if (/^unsupported custom tool call:\s*apply_patch$/i.test(normalizeToolOutputText(raw).trim())) continue;
       items.push(Object.assign({ id: raw.id || makeId("tco"), status: raw.status || "completed" }, raw));
       continue;
     }
@@ -55,10 +53,7 @@ function normalizeInput(input) {
 function inputToMessages(items) {
   const messages = [];
   const resolvedToolCallIds = collectResolvedToolCallIds(items);
-  const resolvedApplyPatchBases = collectResolvedApplyPatchBases(items);
-  const groupedApplyPatchItems = collectGroupedApplyPatchItems(items);
-  const processedApplyPatchBases = new Set();
-  const processedApplyPatchOutputBases = new Set();
+  const toolNamesByCallId = collectToolCallNamesById(items);
   let pendingAssistant = null;
   let pendingReasoning = "";
 
@@ -107,9 +102,9 @@ function inputToMessages(items) {
       messages.push({ role, content: text });
       continue;
     }
-    if (item.type === "function_call" || item.type === "custom_tool_call" || item.type === "apply_patch_call" || item.type === "web_search_call") {
+    if (item.type === "function_call" || item.type === "custom_tool_call" || item.type === "web_search_call") {
       const callId = resolveToolCallId(item);
-      if (!callId || (!resolvedToolCallIds.has(callId) && !resolvedApplyPatchBases.has(baseApplyPatchCallId(callId)))) continue;
+      if (!callId || !resolvedToolCallIds.has(callId)) continue;
       if (!pendingAssistant) pendingAssistant = { role: "assistant", content: "", reasoning_content: "", tool_calls: [] };
       if (pendingReasoning) {
         pendingAssistant.reasoning_content = joinReasoning(pendingAssistant.reasoning_content, pendingReasoning);
@@ -119,40 +114,14 @@ function inputToMessages(items) {
         pendingAssistant.tool_calls.push(chatToolCallFromResponseItem(item));
         continue;
       }
-      if (item.type === "custom_tool_call" && item.name === "apply_patch") {
-        pendingAssistant.tool_calls.push(chatToolCallFromResponseItem(item));
-        continue;
-      }
-      if (item.type === "apply_patch_call" && resolvedApplyPatchBases.has(baseApplyPatchCallId(callId))) {
-        const baseId = baseApplyPatchCallId(callId);
-        if (!processedApplyPatchBases.has(baseId)) {
-          appendGroupedApplyPatchToolCall(pendingAssistant, baseId, groupedApplyPatchItems.get(baseId));
-          flushPending();
-          const groupedOutput = groupedApplyPatchOutputText(groupedApplyPatchItems.get(baseId));
-          if (groupedOutput) messages.push({ role: "tool", tool_call_id: baseId, content: groupedOutput });
-          processedApplyPatchBases.add(baseId);
-          processedApplyPatchOutputBases.add(baseId);
-        }
-        continue;
-      }
       pendingAssistant.tool_calls.push(chatToolCallFromResponseItem(item));
       continue;
     }
-    if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.type === "apply_patch_call_output" || item.type === "web_search_call_output") {
+    if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.type === "web_search_call_output") {
       flushPending();
       const callId = resolveToolCallId(item);
       if (!callId) continue;
-      if (item.type === "apply_patch_call_output") {
-        const baseId = baseApplyPatchCallId(callId);
-        if (processedApplyPatchOutputBases.has(baseId)) continue;
-        const groupedOutput = groupedApplyPatchOutputText(groupedApplyPatchItems.get(baseId)) || normalizeToolOutputText(item);
-        if (groupedOutput) {
-          messages.push({ role: "tool", tool_call_id: baseId, content: groupedOutput });
-          processedApplyPatchOutputBases.add(baseId);
-        }
-        continue;
-      }
-      messages.push({ role: "tool", tool_call_id: callId, content: sanitizeToolContent(normalizeToolOutputText(item)) });
+      messages.push({ role: "tool", tool_call_id: callId, content: sanitizeToolContent(normalizeToolOutputText(item, { toolName: toolNamesByCallId.get(callId) })) });
     }
   }
 
@@ -164,7 +133,6 @@ function inputToMessages(items) {
     const message = { role: "assistant", content: pendingAssistant.content || "" };
     if (pendingAssistant.reasoning_content) message.reasoning_content = pendingAssistant.reasoning_content;
     if (pendingAssistant.tool_calls.length > 0) message.tool_calls = pendingAssistant.tool_calls.map(cleanToolCallForChat);
-    delete pendingAssistant.apply_patch_groups;
     if (message.content || message.reasoning_content || message.tool_calls) messages.push(message);
     pendingAssistant = null;
   }
@@ -186,55 +154,11 @@ function joinReasoning(existing, next) {
   return left + "\n\n" + right;
 }
 
-function appendGroupedApplyPatchToolCall(pendingAssistant, baseId, group) {
-  const patchBodies = ((group && group.calls) || []).map((item) => applyPatchOperationBody(item.operation)).filter(Boolean);
-  pendingAssistant.tool_calls.push({
-    id: baseId,
-    type: "function",
-    function: {
-      name: "apply_patch",
-      arguments: JSON.stringify({ patch: ["*** Begin Patch"].concat(patchBodies, ["*** End Patch"]).join("\n") }),
-    },
-  });
-}
-
-function applyPatchOperationBody(operation) {
-  return patchFromApplyPatchOperation(operation)
-    .split("\n")
-    .filter((line) => line !== "*** Begin Patch" && line !== "*** End Patch")
-    .join("\n")
-    .trimEnd();
-}
-
 function cleanToolCallForChat(toolCall) {
   if (!toolCall || typeof toolCall !== "object") return toolCall;
   const cleaned = Object.assign({}, toolCall);
   delete cleaned.patchBodies;
   return cleaned;
-}
-
-function collectGroupedApplyPatchItems(items) {
-  const groups = new Map();
-  for (const item of items || []) {
-    if (!item || typeof item !== "object") continue;
-    if (item.type !== "apply_patch_call" && item.type !== "apply_patch_call_output") continue;
-    const callId = resolveToolCallId(item);
-    if (!callId) continue;
-    const baseId = baseApplyPatchCallId(callId);
-    if (!groups.has(baseId)) groups.set(baseId, { calls: [], outputs: [] });
-    const group = groups.get(baseId);
-    if (item.type === "apply_patch_call") group.calls.push(item);
-    else group.outputs.push(item);
-  }
-  return groups;
-}
-
-function groupedApplyPatchOutputText(group) {
-  let result = "";
-  for (const item of (group && group.outputs) || []) {
-    result = joinToolOutputs(result, normalizeToolOutputText(item));
-  }
-  return result;
 }
 
 function enforceChatToolProtocol(messages, options = {}) {
@@ -333,41 +257,31 @@ function mergePendingAssistant(pending, nextAssistant) {
 function collectResolvedToolCallIds(items) {
   const resolved = new Set();
   for (const item of items || []) {
-    if (!item || (item.type !== "function_call_output" && item.type !== "custom_tool_call_output" && item.type !== "apply_patch_call_output" && item.type !== "web_search_call_output")) continue;
+    if (!item || (item.type !== "function_call_output" && item.type !== "custom_tool_call_output" && item.type !== "web_search_call_output")) continue;
     const callId = resolveToolCallId(item);
-    if (callId) {
-      resolved.add(callId);
-      if (item.type === "custom_tool_call_output") resolved.add(baseApplyPatchCallId(callId));
-    }
+    if (callId) resolved.add(callId);
   }
   return resolved;
 }
 
-function collectResolvedApplyPatchBases(items) {
-  const outputBases = new Set();
-  const callBases = new Set();
-
+function collectToolCallNamesById(items) {
+  const byId = new Map();
   for (const item of items || []) {
-    if (!item || typeof item !== "object") continue;
-    if (item.type === "apply_patch_call") {
-      const callId = resolveToolCallId(item);
-      if (callId) callBases.add(baseApplyPatchCallId(callId));
-      continue;
-    }
-    if (item.type === "apply_patch_call_output") {
-      const callId = resolveToolCallId(item);
-      if (callId) outputBases.add(baseApplyPatchCallId(callId));
-    }
+    if (!item || (item.type !== "function_call" && item.type !== "custom_tool_call" && item.type !== "web_search_call")) continue;
+    const callId = resolveToolCallId(item);
+    if (!callId) continue;
+    const name = toolCallNameFromResponseItem(item);
+    if (name) byId.set(callId, name);
   }
-
-  for (const base of Array.from(outputBases)) {
-    if (!callBases.has(base)) outputBases.delete(base);
-  }
-  return outputBases;
+  return byId;
 }
 
-function baseApplyPatchCallId(callId) {
-  return String(callId || "").replace(/_\d+$/, "");
+function toolCallNameFromResponseItem(item) {
+  if (!item || typeof item !== "object") return "";
+  if (item.name) return String(item.name);
+  if (item.type === "web_search_call") return "web_search";
+  if (item.function && item.function.name) return String(item.function.name);
+  return "";
 }
 
 function buildConversation(requestBody, previousRecord, currentMessages) {
@@ -414,7 +328,7 @@ function normalizeAssistant(message) {
   const result = { role: "assistant", content: cleanedContent };
   if (typeof message.reasoning_content === "string" && message.reasoning_content) result.reasoning_content = message.reasoning_content;
   else if (extracted.reasoning) result.reasoning_content = extracted.reasoning;
-  if (hasRealToolCalls) result.tool_calls = expandApplyPatchToolCalls(message.tool_calls.map(normalizeChatToolCall));
+  if (hasRealToolCalls) result.tool_calls = message.tool_calls.map(normalizeChatToolCall);
   return result;
 }
 
@@ -693,10 +607,34 @@ function normalizeRole(role) {
   return "user";
 }
 
-function normalizeToolOutputText(item) {
+function normalizeToolOutputText(item, options = {}) {
   const output = item.output !== undefined ? item.output : item.results;
-  if (typeof output === "string") return repairMojibakeText(output);
-  return repairMojibakeText(JSON.stringify(output || ""));
+  const text = typeof output === "string" ? repairMojibakeText(output) : repairMojibakeText(JSON.stringify(output || ""));
+  return annotateApplyPatchFailureForModel(text, item, options);
+}
+
+function annotateApplyPatchFailureForModel(text, item, options = {}) {
+  if (!isApplyPatchOutput(item, options)) return text;
+  if (!looksLikeApplyPatchFailure(text)) return text;
+  if (/CodeSeeX note: apply_patch failed/i.test(text)) return text;
+  return String(text || "").trimEnd() + "\n\n" + [
+    "CodeSeeX note: apply_patch failed because the patch did not match the current file contents or patch format.",
+    "Re-read the target file before retrying, then submit a smaller patch with exact current context lines.",
+    "Do not reuse remembered context.",
+  ].join("\n");
+}
+
+function isApplyPatchOutput(item, options = {}) {
+  const name = String(options.toolName || item && item.name || "").trim();
+  return name === "apply_patch";
+}
+
+function looksLikeApplyPatchFailure(text) {
+  const value = String(text || "");
+  if (/Success\. Updated|Done!/i.test(value)) return false;
+  const failureSignal = /(Exit code:\s*[1-9]\d*|Failed|Error|Invalid|The patch format is wrong|Unknown Line|expected lines|No such file)/i;
+  const patchSignal = /(patch|expected lines|Invalid Context|Add File|Update File|Delete File|Move to|\*\*\*)/i;
+  return failureSignal.test(value) && patchSignal.test(value);
 }
 
 function resolveToolCallId(item) {
