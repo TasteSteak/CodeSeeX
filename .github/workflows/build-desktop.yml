@@ -122,14 +122,43 @@ jobs:
             printf 'CodeSeeX %s\n' "$VERSION" > release-notes.md
           fi
 
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          mkdir -p release-upload
+
+          for file in release-assets/**/*; do
+            if [ ! -f "$file" ]; then
+              continue
+            fi
+
+            case "$file" in
+              release-assets/CodeSeeX-Windows-*/*) platform="Windows" ;;
+              release-assets/CodeSeeX-MacOS-*/*) platform="MacOS" ;;
+              release-assets/CodeSeeX-Linux-*/*) platform="Linux" ;;
+              *) platform="Unknown" ;;
+            esac
+
+            name="$(basename "$file")"
+            if [ "$platform" = "Unknown" ]; then
+              echo "Skipping unrecognized asset path: $file"
+              continue
+            fi
+
+            cp "$file" "release-upload/${platform}-${name}"
+          done
+
+          find release-upload -maxdepth 1 -type f -print | sort
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          shopt -s globstar nullglob
+          shopt -s nullglob
           files=()
-          for file in release-assets/**/*; do
+          for file in release-upload/*; do
             if [ -f "$file" ]; then
               files+=("$file")
             fi
