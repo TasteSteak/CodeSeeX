@@ -15,6 +15,11 @@ const CONFIG_CHANGED_EVENT = "codeseex-config-changed";
 const RUNTIME_STATUS_STARTING = "starting";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
 const UPDATE_NOTICE_STORAGE_KEY = "version";
+const DEFAULT_TEMPERATURE_PRESET = "default";
+const DEFAULT_BILLING_RATES_CNY = Object.freeze({
+  flash: Object.freeze({ cached: 0.02, cacheMiss: 1, output: 2 }),
+  pro: Object.freeze({ cached: 0.025, cacheMiss: 3, output: 6 }),
+});
 const RESTART_REQUIRED_KEYS = new Set([
   "PROXY_PORT",
 ]);
@@ -37,9 +42,12 @@ const els = {
   balanceStatus: byId("balanceStatus"),
   balanceToppedUp: byId("balanceToppedUp"),
   balanceTotal: byId("balanceTotal"),
-  billingCachedInput: byId("BILLING_CACHED_INPUT_CNY"),
-  billingCacheMissInput: byId("BILLING_CACHE_MISS_INPUT_CNY"),
-  billingOutput: byId("BILLING_OUTPUT_CNY"),
+  billingFlashCachedInput: byId("BILLING_FLASH_CACHED_INPUT_CNY"),
+  billingFlashCacheMissInput: byId("BILLING_FLASH_CACHE_MISS_INPUT_CNY"),
+  billingFlashOutput: byId("BILLING_FLASH_OUTPUT_CNY"),
+  billingProCachedInput: byId("BILLING_PRO_CACHED_INPUT_CNY"),
+  billingProCacheMissInput: byId("BILLING_PRO_CACHE_MISS_INPUT_CNY"),
+  billingProOutput: byId("BILLING_PRO_OUTPUT_CNY"),
   completedTurns: byId("completedTurns"),
   autoStart: byId("AUTO_START"),
   configTomlCode: byId("configTomlCode"),
@@ -58,6 +66,7 @@ const els = {
   pageTitle: byId("pageTitle"),
   pid: byId("pid"),
   pidLabel: byId("pidLabel"),
+  deepseekOfficialV1Compat: byId("DEEPSEEK_OFFICIAL_V1_COMPAT"),
   deepseekBaseUrl: byId("DEEPSEEK_BASE_URL"),
   proxyPort: byId("PROXY_PORT"),
   refreshBalanceButton: byId("refreshBalanceButton"),
@@ -103,6 +112,7 @@ let pendingConfig = null;
 let restartRequired = false;
 let latestRunning = false;
 let latestStarting = true;
+let latestRuntimePort = null;
 let logDividers = [];
 let logEvents = [];
 let logHasMore = false;
@@ -194,7 +204,7 @@ function bind() {
     els.toolConfigList.addEventListener("change", handleConfigInput);
   }
 
-  [els.showThinking, els.autoStart, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput].forEach((input) => {
+  [els.showThinking, els.autoStart, els.deepseekOfficialV1Compat, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
@@ -203,6 +213,7 @@ function bind() {
   onRadioChange("CONFIG_TAB", setConfigTab);
   onRadioChange("CATALOG_MODE", handleConfigInput);
   onRadioChange("UPSTREAM_MODEL_OVERRIDE", handleConfigInput);
+  onRadioChange("DEEPSEEK_TEMPERATURE_PRESET", handleConfigInput);
   onRadioChange("DEEPSEEK_THINKING", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
@@ -261,7 +272,7 @@ async function actionPost(url, title, detail) {
   try {
     await fetch(url, { method: "POST" });
     if (url === "/api/restart") {
-      restartRequired = hasSavedRestartRequiredChanges();
+      restartRequired = false;
       renderConfigSaveState(pendingConfig ? "pending" : "clean");
     }
     await delay(450);
@@ -538,6 +549,7 @@ function renderStatus(data) {
   lastStatusSignature = signature;
   latestRunning = Boolean(data.running);
   latestStarting = isStarting;
+  latestRuntimePort = runtime.port || null;
   els.statusPill.classList.toggle("running", latestRunning);
   els.statusPill.classList.toggle("starting", latestStarting);
   els.running.textContent = latestRunning ? t("running") : (latestStarting ? t("starting") : t("stopped"));
@@ -563,7 +575,7 @@ function renderButtons() {
 function renderConfig(config) {
   if (pendingConfig || configSaving) return;
   const active = document.activeElement;
-  const textInputs = [els.deepseekBaseUrl, els.proxyPort, els.billingCachedInput, els.billingCacheMissInput, els.billingOutput];
+  const textInputs = [els.deepseekBaseUrl, els.proxyPort, ...billingInputs()];
   if (textInputs.includes(active)) return;
   const configSignature = stableStringify(normalizeConfigPayload(config));
   if (configSignature === currentConfigSignature && lastSavedConfig) return;
@@ -572,19 +584,19 @@ function renderConfig(config) {
   setRadioValue("DEEPSEEK_THINKING", config.DEEPSEEK_THINKING || "auto");
   setRadioValue("CATALOG_MODE", normalizeCatalogMode(config.CATALOG_MODE));
   setRadioValue("UPSTREAM_MODEL_OVERRIDE", normalizeUpstreamModelOverride(config.UPSTREAM_MODEL_OVERRIDE));
+  setRadioValue("DEEPSEEK_TEMPERATURE_PRESET", normalizeTemperaturePreset(config.DEEPSEEK_TEMPERATURE_PRESET));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
   const nextTheme = config.UI_THEME || "system";
   setRadioValue("UI_THEME", nextTheme);
   els.showThinking.checked = !/^(0|false|no|off|disabled)$/i.test(String(config.SHOW_THINKING || "true"));
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
+  if (els.deepseekOfficialV1Compat) els.deepseekOfficialV1Compat.checked = isTruthy(config.DEEPSEEK_OFFICIAL_V1_COMPAT || "true");
   if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
   const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
   if (document.activeElement !== els.uiLanguage) els.uiLanguage.value = nextLanguage;
-  els.billingCachedInput.value = config.BILLING_CACHED_INPUT_CNY || "0.025";
-  els.billingCacheMissInput.value = config.BILLING_CACHE_MISS_INPUT_CNY || "3";
-  els.billingOutput.value = config.BILLING_OUTPUT_CNY || "6";
+  setBillingInputValues(config);
   currentAdapterSignature = "";
   applyTheme(nextTheme);
   if (resolveLanguageId(nextLanguage) !== uiLanguage || nextLanguage !== configuredLanguage) applyLanguage(nextLanguage);
@@ -1056,7 +1068,7 @@ function settingDivider() {
 }
 
 function setConfigTab(value) {
-  currentConfigTab = ["client", "proxy", "tools"].includes(value) ? value : "client";
+  currentConfigTab = ["client", "proxy", "experimental", "tools"].includes(value) ? value : "client";
   document.querySelectorAll("[data-config-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.configPanel === currentConfigTab);
   });
@@ -1081,6 +1093,7 @@ function renderUsage(runtime) {
   const turns = Array.isArray(runtime.turn_history) ? runtime.turn_history.slice(-120) : [];
   const usageSignature = stableStringify({
     locale: uiLanguage,
+    billing: currentBillingSignature(),
     total_cached_input_tokens: runtime.total_cached_input_tokens || 0,
     total_cache_miss_input_tokens: runtime.total_cache_miss_input_tokens || 0,
     total_output_tokens: runtime.total_output_tokens || 0,
@@ -1104,11 +1117,7 @@ function renderUsage(runtime) {
   const totalMiss = runtime.total_cache_miss_input_tokens || 0;
   const totalInput = totalCached + totalMiss;
   const cacheHitRate = totalInput > 0 ? (totalCached / totalInput * 100).toFixed(1) + "%" : "-";
-  const totalCostVal = costForTokens({
-    cached_input_tokens: totalCached,
-    cache_miss_input_tokens: totalMiss,
-    output_tokens: runtime.total_output_tokens || 0,
-  });
+  const totalCostVal = turns.reduce((sum, turn) => sum + costForTokens(turn), 0);
 
   els.usageTotalTurns.textContent = formatNumber(totalTurnsCount);
   els.usageCacheHitRate.textContent = cacheHitRate;
@@ -1308,6 +1317,10 @@ function userLogMessage(type, fallback) {
     manager_started: "managerStarted",
     manager_stop_requested: "managerStopRequested",
     manager_stopped: "managerStopped",
+    context_compaction_completed: "contextCompactionCompleted",
+    context_compaction_failed: "contextCompactionFailed",
+    context_compaction_started: "contextCompactionStarted",
+    context_compacted: "contextCompacted",
     model_alias_applied: "modelAliasApplied",
     process_stderr: "processError",
     process_stdout: "processOutput",
@@ -1455,6 +1468,8 @@ function buildConfigPayload() {
     DEEPSEEK_THINKING: getRadioValue("DEEPSEEK_THINKING") || "auto",
     CATALOG_MODE: normalizeCatalogMode(getRadioValue("CATALOG_MODE")),
     UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE")),
+    DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(getRadioValue("DEEPSEEK_TEMPERATURE_PRESET")),
+    DEEPSEEK_OFFICIAL_V1_COMPAT: els.deepseekOfficialV1Compat && els.deepseekOfficialV1Compat.checked ? "true" : "false",
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
     SHOW_THINKING: els.showThinking && els.showThinking.checked ? "true" : "false",
@@ -1464,9 +1479,12 @@ function buildConfigPayload() {
     DEEPSEEK_BASE_URL: normalizeDeepSeekBaseUrl(els.deepseekBaseUrl ? els.deepseekBaseUrl.value : ""),
     PROXY_PORT: normalizePort(els.proxyPort ? els.proxyPort.value : "", 8787),
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
-    BILLING_CACHED_INPUT_CNY: normalizeRateInput(els.billingCachedInput ? els.billingCachedInput.value : "", 0.025),
-    BILLING_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingCacheMissInput ? els.billingCacheMissInput.value : "", 3),
-    BILLING_OUTPUT_CNY: normalizeRateInput(els.billingOutput ? els.billingOutput.value : "", 6),
+    BILLING_FLASH_CACHED_INPUT_CNY: normalizeRateInput(els.billingFlashCachedInput ? els.billingFlashCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cached),
+    BILLING_FLASH_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingFlashCacheMissInput ? els.billingFlashCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cacheMiss),
+    BILLING_FLASH_OUTPUT_CNY: normalizeRateInput(els.billingFlashOutput ? els.billingFlashOutput.value : "", DEFAULT_BILLING_RATES_CNY.flash.output),
+    BILLING_PRO_CACHED_INPUT_CNY: normalizeRateInput(els.billingProCachedInput ? els.billingProCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cached),
+    BILLING_PRO_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingProCacheMissInput ? els.billingProCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cacheMiss),
+    BILLING_PRO_OUTPUT_CNY: normalizeRateInput(els.billingProOutput ? els.billingProOutput.value : "", DEFAULT_BILLING_RATES_CNY.pro.output),
   };
 }
 
@@ -1491,6 +1509,7 @@ function sameConfigPayload(left, right) {
 }
 
 function hasRestartRequiredChanges(payload) {
+  if (!latestRunning) return false;
   const current = normalizeConfigPayload(payload);
   for (const key of RESTART_REQUIRED_KEYS) {
     if (lastSavedConfig && current[key] !== undefined && current[key] !== lastSavedConfig[key]) return true;
@@ -1499,9 +1518,8 @@ function hasRestartRequiredChanges(payload) {
 }
 
 function hasSavedRestartRequiredChanges() {
-  if (!lastSavedConfig) return false;
-  const currentPort = normalizePort(location.port || "", 8787);
-  return lastSavedConfig.PROXY_PORT !== undefined && String(lastSavedConfig.PROXY_PORT) !== String(currentPort);
+  if (!lastSavedConfig || !latestRunning || !latestRuntimePort) return false;
+  return String(normalizePort(lastSavedConfig.PROXY_PORT, 8787)) !== String(latestRuntimePort);
 }
 
 function clearAutosaveTimer() {
@@ -1691,11 +1709,51 @@ function infoRow(label, value) {
   return row;
 }
 
-function currentBillingRates() {
+function billingInputs() {
+  return [
+    els.billingFlashCachedInput,
+    els.billingFlashCacheMissInput,
+    els.billingFlashOutput,
+    els.billingProCachedInput,
+    els.billingProCacheMissInput,
+    els.billingProOutput,
+  ];
+}
+
+function setBillingInputValues(config = {}) {
+  setInputValue(els.billingFlashCachedInput, config.BILLING_FLASH_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.cached);
+  setInputValue(els.billingFlashCacheMissInput, config.BILLING_FLASH_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.cacheMiss);
+  setInputValue(els.billingFlashOutput, config.BILLING_FLASH_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.output);
+  setInputValue(els.billingProCachedInput, config.BILLING_PRO_CACHED_INPUT_CNY || config.BILLING_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.cached);
+  setInputValue(els.billingProCacheMissInput, config.BILLING_PRO_CACHE_MISS_INPUT_CNY || config.BILLING_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.cacheMiss);
+  setInputValue(els.billingProOutput, config.BILLING_PRO_OUTPUT_CNY || config.BILLING_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.output);
+}
+
+function setInputValue(input, value, fallback) {
+  if (!input || document.activeElement === input) return;
+  input.value = String(normalizeRateInput(value, fallback));
+}
+
+function currentBillingSignature() {
+  return stableStringify({
+    flash: currentBillingRates("deepseek-v4-flash"),
+    pro: currentBillingRates("deepseek-v4-pro"),
+  });
+}
+
+function currentBillingRates(model) {
+  const group = String(model || "").toLowerCase().includes("flash") ? "flash" : "pro";
+  if (group === "flash") {
+    return {
+      cached: normalizeRateInput(els.billingFlashCachedInput ? els.billingFlashCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cached),
+      cacheMiss: normalizeRateInput(els.billingFlashCacheMissInput ? els.billingFlashCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cacheMiss),
+      output: normalizeRateInput(els.billingFlashOutput ? els.billingFlashOutput.value : "", DEFAULT_BILLING_RATES_CNY.flash.output),
+    };
+  }
   return {
-    cached: normalizeRateInput(els.billingCachedInput ? els.billingCachedInput.value : "", 0.025),
-    cacheMiss: normalizeRateInput(els.billingCacheMissInput ? els.billingCacheMissInput.value : "", 3),
-    output: normalizeRateInput(els.billingOutput ? els.billingOutput.value : "", 6),
+    cached: normalizeRateInput(els.billingProCachedInput ? els.billingProCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cached),
+    cacheMiss: normalizeRateInput(els.billingProCacheMissInput ? els.billingProCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cacheMiss),
+    output: normalizeRateInput(els.billingProOutput ? els.billingProOutput.value : "", DEFAULT_BILLING_RATES_CNY.pro.output),
   };
 }
 
@@ -1741,12 +1799,21 @@ function normalizeUpstreamModelOverride(value) {
   return "default";
 }
 
+function normalizeTemperaturePreset(value) {
+  const normalized = String(value || DEFAULT_TEMPERATURE_PRESET).trim().toLowerCase();
+  if (normalized === "precise" || normalized === "strict" || normalized === "rigorous") return "strict";
+  if (normalized === "balanced" || normalized === "balance") return "balanced";
+  if (normalized === "general" || normalized === "chat" || normalized === "translation") return "general";
+  if (normalized === "creative" || normalized === "creation") return "creative";
+  return DEFAULT_TEMPERATURE_PRESET;
+}
+
 function normalizeCloseBehavior(value) {
   return String(value || "exit") === "tray" ? "tray" : "exit";
 }
 
 function costForTokens(tokens) {
-  const rates = currentBillingRates();
+  const rates = currentBillingRates(tokens && (tokens.model || tokens.requested_model));
   const cached = Number(tokens.cached_input_tokens || tokens.cachedInputTokens || 0);
   const cacheMiss = Number(tokens.cache_miss_input_tokens || tokens.cacheMissInputTokens || 0);
   const output = Number(tokens.output_tokens || tokens.outputTokens || 0);
@@ -1803,6 +1870,17 @@ function formatLogDetail(type, detail) {
       detail.requested_model ? "requested_model: " + detail.requested_model : "",
       detail.model ? t("model") + ": " + detail.model : "",
       detail.source ? "source: " + detail.source : "",
+    ].filter(Boolean).join("\n");
+  }
+  if (type === "context_compacted") {
+    return [
+      detail.mode ? t("mode") + ": " + detail.mode : "",
+      detail.message_count !== undefined ? "messages: " + detail.message_count : "",
+      detail.retained_message_count !== undefined ? "retained: " + detail.retained_message_count : "",
+      detail.tool_fact_count !== undefined ? "tool_facts: " + detail.tool_fact_count : "",
+      detail.input_item_count !== undefined ? "input_items: " + detail.input_item_count : "",
+      detail.estimated_tokens !== undefined ? "estimated_tokens: " + detail.estimated_tokens : "",
+      detail.threshold_tokens !== undefined ? "threshold_tokens: " + detail.threshold_tokens : "",
     ].filter(Boolean).join("\n");
   }
   return formatDetail(detail);

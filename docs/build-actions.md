@@ -38,11 +38,11 @@ The workflow sets `CSC_IDENTITY_AUTO_DISCOVERY=false` so electron-builder does n
 
 Uploaded artifact groups are named by platform:
 
-- `CodeSeeX-linux-x64`
-- `CodeSeeX-macos-arm64`
-- `CodeSeeX-windows-x64`
+- `CodeSeeX-Linux-x64`
+- `CodeSeeX-MacOS-arm64`
+- `CodeSeeX-Windows-x64`
 
-Each group contains the installable packages and electron-builder metadata files generated for that platform.
+Each group contains the installable package selected for that platform. Tag builds publish release assets with platform prefixes such as `Windows-`, `MacOS-`, and `Linux-`.
 
 ## Testing In A Fork
 

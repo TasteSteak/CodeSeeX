@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.0 - 2026-05-26
+
+This release focuses on high-fidelity agent context, safer request state persistence, first-run catalog reliability, upstream compatibility, and improved client configuration.
+
+### Added
+
+- Added a high-fidelity context compiler that preserves long response chains, verified tool facts, compacted context, and legal Chat tool protocol history.
+- Added request lifecycle checkpointing in `proxy-state.json` so in-progress, completed, failed, and interrupted turns keep their verified inputs and tool facts.
+- Added deterministic tool fact ledgers and compact diagnostics to reduce context loss after long conversations, tool loops, and manual or automatic compaction.
+- Added a full packaged catalog seed for users who do not have a native Codex catalog available on first run.
+- Added a reproducible packaged catalog seed so catalog generation no longer depends on short-lived Codex cache files.
+- Added custom DeepSeek official path compatibility control in `Settings -> Experimental`.
+- Added sampling temperature presets in client settings and tray shortcuts.
+- Added Flash and Pro billing rate categories with separate cached-input, cache-miss-input, and output rates.
+- Added structured handling for Codex typed image/tool content so screenshot payloads keep stable metadata without injecting base64 into model context.
+- Added proxy-hosted community tool execution support through an explicit `executeProxyTool()` hook.
+- Added direct fidelity and agent-state test coverage for compaction, context retention, interrupted turns, catalog seed generation, desktop port isolation, and native tool flows.
+
+### Changed
+
+- Default context handling now uses the model catalog context budget instead of a fixed short `60 messages / 120 KB` history window.
+- Assistant self-descriptions are treated as lower-priority evidence than user messages, tool calls, tool results, file facts, MCP facts, and compacted verified facts.
+- Interrupted or failed responses no longer contribute incomplete assistant final text to future context.
+- Official DeepSeek requests use `/v1/chat/completions` compatibility routing by default, while custom upstream URLs remain unaffected.
+- The generated catalog now carries more complete Codex model metadata for stable model-list rendering.
+- Runtime state reading is stricter: damaged `proxy-state.json` is reported as a diagnostic error instead of being silently replaced with an empty state.
+- Tool result conversion now has one model-visible path for native tool output, hosted proxy output, typed content arrays, JSON objects, and binary payload summaries.
+- The proxy settings layout was reorganized around connection, model behavior, usage display, Codex adapter, and experimental configuration.
+- Billing settings were redesigned into separate Flash and Pro cards while keeping existing persisted configuration keys.
+- GitHub Actions release assets are narrowed to the main installable package for each platform and renamed with `Windows-`, `MacOS-`, or `Linux-` prefixes.
+
+### Fixed
+
+- Fixed high-risk context truncation that could drop real tool calls or tool results and let assistant self-descriptions distort later turns.
+- Fixed compacted conversations losing important tool facts during long agent workflows.
+- Fixed stream interruption and upstream failure paths that could otherwise lose verified current-turn state.
+- Fixed first-run catalog issues on machines where Codex does not expose a native bundled catalog.
+- Fixed localized Codex App model-list rendering by hardening DeepSeek display metadata and plan visibility in generated model metadata.
+- Fixed startup conflicts where the desktop UI could fail when the proxy listen port was already occupied.
+- Fixed official DeepSeek endpoint compatibility regressions affecting users whose network or deployment expected `/v1/chat/completions`.
+- Fixed screenshot and image tool results being stringified into large `data:image/...;base64` text blocks, which could destroy prompt-cache continuity and inflate request cost.
+- Fixed unknown proxy-hosted tools falling through to Web Search execution; unsupported hosted tools now return an explicit protocol error.
+- Fixed Codex checkpoint compaction logging so `/compact`-style requests appear as context compaction start/completion events instead of ordinary conversation requests.
+- Fixed client settings ordering, sampling temperature styling, and related tray localization gaps.
+
 ## 0.3.3 - 2026-05-24
 
 This release focuses on native Apply Patch fidelity, MCP edge-case compatibility, and release documentation polish.

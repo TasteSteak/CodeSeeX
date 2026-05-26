@@ -1,3 +1,5 @@
+const crypto = require("node:crypto");
+
 function extractText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return String(content || "");
@@ -8,6 +10,266 @@ function extractText(content) {
     if (part.type === "refusal") return part.refusal || "";
     return "";
   }).join("");
+}
+
+function sanitizeLargeBinaryText(value) {
+  let output = String(value || "");
+  output = output.replace(/data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]{256,})/gi, (_match, mime, data) => {
+    return binaryPlaceholder({ mime, encoding: "base64-data-url", data });
+  });
+  output = output.replace(/(["'](?:base64|image_base64|screenshot_base64|data_base64|blob_base64)["']\s*:\s*["'])([A-Za-z0-9+/=\r\n]{4096,})(["'])/gi, (match, prefix, data, suffix) => {
+    if (!looksLikeBase64(data)) return match;
+    return prefix + binaryPlaceholder({ mime: "application/octet-stream", encoding: "base64-json-field", data }) + suffix;
+  });
+  output = output.replace(/\b([A-Za-z0-9+/]{8192,}={0,2})\b/g, (match, data) => {
+    if (!looksLikeBase64(data)) return match;
+    return binaryPlaceholder({ mime: "application/octet-stream", encoding: "base64-inline", data });
+  });
+  return output;
+}
+
+function toolOutputValueToText(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return sanitizeLargeBinaryText(value);
+
+  const typedText = typedContentToText(value);
+  if (typedText !== null) return typedText;
+
+  return safeStringifySanitizedToolOutput(value);
+}
+
+function typedContentToText(value) {
+  const parts = typedContentParts(value);
+  if (!parts) return null;
+
+  const lines = [];
+  for (const part of parts) {
+    const text = typedContentPartToText(part);
+    if (text) lines.push(text);
+  }
+  return sanitizeLargeBinaryText(lines.join("\n"));
+}
+
+function typedContentParts(value) {
+  const parts = Array.isArray(value)
+    ? value
+    : value && typeof value === "object" && Array.isArray(value.content) ? value.content : null;
+  if (!parts) return null;
+  return isTypedContentArray(parts) ? parts : null;
+}
+
+function isTypedContentArray(parts) {
+  if (!Array.isArray(parts) || parts.length === 0) return false;
+  let typedCount = 0;
+  for (const part of parts) {
+    if (typeof part === "string") continue;
+    if (!isTypedContentPart(part)) return false;
+    typedCount += 1;
+  }
+  return typedCount > 0;
+}
+
+function isTypedContentPart(part) {
+  if (!part || typeof part !== "object") return false;
+  const type = String(part.type || "").toLowerCase();
+  return type === "input_text"
+    || type === "output_text"
+    || type === "text"
+    || type === "summary_text"
+    || type === "refusal"
+    || type === "input_image"
+    || type === "output_image"
+    || type === "image"
+    || type === "input_file"
+    || type === "output_file"
+    || type === "file"
+    || type === "attachment";
+}
+
+function typedContentPartToText(part) {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  const type = String(part.type || "").toLowerCase();
+
+  if ((type === "input_text" || type === "output_text" || type === "text" || type === "summary_text") && typeof part.text === "string") {
+    return part.text;
+  }
+  if (type === "refusal" && typeof part.refusal === "string") return part.refusal;
+  if (type === "input_image" || type === "output_image" || type === "image") {
+    return describeImagePart(part);
+  }
+  if (type === "input_file" || type === "output_file" || type === "file" || type === "attachment") {
+    return describeAttachmentPart(part);
+  }
+  return "";
+}
+
+function safeStringifySanitizedToolOutput(value) {
+  try {
+    return JSON.stringify(sanitizeToolOutputJson(value));
+  } catch {
+    return sanitizeLargeBinaryText(String(value || ""));
+  }
+}
+
+function sanitizeToolOutputJson(value, seen = new WeakSet()) {
+  if (value === undefined || value === null) return value;
+  if (typeof value === "string") return sanitizeLargeBinaryText(value);
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value !== "object") return value;
+
+  const typedText = typedContentToText(value);
+  if (typedText !== null) return typedText;
+
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+    return "[binary payload omitted: " + binaryDescriptor({
+      mime: "application/octet-stream",
+      encoding: "buffer",
+      bytes: value.length,
+      hash: hashText(value),
+    }) + "]";
+  }
+  if (seen.has(value)) return "[circular reference omitted]";
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const mapped = value.map((child) => sanitizeToolOutputJson(child, seen));
+    seen.delete(value);
+    return mapped;
+  }
+  if (isBufferJson(value)) {
+    seen.delete(value);
+    return "[binary payload omitted: " + binaryDescriptor({
+      mime: "application/octet-stream",
+      encoding: "buffer-json",
+      bytes: value.data.length,
+      hash: hashText(value.data.join(",")),
+    }) + "]";
+  }
+
+  const copy = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "string" && isImageLikeKey(key)) {
+      copy[key] = describeImageReference(child);
+      continue;
+    }
+    if (typeof child === "string" && isBase64LikeKey(key) && (isDataUrl(child) || looksLikeBase64(child))) {
+      copy[key] = "[binary payload omitted: " + binaryDescriptor({
+        mime: mimeFromDataUrl(child) || "application/octet-stream",
+        encoding: isDataUrl(child) ? "base64-data-url" : key,
+        data: payloadFromDataUrl(child) || child,
+      }) + "]";
+      continue;
+    }
+    copy[key] = sanitizeToolOutputJson(child, seen);
+  }
+  seen.delete(value);
+  return copy;
+}
+
+function describeImagePart(part) {
+  const reference = part.image_url || part.imageUrl || part.url || part.source || part.data || "";
+  const detail = part.detail ? " detail=" + String(part.detail).slice(0, 40) : "";
+  return "[image omitted: " + describeImageReference(reference) + detail + "]";
+}
+
+function describeAttachmentPart(part) {
+  const contentType = part.content_type || part.contentType || part.mimeType || "application/octet-stream";
+  const length = part.length || part.bytes || "";
+  const name = part.filename || part.name || "";
+  return "[attachment omitted: mime=" + String(contentType).toLowerCase()
+    + (length ? " bytes=" + Number(length) : "")
+    + (name ? " name=" + String(name).slice(0, 120) : "")
+    + "]";
+}
+
+function describeImageReference(value) {
+  if (value && typeof value === "object") {
+    if (value.url || value.image_url || value.imageUrl || value.data) {
+      return describeImageReference(value.url || value.image_url || value.imageUrl || value.data);
+    }
+    if (value.file_id || value.fileId) return "file_id=" + String(value.file_id || value.fileId).slice(0, 120);
+    return "source=object";
+  }
+
+  const text = String(value || "");
+  if (!text) return "source=unknown";
+  if (isDataUrl(text)) {
+    return binaryDescriptor({
+      mime: mimeFromDataUrl(text) || "application/octet-stream",
+      encoding: "base64-data-url",
+      data: payloadFromDataUrl(text),
+    });
+  }
+  if (looksLikeBase64(text)) {
+    return binaryDescriptor({ mime: "image/*", encoding: "base64", data: text });
+  }
+  return "url=" + text.slice(0, 240);
+}
+
+function binaryPlaceholder({ mime, encoding, data }) {
+  return "[binary payload omitted: " + binaryDescriptor({ mime, encoding, data }) + "]";
+}
+
+function binaryDescriptor({ mime, encoding, data, bytes, hash }) {
+  const normalized = data === undefined ? "" : String(data || "").replace(/\s+/g, "");
+  const size = bytes !== undefined ? Number(bytes) : estimateBase64DecodedBytes(normalized);
+  const digest = hash || hashText(normalized);
+  return "mime=" + String(mime || "application/octet-stream").toLowerCase()
+    + " encoding=" + String(encoding || "base64")
+    + " base64_chars=" + (data === undefined ? 0 : normalized.length)
+    + " decoded_bytes~=" + size
+    + " sha256=" + digest;
+}
+
+function looksLikeBase64(value) {
+  const text = String(value || "").replace(/\s+/g, "");
+  if (text.length < 256 || text.length % 4 === 1) return false;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(text)) return false;
+  const sample = text.slice(0, 256);
+  const unique = new Set(sample).size;
+  return unique >= 12;
+}
+
+function isDataUrl(value) {
+  return /^data:([^;,]+)(?:;[^,]*)?;base64,/i.test(String(value || ""));
+}
+
+function mimeFromDataUrl(value) {
+  const match = String(value || "").match(/^data:([^;,]+)(?:;[^,]*)?;base64,/i);
+  return match ? match[1] : "";
+}
+
+function payloadFromDataUrl(value) {
+  const match = String(value || "").match(/^data:[^,]*;base64,([\s\S]*)$/i);
+  return match ? match[1] : "";
+}
+
+function isImageLikeKey(key) {
+  return /(?:image_url|imageUrl|image|screenshot|thumbnail|preview)$/i.test(String(key || ""));
+}
+
+function isBase64LikeKey(key) {
+  return /(?:base64|blob|bytes|data)$/i.test(String(key || ""));
+}
+
+function isBufferJson(value) {
+  return value
+    && value.type === "Buffer"
+    && Array.isArray(value.data)
+    && value.data.length > 256
+    && value.data.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
+}
+
+function estimateBase64DecodedBytes(value) {
+  const text = String(value || "").replace(/\s+/g, "");
+  if (!text) return 0;
+  const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(text.length * 3 / 4) - padding);
+}
+
+function hashText(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
 }
 
 function stripDsmlToolBlocks(text, options = {}) {
@@ -224,8 +486,10 @@ module.exports = {
   normalizeReasoningText,
   renderProxyToolCallDisplay,
   renderVisibleContent,
+  sanitizeLargeBinaryText,
   sanitizeToolXmlInText,
   stripDsmlToolBlocks,
+  toolOutputValueToText,
 };
 function sanitizeToolXmlInText(text, hasRealToolCalls) {
   if (hasRealToolCalls) return String(text || "");

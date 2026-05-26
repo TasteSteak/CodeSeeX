@@ -36,10 +36,13 @@ function createInlineProxyController(options) {
     try {
       service = createProxyService(loadProxyConfig(process.env), {
         exitOnError: false,
+        logErrors: false,
         onError(error) {
           lastError = error.message || String(error);
           pushLine(stderr, "[proxy] " + lastError);
+          const failedService = service;
           service = null;
+          if (failedService) failedService.close({ preserveRuntime: true }).catch(() => {});
         },
       });
       service.start();
@@ -75,6 +78,22 @@ function createInlineProxyController(options) {
     return start(extraEnv);
   }
 
+  function updateConfig(extraEnv = {}) {
+    if (!service || !service.context || !service.context.config) return status();
+    const previousEnv = applyEnv(rootDir, dataDir, runtimeFile, extraEnv);
+    try {
+      const currentListenConfig = {
+        host: service.context.config.host,
+        port: service.context.config.port,
+      };
+      const nextConfig = loadProxyConfig(process.env);
+      Object.assign(service.context.config, nextConfig, currentListenConfig);
+    } finally {
+      restoreEnv(previousEnv);
+    }
+    return status();
+  }
+
   function status() {
     const runtime = service ? service.runtime : readJson(runtimeFile, null);
     return {
@@ -88,7 +107,7 @@ function createInlineProxyController(options) {
     };
   }
 
-  return { dataDir, rootDir, restart, start, status, stop };
+  return { dataDir, rootDir, restart, start, status, stop, updateConfig };
 }
 
 function applyEnv(rootDir, dataDir, runtimeFile, extraEnv) {

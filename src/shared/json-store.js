@@ -17,11 +17,41 @@ function readJson(filePath, fallback) {
   }
 }
 
+function readJsonStrict(filePath, fallback) {
+  if (!fs.existsSync(filePath)) return fallback;
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    const wrapped = new Error("JSON file is invalid: " + filePath + "; " + (error && error.message ? error.message : String(error)));
+    wrapped.code = "JSON_STORE_INVALID";
+    wrapped.path = filePath;
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const error = new Error("JSON file must contain an object: " + filePath);
+    error.code = "JSON_STORE_INVALID";
+    error.path = filePath;
+    throw error;
+  }
+  return parsed;
+}
+
 function writeJson(filePath, value) {
+  return writeJsonText(filePath, JSON.stringify(value, null, 2));
+}
+
+function writeJsonCompact(filePath, value) {
+  return writeJsonText(filePath, JSON.stringify(value));
+}
+
+function writeJsonText(filePath, text) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tempPath = filePath + ".tmp-" + process.pid + "-" + Date.now();
-  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), "utf8");
+  fs.writeFileSync(tempPath, text, "utf8");
   fs.renameSync(tempPath, filePath);
+  return Buffer.byteLength(text, "utf8");
 }
 
 function appendJsonl(filePath, value, options = {}) {
@@ -161,6 +191,8 @@ module.exports = {
   cloneJson,
   pruneJsonl,
   readJson,
+  readJsonStrict,
   readJsonlTail,
   writeJson,
+  writeJsonCompact,
 };

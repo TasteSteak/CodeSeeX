@@ -167,36 +167,16 @@
                 <label for="config_tab_proxy"><span class="tab-icon tab-icon-proxy" aria-hidden="true"></span><span data-i18n="configTabProxy">Proxy</span></label>
                 <input type="radio" name="CONFIG_TAB" id="config_tab_tools" value="tools">
                 <label for="config_tab_tools"><span class="tab-icon tab-icon-tools" aria-hidden="true"></span><span data-i18n="configTabTools">Tools</span></label>
+                <input type="radio" name="CONFIG_TAB" id="config_tab_experimental" value="experimental">
+                <label for="config_tab_experimental"><span class="tab-icon tab-icon-experimental" aria-hidden="true"></span><span data-i18n="configTabExperimental">Experimental</span></label>
               </div>
               <div class="config-status-area">
-                <span class="config-restart-text muted" id="restartRequiredBadge" hidden data-i18n="restartRequired">Some changes require restarting CodeSeeX</span>
+                <span class="config-restart-text muted" id="restartRequiredBadge" hidden data-i18n="restartRequired">Some changes require restarting the proxy</span>
               </div>
             </div>
             <div class="panel-body">
               <div class="config-tab-panel active" data-config-panel="client">
                 <h3 class="config-section-title" data-i18n="personalization">Personalization</h3>
-                <div class="setting-item">
-                  <span data-i18n="showThinking">Show thinking</span>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="SHOW_THINKING">
-                    <span class="slider"></span>
-                  </label>
-                </div>
-                <div class="setting-divider"></div>
-
-                <div class="setting-item">
-                  <label data-i18n="thinkingMode">Thinking mode</label>
-                  <div class="segmented-control" id="ctrl-thinking">
-                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_auto" value="auto" checked>
-                    <label for="tk_auto" data-i18n="thinkingAuto">Auto</label>
-                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_enabled" value="enabled">
-                    <label for="tk_enabled" data-i18n="thinkingEnabled">Force on</label>
-                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_disabled" value="disabled">
-                    <label for="tk_disabled" data-i18n="thinkingDisabled">Force off</label>
-                  </div>
-                </div>
-                <div class="setting-divider"></div>
-
                 <div class="setting-item">
                   <label data-i18n="theme">Theme</label>
                   <div class="segmented-control" id="ctrl-theme">
@@ -214,19 +194,17 @@
                   <label for="UI_LANGUAGE" data-i18n="language">Language</label>
                   <select id="UI_LANGUAGE" class="inline-control" style="width: 180px;"></select>
                 </div>
-
-                <h3 class="config-section-title" data-i18n="other">Other</h3>
-                <div class="setting-item">
-                  <label data-i18n="closeBehavior">Close behavior</label>
-                  <div class="segmented-control" id="ctrl-close-behavior">
-                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_exit" value="exit" checked>
-                    <label for="close_exit" data-i18n="closeBehaviorExit">Exit</label>
-                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_tray" value="tray">
-                    <label for="close_tray" data-i18n="closeBehaviorTray">Minimize to tray</label>
-                  </div>
-                </div>
                 <div class="setting-divider"></div>
 
+                <div class="setting-item">
+                  <span data-i18n="showThinking">Show thinking</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="SHOW_THINKING">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <h3 class="config-section-title" data-i18n="other">Other</h3>
                 <div class="setting-item">
                   <span>
                     <span data-i18n="autoStart">Start at login</span>
@@ -236,6 +214,17 @@
                     <input type="checkbox" id="AUTO_START">
                     <span class="slider"></span>
                   </label>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="closeBehavior">Close behavior</label>
+                  <div class="segmented-control" id="ctrl-close-behavior">
+                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_exit" value="exit" checked>
+                    <label for="close_exit" data-i18n="closeBehaviorExit">Exit</label>
+                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_tray" value="tray">
+                    <label for="close_tray" data-i18n="closeBehaviorTray">Minimize to tray</label>
+                  </div>
                 </div>
                 <div class="setting-divider"></div>
 
@@ -255,20 +244,26 @@
               </div>
 
               <div class="config-tab-panel" data-config-panel="proxy">
-                <h3 class="config-section-title" data-i18n="configTabProxy">Proxy</h3>
+                <h3 class="config-section-title" data-i18n="proxyConnection">Connection</h3>
                 <div class="setting-item">
-                  <label data-i18n="catalogMode">Catalog mode</label>
-                  <div class="segmented-control" id="ctrl-catalog-mode">
-                    <input type="radio" name="CATALOG_MODE" id="catalog_default" value="default" checked>
-                    <label for="catalog_default" data-i18n="catalogModeDefault">Default</label>
-                    <input type="radio" name="CATALOG_MODE" id="catalog_auto" value="auto">
-                    <label for="catalog_auto" data-i18n="catalogModeAuto">Auto</label>
-                    <input type="radio" name="CATALOG_MODE" id="catalog_builtin" value="builtin">
-                    <label for="catalog_builtin" data-i18n="catalogModeBuiltin">Built-in</label>
-                  </div>
+                  <span>
+                    <label for="DEEPSEEK_BASE_URL" data-i18n="deepseekBaseUrl">DeepSeek upstream URL</label>
+                    <small class="muted" data-i18n="deepseekBaseUrlHint">Leave blank to use the official DeepSeek API. For self-hosted deployments, enter your OpenAI-compatible endpoint, for example http://127.0.0.1:8000/v1.</small>
+                  </span>
+                  <input type="url" id="DEEPSEEK_BASE_URL" class="inline-control wide-control" spellcheck="false" placeholder="https://api.deepseek.com/">
                 </div>
                 <div class="setting-divider"></div>
 
+                <div class="setting-item">
+                  <span>
+                    <label for="PROXY_PORT" data-i18n="proxyListenPort">CodeSeeX listen port</label>
+                    <small class="muted" data-i18n="proxyListenPortHint">Used by the local Codex API endpoint. Restart the proxy after changing it.</small>
+                  </span>
+                  <input type="number" id="PROXY_PORT" class="inline-control" min="1" max="65535" step="1" style="width: 120px;">
+                </div>
+                <div class="setting-divider"></div>
+
+                <h3 class="config-section-title" data-i18n="modelBehavior">Model behavior</h3>
                 <div class="setting-item">
                   <label data-i18n="upstreamModel">Upstream model</label>
                   <div class="segmented-control" id="ctrl-upstream-model">
@@ -283,45 +278,109 @@
                 <div class="setting-divider"></div>
 
                 <div class="setting-item">
-                  <span>
-                    <label for="DEEPSEEK_BASE_URL" data-i18n="deepseekBaseUrl">DeepSeek upstream URL</label>
-                    <small class="muted" data-i18n="deepseekBaseUrlHint">Leave blank to use the official DeepSeek API. For self-hosted deployments, enter your OpenAI-compatible endpoint, for example http://127.0.0.1:8000/v1.</small>
-                  </span>
-                  <input type="url" id="DEEPSEEK_BASE_URL" class="inline-control wide-control" spellcheck="false" placeholder="https://api.deepseek.com/">
+                  <label data-i18n="thinkingMode">Thinking mode</label>
+                  <div class="segmented-control" id="ctrl-thinking">
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_auto" value="auto" checked>
+                    <label for="tk_auto" data-i18n="thinkingAuto">Auto</label>
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_enabled" value="enabled">
+                    <label for="tk_enabled" data-i18n="thinkingEnabled">Force on</label>
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_disabled" value="disabled">
+                    <label for="tk_disabled" data-i18n="thinkingDisabled">Force off</label>
+                  </div>
                 </div>
                 <div class="setting-divider"></div>
 
                 <div class="setting-item">
-                  <span>
-                    <label for="PROXY_PORT" data-i18n="proxyListenPort">CodeSeeX listen port</label>
-                    <small class="muted" data-i18n="proxyListenPortHint">Shared by the client and Codex API endpoint. Restart CodeSeeX after changing it.</small>
-                  </span>
-                  <input type="number" id="PROXY_PORT" class="inline-control" min="1" max="65535" step="1" style="width: 120px;">
+                  <label data-i18n="temperaturePreset">Sampling temperature</label>
+                  <div class="segmented-control compact-segmented-control" id="ctrl-temperature-preset">
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_default" value="default" checked>
+                    <label for="temp_default" data-i18n="temperatureDefault">Default</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_strict" value="strict">
+                    <label for="temp_strict" data-i18n="temperatureStrict">Strict</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_balanced" value="balanced">
+                    <label for="temp_balanced" data-i18n="temperatureBalanced">Balanced</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_general" value="general">
+                    <label for="temp_general" data-i18n="temperatureGeneral">General</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_creative" value="creative">
+                    <label for="temp_creative" data-i18n="temperatureCreative">Creative</label>
+                  </div>
                 </div>
                 <div class="setting-divider"></div>
 
+                <h3 class="config-section-title" data-i18n="usageDisplay">Usage display</h3>
                 <div class="setting-item setting-item-block">
                   <span>
                     <span data-i18n="billingMode">Billing rates</span>
                     <small class="muted" data-i18n="billingUnit">Unit: CNY / 1M tokens</small>
                   </span>
 
-                  <div class="billing-row mt-12">
-                    <div class="billing-field">
-                      <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
-                      <input type="number" id="BILLING_CACHED_INPUT_CNY" step="0.001">
-                      <span class="billing-suffix">CNY</span>
+                  <div class="billing-rate-grid mt-12">
+                    <div class="billing-rate-card">
+                      <div class="billing-card-header">
+                        <div class="billing-model-meta">
+                          <strong data-i18n="billingFlash">Flash</strong>
+                          <small class="muted" data-i18n="billingFlashHint">Fast, low-cost requests</small>
+                        </div>
+                        <span class="billing-model-badge" data-i18n="billingFlashBadge">Fast</span>
+                      </div>
+                      <div class="billing-row">
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
+                          <input type="number" id="BILLING_FLASH_CACHED_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
+                          <input type="number" id="BILLING_FLASH_CACHE_MISS_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
+                          <input type="number" id="BILLING_FLASH_OUTPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                      </div>
                     </div>
-                    <div class="billing-field">
-                      <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
-                      <input type="number" id="BILLING_CACHE_MISS_INPUT_CNY" step="0.001">
-                      <span class="billing-suffix">CNY</span>
+                    <div class="billing-rate-card">
+                      <div class="billing-card-header">
+                        <div class="billing-model-meta">
+                          <strong data-i18n="billingPro">Pro</strong>
+                          <small class="muted" data-i18n="billingProHint">Agent and complex coding tasks</small>
+                        </div>
+                        <span class="billing-model-badge" data-i18n="billingProBadge">Deep</span>
+                      </div>
+                      <div class="billing-row">
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
+                          <input type="number" id="BILLING_PRO_CACHED_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
+                          <input type="number" id="BILLING_PRO_CACHE_MISS_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
+                          <input type="number" id="BILLING_PRO_OUTPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                      </div>
                     </div>
-                    <div class="billing-field">
-                      <span class="billing-prefix" data-i18n="billingOutput">Output</span>
-                      <input type="number" id="BILLING_OUTPUT_CNY" step="0.001">
-                      <span class="billing-suffix">CNY</span>
-                    </div>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <h3 class="config-section-title" data-i18n="codexAdapter">Codex adapter</h3>
+                <div class="setting-item">
+                  <label data-i18n="catalogMode">Catalog mode</label>
+                  <div class="segmented-control" id="ctrl-catalog-mode">
+                    <input type="radio" name="CATALOG_MODE" id="catalog_default" value="default" checked>
+                    <label for="catalog_default" data-i18n="catalogModeDefault">Default</label>
+                    <input type="radio" name="CATALOG_MODE" id="catalog_auto" value="auto">
+                    <label for="catalog_auto" data-i18n="catalogModeAuto">Auto</label>
+                    <input type="radio" name="CATALOG_MODE" id="catalog_builtin" value="builtin">
+                    <label for="catalog_builtin" data-i18n="catalogModeBuiltin">Built-in</label>
                   </div>
                 </div>
                 <section class="config-toml-card">
@@ -339,6 +398,20 @@
 
               <div class="config-tab-panel" data-config-panel="tools">
                 <div class="tool-config-list" id="toolConfigList"></div>
+              </div>
+
+              <div class="config-tab-panel" data-config-panel="experimental">
+                <h3 class="config-section-title" data-i18n="experimentalFeatures">Experimental features</h3>
+                <div class="setting-item">
+                  <span>
+                    <span data-i18n="deepseekOfficialV1Compat">Official DeepSeek request path</span>
+                    <small class="muted" data-i18n="deepseekOfficialV1CompatHint">When enabled, official DeepSeek requests use /v1/chat/completions. When disabled, they use /chat/completions. Custom upstream URLs are not affected.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="DEEPSEEK_OFFICIAL_V1_COMPAT">
+                    <span class="slider"></span>
+                  </label>
+                </div>
               </div>
             </div>
           </section>

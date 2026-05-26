@@ -1,4 +1,5 @@
 const { readCodexAuthApiKey, rememberAuthorizationHeader } = require("../shared/codex-auth");
+const { temperatureForPreset } = require("../shared/config");
 const { httpError, makeId, parseJsonResponse } = require("../shared/http");
 const { resolveDispatcher } = require("./network-dispatcher");
 
@@ -10,7 +11,9 @@ function buildDeepSeekPayload(requestBody, messages, toolContext, config, overri
   };
 
   if (payload.stream) payload.stream_options = { include_usage: true };
-  if (typeof requestBody.temperature === "number") payload.temperature = requestBody.temperature;
+  const configuredTemperature = temperatureForPreset(config && config.temperaturePreset);
+  if (typeof configuredTemperature === "number") payload.temperature = configuredTemperature;
+  else if (typeof requestBody.temperature === "number") payload.temperature = requestBody.temperature;
   if (typeof requestBody.top_p === "number") payload.top_p = requestBody.top_p;
   if (typeof requestBody.max_output_tokens === "number") payload.max_tokens = requestBody.max_output_tokens;
   if (typeof requestBody.max_completion_tokens === "number") payload.max_tokens = requestBody.max_completion_tokens;
@@ -174,7 +177,7 @@ function normalizeToolCallIndex(value) {
 }
 
 async function fetchDeepSeek(payload, config, authorization) {
-  const url = new URL("chat/completions", ensureTrailingSlash(config.deepseekBaseUrl)).toString();
+  const url = resolveChatCompletionsUrl(config.deepseekBaseUrl, { officialV1Compat: config.deepseekOfficialV1Compat });
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeout = setTimeout(() => controller && controller.abort(), config.requestTimeoutMs);
   try {
@@ -289,8 +292,27 @@ function mapResponseFormat(textConfig) {
   return undefined;
 }
 
-function ensureTrailingSlash(value) {
-  return value.endsWith("/") ? value : value + "/";
+function resolveChatCompletionsUrl(baseUrl, options = {}) {
+  const url = new URL(baseUrl || "https://api.deepseek.com/");
+  const pathname = String(url.pathname || "/").replace(/\/+$/, "");
+  if (/\/chat\/completions$/i.test(pathname)) {
+    url.pathname = pathname || "/";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  }
+  const officialRoot = officialDeepSeekOrigin(url) && (pathname === "" || pathname === "/");
+  const officialV1Compat = options.officialV1Compat !== false;
+  url.pathname = officialRoot && officialV1Compat
+    ? "/v1/chat/completions"
+    : (pathname || "") + "/chat/completions";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function officialDeepSeekOrigin(url) {
+  return Boolean(url && url.protocol === "https:" && url.hostname.toLowerCase() === "api.deepseek.com");
 }
 
 function stripUndefined(value) {
@@ -320,9 +342,10 @@ module.exports = {
   callDeepSeekJson,
   callDeepSeekStream,
   getAssistantMessage,
+  resolveChatCompletionsUrl,
 };
 async function fetchDeepSeekStream(payload, config, authorization) {
-  const url = new URL("chat/completions", ensureTrailingSlash(config.deepseekBaseUrl)).toString();
+  const url = resolveChatCompletionsUrl(config.deepseekBaseUrl, { officialV1Compat: config.deepseekOfficialV1Compat });
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timeout = setTimeout(() => controller && controller.abort(), config.requestTimeoutMs);
   try {

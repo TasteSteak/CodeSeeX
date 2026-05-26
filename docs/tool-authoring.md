@@ -104,27 +104,55 @@ Example:
 `index.js` is optional. Use it when the tool needs to register model-facing schemas, map tool calls, execute proxy behavior, or customize history replay.
 
 ```js
+const { randomUUID } = require("node:crypto");
+
+const TOOL_NAME = "my_tool";
+
 module.exports = {
-  modelTool(config) {
-    return {
+  matchesInputTool(tool) {
+    return String((tool && tool.type) || "").toLowerCase() === TOOL_NAME;
+  },
+
+  registerInputTool(tool, state) {
+    state.upstreamTools.push({
       type: "function",
       function: {
-        name: "my_tool",
+        name: TOOL_NAME,
         description: "Hardcoded English instruction for the model.",
-        parameters: {
-          type: "object",
-          properties: {
-            query: { type: "string" }
-          },
-          required: ["query"]
-        }
+        parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] }
       }
+    });
+    state.byName.set(TOOL_NAME, { kind: "hosted_my_tool", nativeTool: module.exports });
+  },
+
+  matchesChatTool(toolCall, context) {
+    return context.getToolName(toolCall) === TOOL_NAME;
+  },
+
+  responseItemFromChatTool(toolCall, context) {
+    return {
+      id: "my_" + randomUUID().slice(0, 8),
+      type: "proxy_tool_call",
+      call_id: toolCall.id,
+      name: TOOL_NAME,
+      arguments: context.getToolArguments(toolCall),
+      status: "completed"
+    };
+  },
+
+  async executeProxyTool({ arguments: argsText, config }) {
+    const args = JSON.parse(argsText || "{}");
+    return {
+      ok: true,
+      query: args.query || ""
     };
   }
 };
 ```
 
 Model-facing descriptions should stay concise, explicit, and hardcoded in English. Client-facing names and descriptions belong in `manifest.json`.
+
+`executeProxyTool()` is only needed for proxy-hosted tools that CodeSeeX should execute locally. MCP servers do not use this hook; they should remain configured in Codex so Codex can execute and display MCP calls natively.
 
 ## Safety Rules
 

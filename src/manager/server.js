@@ -3,9 +3,10 @@ const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { Readable } = require("node:stream");
 
 const { readCodexAuthApiKey } = require("../shared/codex-auth");
-const { DATA_DIR, ROOT_DIR, loadProxyConfig, normalizeCatalogMode, normalizeDeepSeekBaseUrl, normalizeUpstreamModelOverride } = require("../shared/config");
+const { DATA_DIR, DEFAULT_BILLING_RATES_CNY, ROOT_DIR, loadProxyConfig, normalizeCatalogMode, normalizeDeepSeekBaseUrl, normalizeTemperaturePreset, normalizeUpstreamModelOverride } = require("../shared/config");
 const { addCorsHeaders, enforceLocalAccess, handleHttpError, httpError, parseJsonResponse, readJsonBody, sendJson } = require("../shared/http");
 const { readJson } = require("../shared/json-store");
 const { appendEventLog, eventLogDir, eventLogPath: datedEventLogPath, readEventLogTail } = require("../shared/event-log");
@@ -16,6 +17,7 @@ const { repairMojibakeText } = require("../shared/text-encoding");
 const { listPublicTools, normalizeToolRuntimeConfig, sanitizeToolConfig, toolDefaultConfig } = require("../shared/tool-registry");
 const { toolAssetFilePath } = require("../tools");
 const { mergeEnv, readEnvFile, writeEnvFile } = require("./env-file");
+const { createInlineProxyController } = require("./inline-control");
 const { DEFAULT_LANGUAGE_ID, LANG_DIR, SYSTEM_LANGUAGE_ID, languageFilePath, listLanguages } = require("./languages");
 const { contentTypeFor, readIndexPage, staticFilePath } = require("./page");
 
@@ -33,7 +35,9 @@ const UPDATE_CHECK_TIMEOUT_MS = 8000;
 const BACKGROUND_MAINTENANCE_DELAY_MS = 3000;
 const DEFAULT_CATALOG_MODE = "default";
 const DEFAULT_UPSTREAM_MODEL_OVERRIDE = "default";
+const DEFAULT_TEMPERATURE_PRESET = "default";
 const DEFAULT_AUTO_START = "false";
+const DEFAULT_DEEPSEEK_OFFICIAL_V1_COMPAT = "true";
 const LICENSE_DISPLAY_NAMES = {
   "GPL-3.0-only": "GPLv3",
   "AGPL-3.0-only": "AGPLv3",
@@ -47,6 +51,58 @@ function main(options = {}) {
     console.error("[manager] Failed to start:", error && error.message ? error.message : error);
     process.exit(1);
   });
+}
+
+async function startDesktopManager(options = {}) {
+  const rootDir = options.rootDir || ROOT_DIR;
+  const dataDir = options.dataDir || DATA_DIR;
+  ensureRuntimeDirectories(dataDir);
+  ensureProxyEnv(dataDir, rootDir);
+  const proxyEnv = loadLightProxyEnv(dataDir, rootDir);
+  notifyConfigChanged({ onConfigChanged: options.onConfigChanged }, publicConfig(proxyEnv));
+
+  const controller = options.controller || createInlineProxyController({
+    dataDir,
+    rootDir,
+    runtimeFile: path.join(dataDir, "runtime.json"),
+  });
+  controller.dataDir = dataDir;
+  controller.rootDir = rootDir;
+
+  const context = {
+    controller,
+    dataDir,
+    rootDir,
+    embeddedProxy: null,
+    onConfigChanged: options.onConfigChanged,
+    onWindowAction: options.onWindowAction,
+  };
+  let initialProxyStartRequested = false;
+
+  scheduleStartupBackgroundTasks({ dataDir, rootDir });
+  appendManagerEvent(dataDir, rootDir, "manager_started", "success", "Desktop manager started.", {
+    ui: "codeseex://app/",
+  });
+
+  return {
+    close: () => {
+      appendManagerEvent(dataDir, rootDir, "manager_stopped", "info", "Desktop manager stopped.", null);
+      return Promise.resolve(controller.stop());
+    },
+    controller,
+    dataDir,
+    rootDir,
+    protocol: "codeseex",
+    url: "codeseex://app/",
+    startInitialProxy() {
+      if (initialProxyStartRequested) return controller.status();
+      initialProxyStartRequested = true;
+      return controller.start(loadProxyEnv(dataDir, rootDir));
+    },
+    handleProtocolRequest(request) {
+      return handleDesktopProtocolRequest(request, context);
+    },
+  };
 }
 
 function startManager(options = {}) {
@@ -146,6 +202,110 @@ async function routeCombinedRequest(req, res, context) {
     return context.embeddedProxy.handleRequest(req, res);
   }
   return handleRequest(req, res, context);
+}
+
+async function handleDesktopProtocolRequest(request, context) {
+  const url = new URL(request.url);
+  const pathname = protocolPathname(url);
+  const method = String(request.method || "GET").toUpperCase();
+  try {
+    if (method === "GET" && isStaticRoute(pathname)) {
+      return protocolStaticResponse(pathname, context);
+    }
+
+    const req = await protocolRequestToNodeRequest(request, pathname);
+    const res = createProtocolResponse();
+    await handleRequest(req, res, context, { skipLocalAccess: true, pathname });
+    return res.toResponse();
+  } catch (error) {
+    return protocolErrorResponse(error);
+  }
+}
+
+function protocolPathname(url) {
+  const pathname = decodeURIComponent(url.pathname || "/").replace(/\/{2,}/g, "/");
+  return pathname === "/" ? "/" : pathname.replace(/\/$/, "") || "/";
+}
+
+function protocolStaticResponse(pathname, context = {}) {
+  if (pathname === "/" || pathname === "/index.html") {
+    return new Response(readIndexPage(), {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  const filePath = resolveStaticFile(pathname, context.rootDir || ROOT_DIR, context.dataDir || context.rootDir || ROOT_DIR);
+  if (!filePath || !fs.existsSync(filePath)) {
+    return jsonProtocolResponse(404, { error: { message: "Static file not found.", type: "invalid_request_error", code: "not_found" } });
+  }
+  return new Response(fs.readFileSync(filePath), {
+    status: 200,
+    headers: { "Content-Type": contentTypeFor(filePath) },
+  });
+}
+
+async function protocolRequestToNodeRequest(request, pathname) {
+  const url = new URL(request.url);
+  const body = request.method && !["GET", "HEAD"].includes(String(request.method).toUpperCase())
+    ? Buffer.from(await request.arrayBuffer())
+    : Buffer.alloc(0);
+  const stream = Readable.from(body.length ? [body] : []);
+  stream.method = String(request.method || "GET").toUpperCase();
+  stream.url = pathname + (url.search || "");
+  stream.headers = Object.fromEntries(request.headers.entries());
+  stream.headers.host = "app";
+  stream.socket = { remoteAddress: "127.0.0.1" };
+  return stream;
+}
+
+function createProtocolResponse() {
+  const chunks = [];
+  const headers = new Headers();
+  let statusCode = 200;
+  let ended = false;
+  return {
+    headersSent: false,
+    setHeader(name, value) {
+      headers.set(name, String(value));
+    },
+    writeHead(status, nextHeaders = {}) {
+      statusCode = Number(status) || statusCode;
+      for (const [name, value] of Object.entries(nextHeaders || {})) headers.set(name, String(value));
+      this.headersSent = true;
+    },
+    write(chunk) {
+      if (chunk !== undefined && chunk !== null) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    },
+    end(chunk) {
+      if (chunk !== undefined && chunk !== null) this.write(chunk);
+      ended = true;
+      this.headersSent = true;
+    },
+    toResponse() {
+      if (!ended) this.end();
+      return new Response(Buffer.concat(chunks), { status: statusCode, headers });
+    },
+  };
+}
+
+function jsonProtocolResponse(status, body) {
+  const json = JSON.stringify(body, null, 2);
+  return new Response(json, {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
+}
+
+function protocolErrorResponse(error) {
+  const status = Number(error && error.status) || 500;
+  return jsonProtocolResponse(status, {
+    error: {
+      message: error && error.message ? error.message : "Internal server error.",
+      type: error && error.type ? error.type : "server_error",
+      code: error && error.code ? error.code : "internal_error",
+    },
+  });
 }
 
 function isProxyRoute(req) {
@@ -344,11 +504,11 @@ function pushControllerLine(target, line) {
   if (target.length > 200) target.splice(0, target.length - 200);
 }
 
-async function handleRequest(req, res, context) {
+async function handleRequest(req, res, context, options = {}) {
   const { controller, dataDir } = context;
-  if (!enforceLocalAccess(req, res)) return;
+  if (!options.skipLocalAccess && !enforceLocalAccess(req, res)) return;
   if (req.method === "OPTIONS") {
-    addCorsHeaders(req, res);
+    if (!options.skipLocalAccess) addCorsHeaders(req, res);
     res.writeHead(204);
     res.end();
     return;
@@ -356,6 +516,7 @@ async function handleRequest(req, res, context) {
 
   try {
     const url = new URL(req.url, "http://" + (req.headers.host || "localhost"));
+    if (options.pathname) url.pathname = options.pathname;
 
     if (req.method === "GET" && isStaticRoute(url.pathname)) {
       sendStaticFile(res, url.pathname, context);
@@ -462,6 +623,7 @@ async function handleRequest(req, res, context) {
       appendManagerEvent(dataDir, context.rootDir, "manager_config_saved", "success", "Configuration saved.", null);
       notifyConfigChanged(context, publicConfig(next));
       if (context.embeddedProxy && typeof context.embeddedProxy.updateConfig === "function") context.embeddedProxy.updateConfig(next);
+      else if (controller && typeof controller.updateConfig === "function") controller.updateConfig(next);
       if (normalizeCatalogMode(previous.CATALOG_MODE) !== normalizeCatalogMode(next.CATALOG_MODE)) {
         await generateCodexAdapterCatalog(dataDir, context.rootDir, { force: true });
       }
@@ -1053,6 +1215,8 @@ function publicConfig(config) {
   output.DEEPSEEK_BASE_URL = displayDeepSeekBaseUrl(output.DEEPSEEK_BASE_URL);
   output.CATALOG_MODE = normalizeCatalogMode(output.CATALOG_MODE || DEFAULT_CATALOG_MODE);
   output.UPSTREAM_MODEL_OVERRIDE = normalizeUpstreamModelOverride(output.UPSTREAM_MODEL_OVERRIDE || DEFAULT_UPSTREAM_MODEL_OVERRIDE);
+  output.DEEPSEEK_TEMPERATURE_PRESET = normalizeTemperaturePreset(output.DEEPSEEK_TEMPERATURE_PRESET || DEFAULT_TEMPERATURE_PRESET);
+  output.DEEPSEEK_OFFICIAL_V1_COMPAT = normalizeBoolString(output.DEEPSEEK_OFFICIAL_V1_COMPAT || DEFAULT_DEEPSEEK_OFFICIAL_V1_COMPAT);
   output.AUTO_START = normalizeBoolString(output.AUTO_START || DEFAULT_AUTO_START);
   return output;
 }
@@ -1077,14 +1241,22 @@ function sanitizeConfig(body, rootDir = ROOT_DIR, dataDir = rootDir) {
     "PROXY_HOST",
     "PROXY_PORT",
     "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_OFFICIAL_V1_COMPAT",
     "CATALOG_MODE",
     "UPSTREAM_MODEL_OVERRIDE",
+    "DEEPSEEK_TEMPERATURE_PRESET",
     "AUTO_START",
     "DEEPSEEK_THINKING",
     "SHOW_THINKING",
     "UI_THEME",
     "UI_LANGUAGE",
     "UI_CLOSE_BEHAVIOR",
+    "BILLING_FLASH_CACHED_INPUT_CNY",
+    "BILLING_FLASH_CACHE_MISS_INPUT_CNY",
+    "BILLING_FLASH_OUTPUT_CNY",
+    "BILLING_PRO_CACHED_INPUT_CNY",
+    "BILLING_PRO_CACHE_MISS_INPUT_CNY",
+    "BILLING_PRO_OUTPUT_CNY",
     "BILLING_CACHED_INPUT_CNY",
     "BILLING_CACHE_MISS_INPUT_CNY",
     "BILLING_OUTPUT_CNY",
@@ -1099,7 +1271,10 @@ function sanitizeConfig(body, rootDir = ROOT_DIR, dataDir = rootDir) {
     else if (key === "DEEPSEEK_BASE_URL") result[key] = normalizeStoredDeepSeekBaseUrl(value);
     else if (key === "CATALOG_MODE") result[key] = normalizeCatalogMode(value);
     else if (key === "UPSTREAM_MODEL_OVERRIDE") result[key] = normalizeUpstreamModelOverride(value);
+    else if (key === "DEEPSEEK_TEMPERATURE_PRESET") result[key] = normalizeTemperaturePreset(value);
+    else if (key === "DEEPSEEK_OFFICIAL_V1_COMPAT") result[key] = normalizeBoolString(value);
     else if (key === "AUTO_START") result[key] = normalizeBoolString(value);
+    else if (/^BILLING_.*_CNY$/.test(key)) result[key] = normalizeRateString(value);
     else result[key] = String(value);
   }
   return result;
@@ -1123,6 +1298,12 @@ function normalizeBoolString(value) {
   return /^(1|true|yes|on|enabled)$/i.test(String(value || "").trim()) ? "true" : "false";
 }
 
+function normalizeRateString(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return "0";
+  return String(parsed);
+}
+
 function ensureProxyEnv(dataDir, rootDir = ROOT_DIR) {
   const filePath = proxyEnvPath(dataDir);
   if (fs.existsSync(filePath)) return;
@@ -1135,6 +1316,8 @@ function ensureProxyEnv(dataDir, rootDir = ROOT_DIR) {
     PROXY_EXTENSION_DIR: extensionDir(dataDir),
     CATALOG_MODE: normalizeCatalogMode(current.CATALOG_MODE || defaults.CATALOG_MODE),
     UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(current.UPSTREAM_MODEL_OVERRIDE || defaults.UPSTREAM_MODEL_OVERRIDE),
+    DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(current.DEEPSEEK_TEMPERATURE_PRESET || defaults.DEEPSEEK_TEMPERATURE_PRESET),
+    DEEPSEEK_OFFICIAL_V1_COMPAT: normalizeBoolString(current.DEEPSEEK_OFFICIAL_V1_COMPAT || defaults.DEEPSEEK_OFFICIAL_V1_COMPAT),
     AUTO_START: normalizeBoolString(current.AUTO_START || defaults.AUTO_START),
     UI_LANGUAGE: normalizeStoredLanguageId(current.UI_LANGUAGE, defaults.UI_LANGUAGE),
     UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(current.UI_CLOSE_BEHAVIOR || defaults.UI_CLOSE_BEHAVIOR),
@@ -1167,12 +1350,32 @@ function normalizeLoadedProxyEnv(env, rootEnv = {}, dataEnv = {}, dataDir = DATA
     PROXY_EXTENSION_DIR: env.PROXY_EXTENSION_DIR || extensionDir(dataDir),
     CATALOG_MODE: normalizeCatalogMode(dataEnv.CATALOG_MODE || rootEnv.CATALOG_MODE || DEFAULT_CATALOG_MODE),
     UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(dataEnv.UPSTREAM_MODEL_OVERRIDE || rootEnv.UPSTREAM_MODEL_OVERRIDE || DEFAULT_UPSTREAM_MODEL_OVERRIDE),
+    DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(dataEnv.DEEPSEEK_TEMPERATURE_PRESET || rootEnv.DEEPSEEK_TEMPERATURE_PRESET || DEFAULT_TEMPERATURE_PRESET),
+    DEEPSEEK_OFFICIAL_V1_COMPAT: normalizeBoolString(dataEnv.DEEPSEEK_OFFICIAL_V1_COMPAT || rootEnv.DEEPSEEK_OFFICIAL_V1_COMPAT || DEFAULT_DEEPSEEK_OFFICIAL_V1_COMPAT),
     AUTO_START: normalizeBoolString(dataEnv.AUTO_START || rootEnv.AUTO_START || DEFAULT_AUTO_START),
     COMMUNITY_TOOL_CODE_ENABLED: dataEnv.COMMUNITY_TOOL_CODE_ENABLED || rootEnv.COMMUNITY_TOOL_CODE_ENABLED || "false",
     UI_LANGUAGE: normalizeStoredLanguageId(dataEnv.UI_LANGUAGE || rootEnv.UI_LANGUAGE, DEFAULT_LANGUAGE_ID),
     UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(dataEnv.UI_CLOSE_BEHAVIOR || rootEnv.UI_CLOSE_BEHAVIOR || "exit"),
+    BILLING_FLASH_CACHED_INPUT_CNY: billingRateEnvValue(dataEnv, rootEnv, env, "BILLING_FLASH_CACHED_INPUT_CNY", null, DEFAULT_BILLING_RATES_CNY.flash.cachedInput),
+    BILLING_FLASH_CACHE_MISS_INPUT_CNY: billingRateEnvValue(dataEnv, rootEnv, env, "BILLING_FLASH_CACHE_MISS_INPUT_CNY", null, DEFAULT_BILLING_RATES_CNY.flash.cacheMissInput),
+    BILLING_FLASH_OUTPUT_CNY: billingRateEnvValue(dataEnv, rootEnv, env, "BILLING_FLASH_OUTPUT_CNY", null, DEFAULT_BILLING_RATES_CNY.flash.output),
+    BILLING_PRO_CACHED_INPUT_CNY: billingRateEnvValue(dataEnv, rootEnv, env, "BILLING_PRO_CACHED_INPUT_CNY", "BILLING_CACHED_INPUT_CNY", DEFAULT_BILLING_RATES_CNY.pro.cachedInput),
+    BILLING_PRO_CACHE_MISS_INPUT_CNY: billingRateEnvValue(dataEnv, rootEnv, env, "BILLING_PRO_CACHE_MISS_INPUT_CNY", "BILLING_CACHE_MISS_INPUT_CNY", DEFAULT_BILLING_RATES_CNY.pro.cacheMissInput),
+    BILLING_PRO_OUTPUT_CNY: billingRateEnvValue(dataEnv, rootEnv, env, "BILLING_PRO_OUTPUT_CNY", "BILLING_OUTPUT_CNY", DEFAULT_BILLING_RATES_CNY.pro.output),
     LOG_RETENTION_DAYS: normalizeRetentionDays(dataEnv.LOG_RETENTION_DAYS || rootEnv.LOG_RETENTION_DAYS || "7"),
   }), { rootDir, extensionDir: extensionDir(dataDir) });
+}
+
+function billingRateEnvValue(dataEnv, rootEnv, env, key, legacyKey, fallback) {
+  const value = firstDefined(dataEnv[key], rootEnv[key], env[key], legacyKey ? dataEnv[legacyKey] : undefined, legacyKey ? rootEnv[legacyKey] : undefined, legacyKey ? env[legacyKey] : undefined, fallback);
+  return normalizeRateString(value);
+}
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return "";
 }
 
 function defaultProxyEnv(rootDir = ROOT_DIR, dataDir = DATA_DIR) {
@@ -1182,6 +1385,8 @@ function defaultProxyEnv(rootDir = ROOT_DIR, dataDir = DATA_DIR) {
     PROXY_PORT: "8787",
     CATALOG_MODE: DEFAULT_CATALOG_MODE,
     UPSTREAM_MODEL_OVERRIDE: DEFAULT_UPSTREAM_MODEL_OVERRIDE,
+    DEEPSEEK_TEMPERATURE_PRESET: DEFAULT_TEMPERATURE_PRESET,
+    DEEPSEEK_OFFICIAL_V1_COMPAT: DEFAULT_DEEPSEEK_OFFICIAL_V1_COMPAT,
     AUTO_START: DEFAULT_AUTO_START,
     DEEPSEEK_THINKING: "auto",
     SHOW_THINKING: "true",
@@ -1189,6 +1394,12 @@ function defaultProxyEnv(rootDir = ROOT_DIR, dataDir = DATA_DIR) {
     UI_THEME: "system",
     UI_LANGUAGE: DEFAULT_LANGUAGE_ID,
     UI_CLOSE_BEHAVIOR: "exit",
+    BILLING_FLASH_CACHED_INPUT_CNY: String(DEFAULT_BILLING_RATES_CNY.flash.cachedInput),
+    BILLING_FLASH_CACHE_MISS_INPUT_CNY: String(DEFAULT_BILLING_RATES_CNY.flash.cacheMissInput),
+    BILLING_FLASH_OUTPUT_CNY: String(DEFAULT_BILLING_RATES_CNY.flash.output),
+    BILLING_PRO_CACHED_INPUT_CNY: String(DEFAULT_BILLING_RATES_CNY.pro.cachedInput),
+    BILLING_PRO_CACHE_MISS_INPUT_CNY: String(DEFAULT_BILLING_RATES_CNY.pro.cacheMissInput),
+    BILLING_PRO_OUTPUT_CNY: String(DEFAULT_BILLING_RATES_CNY.pro.output),
     BILLING_CACHED_INPUT_CNY: "0.025",
     BILLING_CACHE_MISS_INPUT_CNY: "3",
     BILLING_OUTPUT_CNY: "6",
@@ -1384,6 +1595,7 @@ function handleWindowAction(action, context, body) {
 
 module.exports = {
   main,
+  startDesktopManager,
   startManager,
 };
 

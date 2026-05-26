@@ -1,5 +1,6 @@
 const { appendJsonl, writeJson } = require("../shared/json-store");
 const { appendEventLog } = require("../shared/event-log");
+const { DEFAULT_BILLING_RATES_CNY } = require("../shared/config");
 
 function createRuntime(config) {
   return {
@@ -52,15 +53,16 @@ function writeRuntime(config, runtime) {
 function beginRequest(runtime, meta = {}) {
   runtime.active_requests = Math.max(0, Number(runtime.active_requests || 0)) + 1;
   runtime.last_started_at = meta.startedAt || new Date().toISOString();
+  const kind = normalizeRequestKind(meta.kind);
   const detail = {
     model: meta.model || "",
     stream: Boolean(meta.stream),
   };
   if (meta.requestedModel && meta.requestedModel !== meta.model) detail.requested_model = meta.requestedModel;
   pushEvent(runtime, {
-    type: "request_started",
+    type: kind === "context_compaction" ? "context_compaction_started" : "request_started",
     level: "info",
-    message: "Conversation request received.",
+    message: kind === "context_compaction" ? "Context compaction requested." : "Conversation request received.",
     audience: "user",
     detail,
   });
@@ -70,6 +72,7 @@ function finishRequest(runtime, meta = {}) {
   runtime.active_requests = Math.max(0, Number(runtime.active_requests || 0) - 1);
   runtime.last_request_at = meta.completedAt || new Date().toISOString();
   runtime.last_request_ms = Number(meta.requestMs || 0);
+  const kind = normalizeRequestKind(meta.kind);
 
   if (meta.status === "failed") {
     runtime.failed_request_count = Number(runtime.failed_request_count || 0) + 1;
@@ -81,9 +84,9 @@ function finishRequest(runtime, meta = {}) {
     };
     if (meta.requestedModel && meta.requestedModel !== meta.model) detail.requested_model = meta.requestedModel;
     pushEvent(runtime, {
-      type: "request_failed",
+      type: kind === "context_compaction" ? "context_compaction_failed" : "request_failed",
       level: "error",
-      message: "Conversation request failed.",
+      message: kind === "context_compaction" ? "Context compaction failed." : "Conversation request failed.",
       audience: "user",
       detail,
     });
@@ -103,12 +106,16 @@ function finishRequest(runtime, meta = {}) {
   runtime.last_turn = turn;
   pushTurn(runtime, turn);
   pushEvent(runtime, {
-    type: "request_completed",
+    type: kind === "context_compaction" ? "context_compaction_completed" : "request_completed",
     level: "success",
-    message: "Conversation completed.",
+    message: kind === "context_compaction" ? "Context compaction completed." : "Conversation completed.",
     audience: "user",
     detail: requestCompletedDetail(turn, meta),
   });
+}
+
+function normalizeRequestKind(kind) {
+  return String(kind || "").trim().toLowerCase() === "context_compaction" ? "context_compaction" : "conversation";
 }
 
 function requestCompletedDetail(turn, meta = {}) {
@@ -122,10 +129,19 @@ function estimateCostCny(turn, config = {}) {
   const cached = Number(turn.cached_input_tokens || 0);
   const cacheMiss = Number(turn.cache_miss_input_tokens || 0);
   const output = Number(turn.output_tokens || 0);
-  const cachedRate = numberOrDefault(config.billingCachedInputCny, 0.025);
-  const missRate = numberOrDefault(config.billingCacheMissInputCny, 3);
-  const outputRate = numberOrDefault(config.billingOutputCny, 6);
-  return (cached * cachedRate + cacheMiss * missRate + output * outputRate) / 1000000;
+  const rates = billingRatesForModel(turn.model || turn.requested_model, config);
+  return (cached * rates.cachedInput + cacheMiss * rates.cacheMissInput + output * rates.output) / 1000000;
+}
+
+function billingRatesForModel(model, config = {}) {
+  const group = String(model || "").toLowerCase().includes("flash") ? "flash" : "pro";
+  const configured = config.billingRatesCny && config.billingRatesCny[group] || {};
+  const fallback = DEFAULT_BILLING_RATES_CNY[group] || DEFAULT_BILLING_RATES_CNY.pro;
+  return {
+    cachedInput: numberOrDefault(configured.cachedInput, group === "pro" ? numberOrDefault(config.billingCachedInputCny, fallback.cachedInput) : fallback.cachedInput),
+    cacheMissInput: numberOrDefault(configured.cacheMissInput, group === "pro" ? numberOrDefault(config.billingCacheMissInputCny, fallback.cacheMissInput) : fallback.cacheMissInput),
+    output: numberOrDefault(configured.output, group === "pro" ? numberOrDefault(config.billingOutputCny, fallback.output) : fallback.output),
+  };
 }
 
 function numberOrDefault(value, fallback) {
@@ -219,6 +235,9 @@ function normalizeEventAudience(event = {}) {
 function isDiagnosticEventType(type) {
   return type === "context_diagnostic"
     || type === "context_response_diagnostic"
+    || type === "state_load_failed"
+    || type === "state_persist_failed"
+    || type === "state_recovered_interrupted"
     || type === "tool_lifecycle";
 }
 

@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.3.3" src="https://img.shields.io/badge/version-0.3.3-1f6feb">
+  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,9 +32,13 @@ Codex Desktop  ->  CodeSeeX local API  ->  DeepSeek API
 - DeepSeek V4 with 1M context: expose `deepseek-v4-pro` and `deepseek-v4-flash` to Codex with million-token catalog metadata.
 - Codex tool compatibility: keep Codex workflows such as Apply Patch, MCP, Skills, Plugins, and native MCP tools available through the bridge.
 - Built-in tool layer: use CodeSeeX Web Search, workspace search, file reading, and patch support out of the box.
+- High-fidelity context state: preserve long `previous_response_id` chains, verified tool facts, and compacted context across multi-turn agent work.
+- Cache-friendly tool conversion: typed screenshot/image outputs are represented as stable metadata instead of large base64 text.
+- Reliable catalog bootstrap: ship a full CodeSeeX catalog seed for first-run machines without a native Codex model catalog.
 - Generated setup: copy a ready-to-use `config.toml` from the CodeSeeX proxy settings page.
 - Custom upstream support: point CodeSeeX at the official DeepSeek API or a self-hosted OpenAI-compatible endpoint.
-- Local visibility: see service state, balance, usage estimates, user-level logs, and tool activity from the desktop UI.
+- Experimental upstream compatibility: keep official DeepSeek `/v1/chat/completions` routing enabled by default, with a switch for strict `/chat/completions` testing.
+- Local visibility: see service state, balance, Flash/Pro usage estimates, user-level logs, and tool activity from the desktop UI.
 
 ## Quick Start
 
@@ -91,8 +95,10 @@ If you self-host a DeepSeek-compatible service, set the upstream URL in `Setting
 - Compatibility with Codex built-in tool flows, including Apply Patch, MCP, Skills, and Plugins.
 - Native MCP passthrough so Codex-configured MCP tools remain executed and displayed by the Codex app tool layer.
 - Native Apply Patch bridge so DeepSeek tool calls are returned to Codex as the built-in freeform patch tool instead of a shell-style wrapper.
+- High-fidelity context compiler with verified tool facts, manual/automatic compaction support, crash-safe checkpoints, and safer interrupted-request recovery.
+- Structured tool-output conversion that preserves regular JSON/text while omitting large binary payloads before they enter model-visible context.
 - Single configurable local port for the desktop manager, `/api/*`, and `/v1/*`.
-- Proxy settings for catalog mode, upstream model override, custom upstream URL, billing rates, and generated `config.toml`.
+- Proxy settings for catalog mode, upstream model override, custom upstream URL, Flash/Pro billing rates, and generated `config.toml`.
 - Streaming answer display with reasoning visibility controls and grouped proxy tool summaries.
 - User-level logs, daily log retention, balance checks, usage estimates, tray shortcuts, auto-start, and silent update indicators.
 - Built-in tools for Web Search, patching, workspace search, and file reading, plus optional community tools.
@@ -104,6 +110,8 @@ Runtime data is stored in the user's `~/.codeseex` directory by default so insta
 Important runtime paths:
 
 - `~/.codeseex/model-catalog.json`: adapter catalog referenced by Codex through `model_catalog_json`.
+- `~/.codeseex/proxy-state.json`: local response chain, compact state, and verified tool facts used to continue Codex conversations.
+- `~/.codeseex/compact.key`: local key used for CodeSeeX-readable compact payloads.
 - `~/.codeseex/logs/`: daily user-level logs such as `logs-20260521.jsonl`.
 - `~/.codeseex/extension/tools/<tool>/`: optional community tool packages.
 - `~/.codeseex/proxy.env`: non-secret local runtime settings.
@@ -111,6 +119,10 @@ Important runtime paths:
 Community tools are disabled unless enabled in configuration. Enabling community tool code means running local code from that tool package, so only use tools you trust. See [docs/tool-authoring.md](docs/tool-authoring.md) for the tool package format.
 
 MCP servers stay on the user's Codex configuration. CodeSeeX translates Codex-provided MCP tool declarations for DeepSeek, then returns native `function_call` items so Codex can execute and display MCP calls itself.
+
+Proxy-hosted CodeSeeX tools are separate from MCP. Built-in hosted tools run inside CodeSeeX, and community hosted tools must provide an explicit execution hook; otherwise CodeSeeX returns a clear unsupported-tool result instead of rerouting the call to another tool.
+
+CodeSeeX keeps response state locally and does not auto-delete conversation chains for normal operation. If a request is interrupted, verified user input and tool facts are retained while incomplete assistant text is not reused as final context.
 
 ## Troubleshooting
 
@@ -133,6 +145,7 @@ MCP servers stay on the user's Codex configuration. CodeSeeX translates Codex-pr
 - Confirm Codex `base_url` points to CodeSeeX, for example `http://127.0.0.1:8787/v1`.
 - If you use the official upstream, test whether the machine can access `https://api.deepseek.com`.
 - If you use a self-hosted upstream, confirm the URL is reachable and OpenAI-compatible.
+- For the official DeepSeek upstream, CodeSeeX sends chat requests to the `/v1/chat/completions` compatibility endpoint by default. Use `Settings -> Experimental` only if you need to test strict `/chat/completions` routing.
 - Make sure no other process is using the configured CodeSeeX port.
 
 ## Development

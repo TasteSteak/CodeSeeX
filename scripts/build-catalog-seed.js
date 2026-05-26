@@ -38,9 +38,17 @@ function readCatalogText() {
     console.log("[CodeSeeX] Reading explicit catalog source:", sourcePath);
     return fs.readFileSync(sourcePath, "utf8");
   }
-  if (fs.existsSync(privateJsonPath)) {
+  if (!isTruthyEnv(process.env.CODESEEX_CATALOG_SKIP_PRIVATE) && fs.existsSync(privateJsonPath)) {
     console.log("[CodeSeeX] Reading private catalog source:", privateJsonPath);
     return fs.readFileSync(privateJsonPath, "utf8");
+  }
+  if (isTruthyEnv(process.env.CODESEEX_CATALOG_SKIP_NATIVE)) {
+    const existingSeed = readExistingPackagedSeed();
+    if (existingSeed) {
+      console.warn("[CodeSeeX] Native Codex catalog lookup skipped; reusing existing packaged catalog seed.");
+      return existingSeed;
+    }
+    throw new Error("Native Codex catalog lookup skipped and no existing packaged catalog seed is available.");
   }
   const invocation = codexCliInvocation();
   console.log("[CodeSeeX] Reading native Codex catalog via:", invocation.command, invocation.args.concat(["debug", "models", "--bundled"]).join(" "));
@@ -55,54 +63,26 @@ function readCatalogText() {
       timeout: 15000,
     });
   } catch (error) {
-    console.warn("[CodeSeeX] Native Codex catalog is unavailable; writing an emergency public seed.");
-    console.warn("[CodeSeeX] Release builds should use a private/native catalog seed when possible.");
-    return JSON.stringify(emergencySeedCatalog());
+    const existingSeed = readExistingPackagedSeed();
+    if (existingSeed) {
+      console.warn("[CodeSeeX] Native Codex catalog is unavailable; reusing existing packaged catalog seed.");
+      return existingSeed;
+    }
+    throw new Error("Unable to build catalog seed. Provide CODESEEX_CATALOG_SOURCE_FILE, keep src/codex/catalog-seed.c6 available, or install Codex CLI. Cause: " + (error && error.message ? error.message : String(error)));
   }
 }
 
-function emergencySeedCatalog() {
-  const instructions = [
-    "You are Codex, a coding agent based on DeepSeek-V4 and running through the local CodeSeeX proxy inside the Codex environment.",
-    "You and the user share the same workspace and collaborate to achieve the user's goals.",
-  ].join(" ");
-  return {
-    models: [
-      {
-        slug: "gpt-5.5",
-        display_name: "gpt-5.5",
-        description: "Emergency CodeSeeX build seed for local catalog generation.",
-        default_reasoning_level: "medium",
-        supported_reasoning_levels: [
-          { effort: "low", description: "Fast responses with lighter reasoning" },
-          { effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" },
-          { effort: "high", description: "Greater reasoning depth for complex problems" },
-          { effort: "xhigh", description: "Extra high reasoning depth for complex problems" },
-        ],
-        shell_type: "shell_command",
-        visibility: "list",
-        supported_in_api: true,
-        base_instructions: instructions,
-        model_messages: {
-          instructions_template: instructions + "\n\n{{ personality }}",
-          instructions_variables: { personality_default: "" },
-        },
-        supports_reasoning_summaries: true,
-        default_reasoning_summary: "none",
-        support_verbosity: true,
-        default_verbosity: "low",
-        apply_patch_tool_type: "freeform",
-        web_search_tool_type: "text_and_image",
-        supports_parallel_tool_calls: true,
-        supports_image_detail_original: true,
-        supports_search_tool: true,
-        input_modalities: ["text", "image"],
-        context_window: 1000000,
-        max_context_window: 1000000,
-        effective_context_window_percent: 90,
-      },
-    ],
-  };
+function readExistingPackagedSeed() {
+  try {
+    if (!fs.existsSync(outputPath)) return "";
+    return zlib.brotliDecompressSync(fs.readFileSync(outputPath)).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function isTruthyEnv(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
 }
 
 main();

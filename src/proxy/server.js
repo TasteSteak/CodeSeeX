@@ -2,13 +2,16 @@ const http = require("node:http");
 const path = require("node:path");
 
 const { loadProxyConfig } = require("../shared/config");
-const { appendJsonl, readJson, writeJson } = require("../shared/json-store");
+const { appendJsonl, readJsonStrict, writeJson, writeJsonCompact } = require("../shared/json-store");
 const { addCorsHeaders, enforceLocalAccess, handleHttpError, httpError, makeId, nowSeconds, readJsonBody, sendJson } = require("../shared/http");
-const { buildDeepSeekPayload, callDeepSeekJson, getAssistantMessage } = require("./deepseek-client");
+const { buildDeepSeekPayload, callDeepSeekJson, getAssistantMessage, resolveChatCompletionsUrl } = require("./deepseek-client");
+const { resolvePreviousContext } = require("./conversation-state");
 const { beginRequest, createRuntime, finishRequest, pushEvent, writeRuntime } = require("./runtime");
-const { assistantForStorage, buildConversation, buildResponseRecord, buildStoredRecord, estimateTokensForInput, inputToMessages, normalizeAssistant, normalizeInput, sanitizeToolContent } = require("./conversation");
+const { assistantForStorage, buildResponseRecord, buildStoredRecord, estimateTokensForInput, normalizeAssistant, normalizeInput, sanitizeToolContent } = require("./conversation");
+const { buildCodeseexCompactionItem, buildCodeseexCompactionWindow, buildTurnStorageMessages, compileContext, mergeTurnToolFactsForStorage } = require("./context-compiler");
 const { createToolContext, splitToolCalls } = require("./tools");
 const { streamDeepSeekResponseV2, turnOutputFromAssistant } = require("./streaming");
+const { toolOutputValueToText } = require("./text-utils");
 const { mapUsage, mergeUsage } = require("./usage");
 const { executeListDirectory, executeReadFileRange, executeWorkspaceSearch } = require("./workspace-tools");
 
@@ -21,13 +24,97 @@ function main() {
 }
 
 function createProxyContext(config) {
-  const state = readJson(config.stateFile, { responses: {} });
-  if (!state.responses || typeof state.responses !== "object") state.responses = {};
-
   const runtime = createRuntime(config);
+  let state;
+  try {
+    state = readJsonStrict(config.stateFile, { responses: {} });
+    if (!state.responses || typeof state.responses !== "object" || Array.isArray(state.responses)) state.responses = {};
+    const recovery = recoverInterruptedResponses(state);
+    if (recovery.count > 0) {
+      try {
+        writeJsonCompact(config.stateFile, state);
+      } catch (error) {
+        runtime.status = "error";
+        runtime.stopped_at = new Date().toISOString();
+        runtime.error = {
+          code: "STATE_FILE_WRITE_FAILED",
+          message: error && error.message ? error.message : "Proxy state file could not be updated.",
+          path: config.stateFile,
+        };
+        pushEvent(runtime, {
+          type: "state_persist_failed",
+          level: "error",
+          message: "Interrupted request recovery could not be saved.",
+          audience: "diagnostic",
+          detail: runtime.error,
+        });
+        writeRuntime(config, runtime);
+        throw error;
+      }
+      pushEvent(runtime, {
+        type: "state_recovered_interrupted",
+        level: "warn",
+        message: "Recovered interrupted in-progress response checkpoints.",
+        audience: "diagnostic",
+        detail: {
+          interrupted_count: recovery.count,
+          response_ids: recovery.ids.slice(0, 20),
+        },
+      });
+    }
+  } catch (error) {
+    if (runtime.error && runtime.error.code === "STATE_FILE_WRITE_FAILED") throw error;
+    runtime.status = "error";
+    runtime.stopped_at = new Date().toISOString();
+    runtime.error = {
+      code: "STATE_FILE_INVALID",
+      message: error && error.message ? error.message : "Proxy state file is invalid.",
+      path: config.stateFile,
+    };
+    pushEvent(runtime, {
+      type: "state_load_failed",
+      level: "error",
+      message: "Proxy state file is invalid. CodeSeeX will not overwrite it.",
+      audience: "diagnostic",
+      detail: runtime.error,
+    });
+    writeRuntime(config, runtime);
+    throw error;
+  }
   writeRuntime(config, runtime);
 
   return { config, state, runtime };
+}
+
+function recoverInterruptedResponses(state) {
+  const responses = state && state.responses && typeof state.responses === "object" ? state.responses : {};
+  const interruptedAt = new Date().toISOString();
+  const ids = [];
+  for (const [id, record] of Object.entries(responses)) {
+    if (!record || typeof record !== "object") continue;
+    if (normalizeLifecycleStatus(record.status) !== "in_progress") continue;
+    ids.push(id);
+    record.status = "interrupted";
+    record.interrupted_at = interruptedAt;
+    record.updated_at = interruptedAt;
+    record.interruption_reason = "proxy_started_with_in_progress_checkpoint";
+    if (record.response && typeof record.response === "object") {
+      record.response.status = "interrupted";
+      record.response.error = record.response.error || {
+        message: "Request was interrupted before completion.",
+        type: "api_error",
+        code: "request_interrupted",
+      };
+    }
+    if (record.context_diagnostic && typeof record.context_diagnostic === "object") {
+      record.context_diagnostic.lifecycle = Object.assign({}, record.context_diagnostic.lifecycle || {}, {
+        status: "interrupted",
+        interrupted_at: interruptedAt,
+        interruption_reason: "proxy_started_with_in_progress_checkpoint",
+      });
+    }
+  }
+  return { count: ids.length, ids };
 }
 
 function createProxyService(config, options = {}) {
@@ -58,7 +145,7 @@ function createProxyService(config, options = {}) {
     runtime.stopped_at = new Date().toISOString();
     runtime.error = { message: error.message || "Server failed to start.", code: error.code || null };
     writeRuntime(config, runtime);
-    console.error(error);
+    if (options.logErrors !== false) console.error(error);
     if (typeof options.onError === "function") options.onError(error);
     if (options.exitOnError !== false) process.exit(1);
   });
@@ -69,7 +156,7 @@ function createProxyService(config, options = {}) {
       const actualPort = typeof address === "object" && address ? address.port : config.port;
       markProxyRunning(context, { host: config.host, port: actualPort, message: "Proxy process started." });
       console.log("[proxy] Listening on " + runtime.base_url);
-      console.log("[proxy] DeepSeek upstream: " + config.deepseekBaseUrl + "/chat/completions");
+      console.log("[proxy] DeepSeek upstream: " + resolveChatCompletionsUrl(config.deepseekBaseUrl, { officialV1Compat: config.deepseekOfficialV1Compat }));
     });
   }
 
@@ -80,8 +167,8 @@ function createProxyService(config, options = {}) {
     exitTimer.unref();
   }
 
-  function close() {
-    markStopped();
+  function close(options = {}) {
+    if (!options.preserveRuntime) markStopped();
     return new Promise((resolve) => closeServer(resolve));
   }
 
@@ -224,6 +311,11 @@ async function handleRequest(req, res, context) {
       return;
     }
 
+    if (route.name === "responses_compact") {
+      await handleResponsesCompact(req, res, body, context);
+      return;
+    }
+
     if (route.name === "responses_create") {
       await handleResponsesCreate(req, res, body, context);
       return;
@@ -231,6 +323,85 @@ async function handleRequest(req, res, context) {
   } catch (error) {
     handleHttpError(res, error);
   }
+}
+
+async function handleResponsesCompact(req, res, requestBody, context) {
+  const { config, runtime } = context;
+  const id = makeId("resp");
+  const createdAt = nowSeconds();
+  const previousRecord = resolvePreviousContext(requestBody.previous_response_id, context);
+  const normalizedInput = normalizeInput(requestBody.input);
+  const compiledContext = compileContext({ requestBody, previousRecord, normalizedInput, config });
+  const compact = buildCodeseexCompactionWindow({ requestBody, previousRecord, normalizedInput, config });
+  const output = compact.output;
+  const response = buildResponseRecord({
+    id,
+    createdAt,
+    model: requestBody.model || config.upstreamModelOverride || config.availableModels[0] || "deepseek-v4-pro",
+    output,
+    usage: {
+      input_tokens: estimateTokensForInput(requestBody.input),
+      output_tokens: Math.max(1, Math.ceil(compact.summary.length / 4)),
+      total_tokens: estimateTokensForInput(requestBody.input) + Math.max(1, Math.ceil(compact.summary.length / 4)),
+    },
+  });
+
+  const record = buildStoredRecord({
+    id,
+    createdAt,
+    startedAt: new Date(createdAt * 1000).toISOString(),
+    status: "completed",
+    response,
+    requestBody,
+    previousRecord,
+    normalizedInput,
+    currentMessages: compiledContext.currentMessages,
+    storedMessages: [],
+    rawAssistant: { role: "assistant", content: "" },
+    turnMessages: buildTurnStorageMessages(compiledContext, [], config, { requestInstructions: requestBody.instructions }),
+    toolFacts: mergeTurnToolFactsForStorage(normalizedInput, response, []),
+    compactions: compiledContext.compactions,
+    contextDiagnostic: compiledContext.diagnostic,
+  });
+  persistRecord(record, context);
+  emitContextCompactedEvent(runtime, {
+    mode: "manual",
+    responseId: id,
+    compact,
+    outputItemCount: output.length,
+    retainedInputItems: compact.retainedItems.length,
+  });
+  pushEvent(runtime, {
+    type: "responses_compacted",
+    level: "info",
+    message: "Response context compacted.",
+    audience: "diagnostic",
+    detail: {
+      response_id: id,
+      compaction_id: output[0] && output[0].id,
+      message_count: compact.payload.message_count,
+      retained_message_count: compact.payload.retained_message_count,
+      tool_fact_count: compact.payload.tool_fact_count,
+      returned_window_items: output.length,
+      retained_input_items: compact.retainedItems.length,
+    },
+  });
+  writeRuntime(config, runtime);
+  writeDebug(config, "latest-compact-response.json", {
+    at: new Date().toISOString(),
+    request: requestBody,
+    response,
+    compact: {
+      id: compact.payload.id,
+      message_count: compact.payload.message_count,
+      retained_message_count: compact.payload.retained_message_count,
+      tool_fact_count: compact.payload.tool_fact_count,
+      returned_window_items: output.length,
+      retained_input_items: compact.retainedItems.length,
+    },
+    context_compiler: compiledContext.diagnostic,
+  });
+  sendJson(res, 200, response);
 }
 
 async function handleResponsesCreate(req, res, requestBody, context) {
@@ -242,31 +413,80 @@ async function handleResponsesCreate(req, res, requestBody, context) {
   const id = makeId("resp");
   const createdAt = nowSeconds();
   const startedAt = new Date(started).toISOString();
-  beginRequest(runtime, { id, model: requestBody.model, requestedModel: modelAlias.requestedModel, stream: Boolean(requestBody.stream), startedAt });
+  let normalizedInput = normalizeInput(requestBody.input);
+  const checkpointCompaction = detectCheckpointCompactionRequest(normalizedInput);
+  const requestKind = checkpointCompaction ? "context_compaction" : "conversation";
+  beginRequest(runtime, { id, model: requestBody.model, requestedModel: modelAlias.requestedModel, stream: Boolean(requestBody.stream), startedAt, kind: requestKind });
   writeRuntime(config, runtime);
   let requestFinished = false;
+  let previousRecord = null;
+  let compiledContext = null;
+  let currentMessages = [];
+  let conversationMessages = [];
+  let contextDiagnostic = null;
+  let lastCheckpoint = {
+    storedMessages: [],
+    rawAssistant: { role: "assistant", content: "" },
+    usage: null,
+  };
+
+  const checkpoint = (status, updates = {}) => {
+    if (Array.isArray(updates.storedMessages)) lastCheckpoint.storedMessages = updates.storedMessages.slice();
+    if (updates.rawAssistant) lastCheckpoint.rawAssistant = updates.rawAssistant;
+    if (updates.usage !== undefined) lastCheckpoint.usage = updates.usage;
+    const record = persistResponseCheckpoint(context, {
+      id,
+      createdAt,
+      startedAt,
+      status,
+      requestBody,
+      previousRecord,
+      normalizedInput,
+      compiledContext,
+      currentMessages,
+      conversationMessages,
+      storedMessages: lastCheckpoint.storedMessages,
+      rawAssistant: updates.rawAssistant || lastCheckpoint.rawAssistant,
+      response: updates.response,
+      usage: updates.usage !== undefined ? updates.usage : lastCheckpoint.usage,
+      error: updates.error,
+      contextDiagnostic,
+      reason: updates.reason || "",
+    });
+    return record;
+  };
 
   try {
-    const previousRecord = resolvePreviousRecord(requestBody.previous_response_id, context);
-    const normalizedInput = normalizeInput(requestBody.input);
+    previousRecord = resolvePreviousContext(requestBody.previous_response_id, context);
     logIncomingToolItems(runtime, normalizedInput);
     const workspaceScope = resolveWorkspaceScope(requestBody, normalizedInput, config);
-    const currentMessages = inputToMessages(normalizedInput);
-    const conversationMessages = buildConversation(requestBody, previousRecord, currentMessages);
+    compiledContext = compileContext({ requestBody, previousRecord, normalizedInput, config });
+    currentMessages = compiledContext.currentMessages;
+    conversationMessages = compiledContext.messages;
     const toolContext = createToolContext(requestBody.tools || [], {
       rootDir: workspaceScope.rootDir,
       extensionDir: config.extensionDir,
       communityToolCodeEnabled: config.communityToolCodeEnabled,
       toolConfig: config,
     });
-    const contextDiagnostic = captureContextDiagnostic(context, {
+    contextDiagnostic = captureContextDiagnostic(context, {
       requestBody,
       previousRecord,
       normalizedInput,
       currentMessages,
       conversationMessages,
       workspaceScope,
+      compiledContext,
     });
+    const autoCompaction = maybeBuildAutomaticCompaction({
+      requestBody,
+      previousRecord,
+      normalizedInput,
+      compiledContext,
+      conversationMessages,
+      config,
+    });
+    checkpoint("in_progress", { reason: "request_compiled" });
 
     writeDebug(config, "latest-request.json", {
       at: new Date().toISOString(),
@@ -276,6 +496,10 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       previous_response_id: requestBody.previous_response_id || null,
       normalized_input: normalizedInput,
       upstream_messages: conversationMessages,
+      context_compiler: compiledContext.diagnostic,
+      tool_facts: compiledContext.toolFacts,
+      compactions: compiledContext.compactions,
+      context_conflicts: compiledContext.conflicts,
       tools: toolContext.upstreamTools,
       response_tools: requestBody.tools || [],
       workspace_scope: workspaceScope,
@@ -296,12 +520,24 @@ async function handleResponsesCreate(req, res, requestBody, context) {
         logToolCalls,
         logToolResults,
         flushRuntime,
+        onCheckpoint: (payload) => checkpoint("in_progress", payload),
+        autoCompactionItem: autoCompaction && autoCompaction.item,
       });
+      if (autoCompaction && streamResult && !streamResult.failed) {
+        emitContextCompactedEvent(runtime, {
+          mode: "automatic",
+          responseId: id,
+          compact: autoCompaction.compact,
+          threshold: resolveCompactThreshold(requestBody.context_management),
+          estimatedTokens: compiledContext && compiledContext.diagnostic && compiledContext.diagnostic.estimated_tokens,
+        });
+      }
       finishRequest(runtime, {
         id,
         model: requestBody.model,
         requestedModel: modelAlias.requestedModel,
         stream: true,
+        kind: requestKind,
         status: streamResult && streamResult.failed ? "failed" : "completed",
         usage: streamResult && streamResult.usage,
         requestMs: Date.now() - started,
@@ -313,21 +549,14 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       writeRuntime(config, runtime);
 
       if (streamResult && streamResult.response) {
-        if (!streamResult.failed) {
-          const record = buildStoredRecord({
-            id,
-            createdAt,
-            response: streamResult.response,
-            requestBody,
-            previousRecord,
-            normalizedInput,
-            currentMessages,
-            storedMessages: streamResult.storedMessages,
-            rawAssistant: streamResult.rawAssistant,
-            conversationMessages,
-          });
-          persistRecord(record, context);
-        }
+        checkpoint(streamResult.failed ? "failed" : "completed", {
+          response: streamResult.response,
+          storedMessages: streamResult.storedMessages || [],
+          rawAssistant: streamResult.rawAssistant,
+          usage: streamResult.usage,
+          error: streamResult.response && streamResult.response.error,
+          reason: streamResult.failed ? "stream_failed" : "stream_completed",
+        });
 
         writeDebug(config, "latest-response.json", {
           at: new Date().toISOString(),
@@ -355,6 +584,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       config: Object.assign({}, config, { workspaceScope }),
       runtime,
       authorization: req.headers.authorization || "",
+      onCheckpoint: (payload) => checkpoint("in_progress", payload),
     });
 
     finishRequest(runtime, {
@@ -362,6 +592,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       model: requestBody.model,
       requestedModel: modelAlias.requestedModel,
       stream: false,
+      kind: requestKind,
       status: "completed",
       usage: result.usage,
       requestMs: Date.now() - started,
@@ -375,23 +606,26 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       id,
       createdAt,
       model: requestBody.model,
-      output: result.output,
+      output: result.output.concat(autoCompaction ? [autoCompaction.item] : []),
       usage: result.usage,
     });
+    if (autoCompaction) {
+      emitContextCompactedEvent(runtime, {
+        mode: "automatic",
+        responseId: id,
+        compact: autoCompaction.compact,
+        threshold: resolveCompactThreshold(requestBody.context_management),
+        estimatedTokens: compiledContext && compiledContext.diagnostic && compiledContext.diagnostic.estimated_tokens,
+      });
+    }
 
-    const record = buildStoredRecord({
-      id,
-      createdAt,
+    checkpoint("completed", {
       response,
-      requestBody,
-      previousRecord,
-      normalizedInput,
-      currentMessages,
       storedMessages: result.storedMessages,
       rawAssistant: result.rawAssistant,
-      conversationMessages,
+      usage: result.usage,
+      reason: "sync_completed",
     });
-    persistRecord(record, context);
 
     writeDebug(config, "latest-response.json", {
       at: new Date().toISOString(),
@@ -417,6 +651,7 @@ async function handleResponsesCreate(req, res, requestBody, context) {
         model: requestBody.model,
         requestedModel: modelAlias.requestedModel,
         stream: Boolean(requestBody.stream),
+        kind: requestKind,
         status: "failed",
         requestMs: Date.now() - started,
         startedAt,
@@ -425,8 +660,124 @@ async function handleResponsesCreate(req, res, requestBody, context) {
       });
       writeRuntime(config, runtime);
     }
+    if (compiledContext) {
+      try {
+        checkpoint("failed", {
+          response: buildResponseRecord({
+            id,
+            createdAt,
+            model: requestBody.model,
+            output: [],
+            usage: lastCheckpoint.usage,
+            status: "failed",
+            error: responseErrorFromException(error),
+          }),
+          storedMessages: lastCheckpoint.storedMessages,
+          rawAssistant: lastCheckpoint.rawAssistant,
+          usage: lastCheckpoint.usage,
+          error,
+          reason: "request_failed",
+        });
+      } catch {}
+    }
     throw error;
   }
+}
+
+function persistResponseCheckpoint(context, details = {}) {
+  const status = normalizeLifecycleStatus(details.status);
+  const requestBody = details.requestBody || {};
+  const config = context.config || {};
+  const compiledContext = details.compiledContext || null;
+  const storedMessages = Array.isArray(details.storedMessages) ? details.storedMessages : [];
+  const response = details.response || buildResponseRecord({
+    id: details.id,
+    createdAt: details.createdAt,
+    model: requestBody.model || config.upstreamModelOverride || "deepseek-v4-pro",
+    output: [],
+    usage: details.usage || null,
+    status,
+    error: status === "failed" || status === "interrupted" ? responseErrorFromException(details.error) : null,
+  });
+  const turnMessages = compiledContext
+    ? buildTurnStorageMessages(compiledContext, storedMessages, config, { requestInstructions: requestBody.instructions })
+    : undefined;
+  const record = buildStoredRecord({
+    id: details.id,
+    createdAt: details.createdAt,
+    startedAt: details.startedAt,
+    status,
+    response,
+    requestBody,
+    previousRecord: details.previousRecord,
+    normalizedInput: details.normalizedInput || [],
+    currentMessages: details.currentMessages || (compiledContext && compiledContext.currentMessages) || [],
+    storedMessages,
+    rawAssistant: assistantForLifecycle(status, details.rawAssistant),
+    conversationMessages: details.conversationMessages || (compiledContext && compiledContext.messages) || [],
+    turnMessages,
+    toolFacts: mergeTurnToolFactsForStorage(details.normalizedInput || [], response, storedMessages),
+    compactions: compiledContext && Array.isArray(compiledContext.compactions) ? compiledContext.compactions : [],
+    contextDiagnostic: checkpointDiagnostic(details, status, response, storedMessages),
+  });
+  persistRecord(record, context);
+  return record;
+}
+
+function normalizeLifecycleStatus(status) {
+  const value = String(status || "completed").trim().toLowerCase();
+  if (value === "in_progress" || value === "completed" || value === "failed" || value === "interrupted") return value;
+  return "completed";
+}
+
+function assistantForLifecycle(status, rawAssistant) {
+  if (status === "completed") return rawAssistant;
+  const assistant = normalizeAssistant(rawAssistant);
+  if (Array.isArray(assistant.tool_calls) && assistant.tool_calls.length > 0) return assistant;
+  return { role: "assistant", content: "" };
+}
+
+function checkpointDiagnostic(details, status, response, storedMessages) {
+  const compiledDiagnostic = details.compiledContext && details.compiledContext.diagnostic
+    ? details.compiledContext.diagnostic
+    : null;
+  const diagnostic = compiledDiagnostic && typeof compiledDiagnostic === "object"
+    ? Object.assign({}, compiledDiagnostic)
+    : {};
+  diagnostic.lifecycle = {
+    status,
+    checkpoint_reason: details.reason || "",
+    checkpoint_at: new Date().toISOString(),
+    stored_message_count: Array.isArray(storedMessages) ? storedMessages.length : 0,
+    response_status: response && response.status || status,
+  };
+  if (details.contextDiagnostic && details.contextDiagnostic.id) diagnostic.lifecycle.context_diagnostic_id = details.contextDiagnostic.id;
+  if (details.error) diagnostic.lifecycle.error = responseErrorFromException(details.error);
+  return diagnostic;
+}
+
+function responseErrorFromException(error) {
+  if (!error) return null;
+  if (error && typeof error === "object" && error.message && error.type && error.code) {
+    return {
+      message: String(error.message || "Request failed."),
+      type: String(error.type || "api_error"),
+      code: String(error.code || "request_failed"),
+    };
+  }
+  if (error && typeof error === "object" && error.message) {
+    return {
+      message: String(error.message),
+      type: String(error.type || "api_error"),
+      code: String(error.code || "request_failed"),
+    };
+  }
+  if (error && typeof error === "object" && error.error) return responseErrorFromException(error.error);
+  return {
+    message: String(error || "Request failed."),
+    type: "api_error",
+    code: "request_failed",
+  };
 }
 
 function applyCodexModelAlias(requestBody, config, runtime) {
@@ -660,7 +1011,7 @@ function firstAvailableModel(config, preferredModels) {
   return availableModels.find((model) => /^deepseek/i.test(model)) || preferredModels[0];
 }
 
-async function runDeepSeekTurn({ requestBody, messages, toolContext, config, runtime = null, authorization, callJson = callDeepSeekJson }) {
+async function runDeepSeekTurn({ requestBody, messages, toolContext, config, runtime = null, authorization, callJson = callDeepSeekJson, onCheckpoint = null }) {
   const workingMessages = messages.slice();
   let usage = null;
   const storedMessages = [];
@@ -691,6 +1042,12 @@ async function runDeepSeekTurn({ requestBody, messages, toolContext, config, run
       outputItems.push(...turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "commentary" }));
       storedMessages.push(assistantForStorage(visibleAssistant));
       storedMessages.push(...hostedResult.toolMessages);
+      await maybeCheckpoint(onCheckpoint, {
+        storedMessages,
+        rawAssistant: visibleAssistant,
+        usage,
+        reason: "hosted_tool_result",
+      });
       if (external.length > 0 || internal.length > 0) {
         return {
           rawAssistant: visibleAssistant,
@@ -706,9 +1063,15 @@ async function runDeepSeekTurn({ requestBody, messages, toolContext, config, run
     if (internal.length > 0) {
       const visibleAssistant = toVisibleAssistant(currentAssistant, toolContext, { includeInternalPatchCalls: true });
       storedMessages.push(assistantForStorage(visibleAssistant));
+      await maybeCheckpoint(onCheckpoint, {
+        storedMessages,
+        rawAssistant: visibleAssistant,
+        usage,
+        reason: "internal_tool_call",
+      });
       return {
         rawAssistant: visibleAssistant,
-        output: turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "commentary" }),
+        output: turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "commentary", includeThinkingDisplay: false }),
         usage,
         storedMessages,
       };
@@ -718,12 +1081,19 @@ async function runDeepSeekTurn({ requestBody, messages, toolContext, config, run
     storedMessages.push(assistantForStorage(currentAssistant));
     return {
       rawAssistant,
-      output: outputItems.concat(turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "final_answer" })),
+      output: outputItems.concat(turnOutputFromAssistant(visibleAssistant, usage, toolContext, config, { phase: "final_answer", includeThinkingDisplay: false })),
       usage,
       storedMessages,
     };
   }
 
+}
+
+async function maybeCheckpoint(onCheckpoint, payload) {
+  if (typeof onCheckpoint !== "function") return;
+  await onCheckpoint(Object.assign({}, payload, {
+    storedMessages: Array.isArray(payload && payload.storedMessages) ? payload.storedMessages.slice() : [],
+  }));
 }
 
 function captureContextDiagnostic(context, details) {
@@ -758,7 +1128,80 @@ function captureContextResponseDiagnostic(context, details) {
   return summary;
 }
 
-function buildContextDiagnosticSummary({ requestBody, previousRecord, normalizedInput, currentMessages, conversationMessages }) {
+function emitContextCompactedEvent(runtime, details = {}) {
+  const compact = details.compact || {};
+  const payload = compact.payload || {};
+  pushEvent(runtime, {
+    type: "context_compacted",
+    level: "info",
+    message: contextCompactedMessage(details.mode),
+    audience: "user",
+    detail: compactEventDetail({
+      mode: details.mode || "manual",
+      response_id: details.responseId || "",
+      compaction_id: payload.id || compact.id || "",
+      message_count: details.messageCount !== undefined ? details.messageCount : payload.message_count,
+      retained_message_count: details.retainedMessageCount !== undefined ? details.retainedMessageCount : payload.retained_message_count,
+      tool_fact_count: details.toolFactCount !== undefined ? details.toolFactCount : payload.tool_fact_count,
+      returned_window_items: details.outputItemCount,
+      retained_input_items: details.retainedInputItems,
+      input_item_count: details.inputItemCount,
+      threshold_tokens: details.threshold,
+      estimated_tokens: details.estimatedTokens,
+    }),
+  });
+}
+
+function contextCompactedMessage(mode) {
+  if (mode === "automatic") return "Context compacted automatically.";
+  if (mode === "checkpoint") return "Context checkpoint compaction requested.";
+  return "Context compacted.";
+}
+
+function compactEventDetail(detail) {
+  const output = {};
+  for (const [key, value] of Object.entries(detail || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value === "number" && !Number.isFinite(value)) continue;
+    output[key] = value;
+  }
+  return output;
+}
+
+function detectCheckpointCompactionRequest(items) {
+  const lastUser = lastUserMessageText(items);
+  if (!lastUser) return false;
+  return /\bCONTEXT\s+CHECKPOINT\s+COMPACTION\b/i.test(lastUser)
+    && /\bhandoff\s+summary\b/i.test(lastUser)
+    && /\banother\s+LLM\b/i.test(lastUser);
+}
+
+function lastUserMessageText(items) {
+  for (let index = (Array.isArray(items) ? items.length : 0) - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item || typeof item !== "object") continue;
+    if (item.type !== "message" && !item.role) continue;
+    if (String(item.role || "user").toLowerCase() !== "user") continue;
+    return messageItemText(item);
+  }
+  return "";
+}
+
+function messageItemText(item) {
+  const content = item && item.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return String(content || "");
+  return content.map((part) => {
+    if (typeof part === "string") return part;
+    if (!part || typeof part !== "object") return "";
+    if (typeof part.text === "string") return part.text;
+    if (typeof part.input_text === "string") return part.input_text;
+    if (typeof part.output_text === "string") return part.output_text;
+    return "";
+  }).join("\n");
+}
+
+function buildContextDiagnosticSummary({ requestBody, previousRecord, normalizedInput, currentMessages, conversationMessages, compiledContext }) {
   const inputItems = Array.isArray(requestBody && requestBody.input) ? requestBody.input : requestBody && requestBody.input !== undefined ? [requestBody.input] : [];
   const inputTypeCounts = countInputItemTypes(normalizedInput);
   const conversationRoleCounts = countMessageRoles(conversationMessages);
@@ -799,8 +1242,65 @@ function buildContextDiagnosticSummary({ requestBody, previousRecord, normalized
     previous_compaction_output_items: countItemsByType(previousOutput, "compaction"),
     previous_upstream_message_count: previousMessages.length,
     previous_upstream_json_bytes: previousBytes,
+    previous_chain: previousRecord && previousRecord.chain_diagnostic ? previousRecord.chain_diagnostic : null,
     estimated_previous_upstream_tokens: estimateTokensFromBytes(previousBytes),
+    context_compiler: compiledContext && compiledContext.diagnostic ? compiledContext.diagnostic : null,
+    tool_fact_count: compiledContext && Array.isArray(compiledContext.toolFacts) ? compiledContext.toolFacts.length : 0,
+    compaction_summary_count: compiledContext && Array.isArray(compiledContext.compactions) ? compiledContext.compactions.length : 0,
+    context_conflict_count: compiledContext && Array.isArray(compiledContext.conflicts) ? compiledContext.conflicts.length : 0,
+    context_budget: compiledContext && compiledContext.budget ? {
+      mode: compiledContext.budget.mode,
+      context_window: compiledContext.budget.contextWindow,
+      effective_context_window_percent: compiledContext.budget.effectivePercent,
+      max_tokens: compiledContext.budget.maxTokens,
+      max_bytes: compiledContext.budget.maxBytes,
+      max_tool_output_bytes: compiledContext.budget.maxToolOutputBytes,
+    } : null,
   };
+}
+
+function maybeBuildAutomaticCompaction({ requestBody, previousRecord, normalizedInput, compiledContext, conversationMessages, config }) {
+  const contextManagement = requestBody && requestBody.context_management;
+  const threshold = resolveCompactThreshold(contextManagement);
+  if (!Number.isFinite(threshold) || threshold <= 0) return null;
+  const estimatedTokens = compiledContext && compiledContext.diagnostic
+    ? Number(compiledContext.diagnostic.estimated_tokens || 0)
+    : estimateTokensFromBytes(safeJsonByteLength(conversationMessages));
+  if (estimatedTokens < threshold) return null;
+  return buildCodeseexCompactionItem({
+    requestBody,
+    previousRecord,
+    normalizedInput,
+    compiledContext,
+    config,
+  });
+}
+
+function resolveCompactThreshold(value) {
+  if (value === undefined || value === null || value === false) return null;
+  if (typeof value === "number") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const threshold = resolveCompactThreshold(item);
+      if (Number.isFinite(threshold) && threshold > 0) return threshold;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  const candidates = [
+    value.compact_threshold,
+    value.threshold,
+    value.token_threshold,
+    value.max_tokens,
+  ];
+  if (value.compaction && typeof value.compaction === "object") {
+    candidates.push(value.compaction.compact_threshold, value.compaction.threshold);
+  }
+  for (const candidate of candidates) {
+    const parsed = Number(candidate);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
 }
 
 function buildContextResponseDiagnosticSummary({ requestId, response, usage, failed, contextDiagnosticId }) {
@@ -955,7 +1455,7 @@ async function hostedToolResultMessages(toolCalls, toolContext, config = {}, mes
     toolMessages.push({
       role: "tool",
       tool_call_id: toolCall.id || makeId("call"),
-      content: sanitizeToolContent(JSON.stringify(await proxyHostedToolContent(item, config, messages))),
+      content: sanitizeToolContent(toolOutputValueToText(await proxyHostedToolContent(item, config, messages, toolContext))),
     });
   }
   return { toolMessages, visibleItems, executedCount };
@@ -1058,7 +1558,10 @@ function flushRuntime(config, runtime) {
   writeRuntime(config, runtime);
 }
 
-async function proxyHostedToolContent(item, config, messages = []) {
+async function proxyHostedToolContent(item, config, messages = [], toolContext = null) {
+  const registered = await executeRegisteredHostedTool(item, config, messages, toolContext);
+  if (registered.handled) return registered.result;
+
   if (isHostedExecutionItem(item, "workspace_search")) {
     return executeWorkspaceSearch(item.arguments, config);
   }
@@ -1068,7 +1571,45 @@ async function proxyHostedToolContent(item, config, messages = []) {
   if (isHostedExecutionItem(item, "list_directory")) {
     return executeListDirectory(item.arguments, config);
   }
+  if (!isWebSearchExecutionItem(item)) {
+    return {
+      ok: false,
+      error: "proxy_hosted_tool_not_implemented",
+      message: "The proxy-hosted tool is registered but does not provide an executeProxyTool() handler.",
+      tool: item && item.name || "",
+      type: item && item.type || "",
+    };
+  }
   return proxyWebSearchToolContent(item, config, messages);
+}
+
+async function executeRegisteredHostedTool(item, config, messages, toolContext) {
+  const name = item && item.name ? String(item.name) : "";
+  const entry = name && toolContext && toolContext.byName ? toolContext.byName.get(name) : null;
+  const nativeTool = entry && entry.nativeTool && typeof entry.nativeTool === "object" ? entry.nativeTool : null;
+  if (!nativeTool || typeof nativeTool.executeProxyTool !== "function") return { handled: false, result: null };
+  try {
+    return {
+      handled: true,
+      result: await nativeTool.executeProxyTool({
+        item,
+        arguments: item && item.arguments,
+        config,
+        messages,
+        toolContext,
+      }),
+    };
+  } catch (error) {
+    return {
+      handled: true,
+      result: {
+        ok: false,
+        error: "proxy_hosted_tool_failed",
+        message: error && error.message ? error.message : String(error),
+        tool: name,
+      },
+    };
+  }
 }
 
 function isHostedExecutionItem(item, name) {
@@ -1076,6 +1617,13 @@ function isHostedExecutionItem(item, name) {
     item.type === "function_call"
     || item.type === "proxy_tool_call"
   ) && item.name === name);
+}
+
+function isWebSearchExecutionItem(item) {
+  if (!item || typeof item !== "object") return false;
+  return item.type === "web_search_call"
+    || item.name === "web_search"
+    || item.name === "web_search_preview";
 }
 
 async function proxyWebSearchToolContent(item, config, messages = []) {
@@ -1133,29 +1681,51 @@ function logModelsRequest(runtime, req, config) {
   });
 }
 
-function resolvePreviousRecord(id, context) {
-  if (!id) return null;
-  const record = context.state.responses[id];
-  if (!record) throw httpError(404, "Response " + id + " was not found.", "invalid_request_error", "response_not_found");
-  return record;
-}
-
 function persistRecord(record, context) {
   context.state.responses[record.id] = record;
   trimState(context);
-  saveState(context);
-}
-
-function trimState(context) {
-  const records = Object.values(context.state.responses).sort((a, b) => a.created_at - b.created_at);
-  while (records.length > context.config.maxStoredResponses) {
-    const oldest = records.shift();
-    if (oldest) delete context.state.responses[oldest.id];
+  try {
+    saveState(context);
+  } catch (error) {
+    reportStatePersistFailure(context, error, record);
+    throw error;
   }
 }
 
+function trimState(context) {
+  const responses = context.state.responses && typeof context.state.responses === "object" ? context.state.responses : {};
+  const responseCount = Object.keys(responses).length;
+  const softLimit = Number(context.config.maxStoredResponses) || 0;
+  context.state.retention = {
+    policy: "preserve_all_response_chains",
+    soft_response_limit: softLimit,
+    response_count: responseCount,
+    approx_json_bytes: safeJsonByteLength(context.state),
+    soft_limit_exceeded: Boolean(softLimit > 0 && responseCount > softLimit),
+    updated_at: new Date().toISOString(),
+  };
+}
+
 function saveState(context) {
-  writeJson(context.config.stateFile, context.state);
+  writeJsonCompact(context.config.stateFile, context.state);
+}
+
+function reportStatePersistFailure(context, error, record) {
+  const { config, runtime } = context;
+  pushEvent(runtime, {
+    type: "state_persist_failed",
+    level: "error",
+    message: "Proxy state checkpoint could not be saved.",
+    audience: "diagnostic",
+    detail: {
+      response_id: record && record.id || "",
+      status: record && record.status || "",
+      state_file: config.stateFile,
+      error: error && error.message ? error.message : String(error),
+      code: error && error.code || null,
+    },
+  });
+  writeRuntime(config, runtime);
 }
 
 function writeDebug(config, filename, value) {
@@ -1182,7 +1752,7 @@ function sanitizeDebugValue(value) {
 
   function sanitize(current, depth) {
     if (depth > 8) return "[truncated: max debug depth]";
-    if (typeof current === "string") return truncateDebugString(current);
+    if (typeof current === "string") return truncateDebugString(sanitizeSensitiveDebugString(current));
     if (!current || typeof current !== "object") return current;
     if (seen.has(current)) return "[circular]";
     if (!Array.isArray(current) && current.type === "compaction") return sanitizeCompactionDebugItem(current);
@@ -1223,6 +1793,13 @@ function truncateDebugString(value) {
   return text.slice(0, DEBUG_MAX_BYTES) + "\n[truncated: debug value exceeded " + DEBUG_MAX_BYTES + " bytes]";
 }
 
+function sanitizeSensitiveDebugString(value) {
+  return String(value || "")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer ********")
+    .replace(/sk-[A-Za-z0-9]{12,}/g, "sk-********")
+    .replace(/(["']?(?:api[_-]?key|authorization|token|secret|password)["']?\s*[:=]\s*["']?)[^"',\s}]+/gi, "$1********");
+}
+
 function isSensitiveDebugKey(key) {
   return /(?:authorization|api[_-]?key|token|secret|password|http_proxy|https_proxy|all_proxy|proxy)$/i.test(String(key || ""));
 }
@@ -1232,6 +1809,7 @@ function matchRoute(method, pathname) {
     { method: "GET", regex: /^\/(?:v1\/)?healthz$/, name: "health" },
     { method: "GET", regex: /^\/(?:v1\/)?models$/, name: "models" },
     { method: "POST", regex: /^\/(?:v1\/)?responses$/, name: "responses_create" },
+    { method: "POST", regex: /^\/(?:v1\/)?responses\/compact$/, name: "responses_compact" },
     { method: "POST", regex: /^\/(?:v1\/)?responses\/input_tokens$/, name: "input_tokens" },
     { method: "GET", regex: /^\/(?:v1\/)?responses\/([^/]+)$/, name: "response_retrieve", params: ["responseId"] },
     { method: "DELETE", regex: /^\/(?:v1\/)?responses\/([^/]+)$/, name: "response_delete", params: ["responseId"] },
@@ -1278,5 +1856,9 @@ module.exports = {
   main,
   markProxyRunning,
   markProxyStopped,
+  maybeBuildAutomaticCompaction,
+  resolveCompactThreshold,
+  resolvePreviousContext,
   runDeepSeekTurn,
+  sanitizeDebugValue,
 };

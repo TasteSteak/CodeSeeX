@@ -4,7 +4,7 @@ const { makeId } = require("../shared/http");
 const { cloneJson } = require("../shared/json-store");
 const { repairMojibakeText } = require("../shared/text-encoding");
 const { chatToolCallFromResponseItem } = require("./tools");
-const { extractTaggedThinking, extractText, normalizeFileLinks, normalizeReasoningText, sanitizeToolXmlInText, stripDsmlToolBlocks } = require("./text-utils");
+const { extractTaggedThinking, extractText, normalizeFileLinks, normalizeReasoningText, sanitizeLargeBinaryText, sanitizeToolXmlInText, stripDsmlToolBlocks, toolOutputValueToText } = require("./text-utils");
 
 const HIDDEN_REASONING_PREFIX = "codeseex-reasoning-v1:";
 const THINKING_DISPLAY_ONLY_PATTERN = /codeseex_display_only:\s*thinking_markdown/i;
@@ -50,8 +50,9 @@ function normalizeInput(input) {
   return items;
 }
 
-function inputToMessages(items) {
+function inputToMessages(items, options = {}) {
   const messages = [];
+  const maxToolOutputBytes = Number(options.maxToolOutputBytes) || MAX_TOOL_OUTPUT_BYTES;
   const resolvedToolCallIds = collectResolvedToolCallIds(items);
   const toolNamesByCallId = collectToolCallNamesById(items);
   let pendingAssistant = null;
@@ -80,15 +81,16 @@ function inputToMessages(items) {
         const parsed = parseAssistantDisplay(extractText(item.content));
         const reasoning = joinReasoning(pendingReasoning, parsed.reasoning_content);
         pendingReasoning = "";
-        if (!parsed.content && !reasoning) continue;
-        if (!parsed.content && reasoning) {
+        const assistantContent = sanitizeLargeBinaryText(parsed.content || "");
+        if (!assistantContent && !reasoning) continue;
+        if (!assistantContent && reasoning) {
           pendingReasoning = joinReasoning(pendingReasoning, reasoning);
           continue;
         }
         flushPending();
         pendingAssistant = {
           role: "assistant",
-          content: parsed.content || "",
+          content: assistantContent,
           reasoning_content: reasoning,
           tool_calls: [],
         };
@@ -97,7 +99,7 @@ function inputToMessages(items) {
 
       flushPending();
       pendingReasoning = "";
-      const text = stripAssistantDecorations(extractText(item.content));
+      const text = sanitizeLargeBinaryText(stripAssistantDecorations(extractText(item.content)));
       if (!text) continue;
       messages.push({ role, content: text });
       continue;
@@ -121,7 +123,7 @@ function inputToMessages(items) {
       flushPending();
       const callId = resolveToolCallId(item);
       if (!callId) continue;
-      messages.push({ role: "tool", tool_call_id: callId, content: sanitizeToolContent(normalizeToolOutputText(item, { toolName: toolNamesByCallId.get(callId) })) });
+      messages.push({ role: "tool", tool_call_id: callId, content: sanitizeToolContent(normalizeToolOutputText(item, { toolName: toolNamesByCallId.get(callId) }), maxToolOutputBytes) });
     }
   }
 
@@ -425,19 +427,34 @@ function buildResponseRecord({ id, createdAt, model, output, usage, status = "co
   };
 }
 
-function buildStoredRecord({ id, createdAt, response, requestBody, previousRecord, normalizedInput, currentMessages, storedMessages, rawAssistant, conversationMessages }) {
-  const previous = previousRecord && Array.isArray(previousRecord.upstream_messages) ? previousRecord.upstream_messages : [];
-  const nextMessages = budgetHistoryMessages(previous.concat(currentMessages).concat(storedMessages || []), { preservePendingTail: true });
+function buildStoredRecord({ id, createdAt, startedAt, status = "completed", response, requestBody = {}, previousRecord, normalizedInput, currentMessages, storedMessages, rawAssistant, conversationMessages, turnMessages, toolFacts, turnToolFacts, compactions, contextDiagnostic }) {
+  const deltaMessages = Array.isArray(turnMessages)
+    ? turnMessages
+    : budgetHistoryMessages((currentMessages || []).concat(storedMessages || []), {
+      preservePendingTail: true,
+      maxMessages: 1000,
+      maxBytes: 1024 * 1024,
+    });
+  const deltaFacts = Array.isArray(turnToolFacts)
+    ? turnToolFacts
+    : Array.isArray(toolFacts) ? toolFacts : [];
   return {
+    state_schema: "codeseex-response-delta-v1",
     id,
+    status,
     created_at: createdAt,
+    started_at: startedAt || null,
+    updated_at: new Date().toISOString(),
     response: sanitizeResponseForStorage(response),
     request_model: requestBody.model || null,
     upstream_model: requestBody.model || null,
     previous_response_id: requestBody.previous_response_id || null,
     input_items: sanitizeInputItems(normalizedInput),
-    upstream_messages: nextMessages,
+    turn_messages: deltaMessages,
     assistant_message: assistantForStorage(rawAssistant),
+    turn_tool_facts: deltaFacts,
+    compactions: Array.isArray(compactions) ? compactions : [],
+    context_diagnostic: contextDiagnostic || null,
   };
 }
 
@@ -505,8 +522,8 @@ function sanitizeMessageForHistory(message) {
   return cleaned;
 }
 
-function sanitizeToolContent(value) {
-  return truncateText(repairMojibakeText(value), MAX_TOOL_OUTPUT_BYTES);
+function sanitizeToolContent(value, maxBytes = MAX_TOOL_OUTPUT_BYTES) {
+  return truncateText(sanitizeLargeBinaryText(repairMojibakeText(value)), maxBytes);
 }
 
 function sanitizeResponseForStorage(response) {
@@ -609,7 +626,7 @@ function normalizeRole(role) {
 
 function normalizeToolOutputText(item, options = {}) {
   const output = item.output !== undefined ? item.output : item.results;
-  const text = typeof output === "string" ? repairMojibakeText(output) : repairMojibakeText(JSON.stringify(output || ""));
+  const text = repairMojibakeText(toolOutputValueToText(output));
   return annotateApplyPatchFailureForModel(text, item, options);
 }
 
@@ -823,6 +840,7 @@ module.exports = {
   buildConversation,
   buildResponseRecord,
   buildStoredRecord,
+  enforceChatToolProtocol,
   estimateTokensForInput,
   inputToMessages,
   mergeAssistant,

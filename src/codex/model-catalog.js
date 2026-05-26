@@ -6,10 +6,11 @@ const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
 
-const DEFAULT_BASE_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.2"];
+const DEFAULT_BASE_MODELS = ["gpt-5.4", "gpt-5.5", "gpt-5.2"];
 const DEFAULT_CONTEXT_WINDOW = 1000000;
 const DEFAULT_EFFECTIVE_CONTEXT_PERCENT = 90;
 const DEFAULT_CODEX_CATALOG_TIMEOUT_MS = 8000;
+const DEFAULT_MODEL_PRIORITY = 2;
 const FALLBACK_BASE_MODEL_SLUG = "codeseex-fallback";
 const PACKAGED_CATALOG_SEED_FILE = "catalog-seed.c6";
 const PRIVATE_CATALOG_DIR = path.join(".codeseex-private", "catalog");
@@ -66,7 +67,10 @@ function buildCodeSeeXCatalog(options = {}) {
   const source = sourceInfo.model;
   const contextWindow = readPositiveInteger(options.contextWindow || process.env.CODESEEX_MAX_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW);
   const effectiveContextPercent = readPositiveInteger(options.effectiveContextPercent || process.env.CODESEEX_CONTEXT_PERCENT, DEFAULT_EFFECTIVE_CONTEXT_PERCENT);
-  const targetModels = targetModelDefinitions(options, recipe).map((target) => targetModelFromSource(source, target, {
+  const targets = targetModelDefinitions(options, recipe);
+  const targetModels = sourceInfo.targetCatalog
+    ? targetModelsFromCatalog(sourceInfo.targetCatalog, targets, { contextWindow, effectiveContextPercent })
+    : targets.map((target) => targetModelFromSource(source, target, {
     contextWindow,
     effectiveContextPercent,
     recipe,
@@ -148,13 +152,22 @@ function codexSearchDirs() {
 
 function windowsCodexInstallDirs() {
   const dirs = [];
+  const appData = process.env.APPDATA;
   const localAppData = process.env.LOCALAPPDATA;
+  const homeDir = os.homedir();
   const programFiles = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean);
+  if (appData) dirs.push(path.join(appData, "npm"));
   if (localAppData) {
+    dirs.push(path.join(localAppData, "npm"));
     dirs.push(path.join(localAppData, "Programs", "Codex", "resources"));
     dirs.push(path.join(localAppData, "Programs", "Codex", "resources", "app"));
   }
+  if (homeDir) {
+    dirs.push(path.join(homeDir, "AppData", "Roaming", "npm"));
+    dirs.push(path.join(homeDir, "AppData", "Local", "npm"));
+  }
   for (const base of programFiles) {
+    dirs.push(path.join(base, "nodejs"));
     dirs.push(...globCodexDirs(path.join(base, "WindowsApps")));
     dirs.push(path.join(base, "Codex", "resources"));
     dirs.push(path.join(base, "OpenAI", "Codex", "resources"));
@@ -243,8 +256,31 @@ function resolveCatalogSource(options = {}, recipe = null) {
       warning: "",
     };
   }
+  const nativeTargetCatalog = targetCatalogOrNull(nativeCatalog, TARGET_MODELS);
+  if (nativeTargetCatalog) {
+    return {
+      model: nativeTargetCatalog.models[0] || null,
+      targetCatalog: nativeTargetCatalog,
+      baseModel: "target-native",
+      fallback: false,
+      source: "native",
+      warning: "",
+    };
+  }
 
   const seedInfo = readSeedCatalogSource(options, candidates);
+  if (seedInfo.targetCatalog) {
+    return {
+      model: seedInfo.targetCatalog.models[0] || null,
+      targetCatalog: seedInfo.targetCatalog,
+      baseModel: seedInfo.baseModel || "target-seed",
+      fallback: false,
+      source: "seed",
+      warning: nativeError
+        ? "Native Codex catalog unavailable; using packaged CodeSeeX catalog seed."
+        : "Using packaged CodeSeeX catalog seed.",
+    };
+  }
   if (seedInfo.model) {
     return {
       model: seedInfo.model,
@@ -273,19 +309,33 @@ function resolveCatalogSource(options = {}, recipe = null) {
 }
 
 function readSeedCatalogSource(options = {}, candidates = DEFAULT_BASE_MODELS) {
-  if (options.allowSeed === false) return { catalog: null, model: null, path: "", error: null };
+  if (options.allowSeed === false) return { catalog: null, model: null, targetCatalog: null, path: "", error: null };
   let lastError = null;
   for (const seedPath of seedCatalogSearchPaths(options)) {
     try {
       const catalog = readSeedCatalogFile(seedPath);
       const model = findFirstModelOrNull(catalog, candidates);
       if (model) return { catalog, model, path: seedPath, error: null };
+      const targetCatalog = targetCatalogOrNull(catalog, TARGET_MODELS);
+      if (targetCatalog) return { catalog, model: null, targetCatalog, baseModel: "target-seed", path: seedPath, error: null };
       lastError = modelNotFoundError(catalog, candidates, null);
     } catch (error) {
       lastError = error;
     }
   }
-  return { catalog: null, model: null, path: "", error: lastError };
+  return { catalog: null, model: null, targetCatalog: null, path: "", error: lastError };
+}
+
+function targetCatalogOrNull(catalog, targets = TARGET_MODELS) {
+  const models = catalog && Array.isArray(catalog.models) ? catalog.models : [];
+  if (models.length === 0) return null;
+  const selected = [];
+  for (const target of targets) {
+    const model = models.find((item) => item && item.slug === target.slug);
+    if (!model) return null;
+    selected.push(deepClone(model));
+  }
+  return { models: selected };
 }
 
 function seedCatalogSearchPaths(options = {}) {
@@ -408,6 +458,24 @@ function defaultReasoningLevels() {
   ];
 }
 
+function targetModelsFromCatalog(catalog, targets, options) {
+  const models = catalog && Array.isArray(catalog.models) ? catalog.models : [];
+  return targets.map((target) => {
+    const model = deepClone(models.find((item) => item && item.slug === target.slug));
+    model.slug = target.slug;
+    model.display_name = model.display_name || target.displayName || target.slug;
+    model.description = model.description || target.description || (target.slug + " coding model served through CodeSeeX.");
+    model.visibility = "list";
+    model.supported_in_api = true;
+    model.context_window = Math.max(readPositiveInteger(model.context_window, options.contextWindow), options.contextWindow);
+    model.max_context_window = Math.max(readPositiveInteger(model.max_context_window, options.contextWindow), options.contextWindow);
+    model.effective_context_window_percent = readPositiveInteger(model.effective_context_window_percent, options.effectiveContextPercent);
+    model.auto_compact_token_limit = readPositiveInteger(model.auto_compact_token_limit, Math.floor(options.contextWindow * options.effectiveContextPercent / 100));
+    applyDesktopModelListFields(model, target);
+    return model;
+  });
+}
+
 function targetModelFromSource(source, target, options) {
   const model = deepClone(source);
   model.slug = target.slug;
@@ -425,18 +493,40 @@ function targetModelFromSource(source, target, options) {
 }
 
 function applyDesktopModelListFields(model, target) {
-  const supportedReasoningEfforts = normalizeReasoningEfforts(model.supported_reasoning_levels);
+  const displayName = textOrDefault(target.displayName, target.slug);
   model.id = target.slug;
   model.model = target.slug;
-  model.displayName = target.displayName || target.slug;
+  model.displayName = displayName;
+  model.display_name = displayName;
+  model.shell_type = model.shell_type || "shell_command";
+  model.priority = readNonNegativeInteger(model.priority, DEFAULT_MODEL_PRIORITY);
+  model.default_reasoning_level = model.default_reasoning_level || "medium";
+  model.supported_reasoning_levels = normalizeReasoningLevels(model.supported_reasoning_levels);
   model.defaultReasoningEffort = model.default_reasoning_level || "medium";
-  model.supportedReasoningEfforts = supportedReasoningEfforts;
+  model.supportedReasoningEfforts = desktopReasoningEffortOptions(model.supported_reasoning_levels);
   model.hidden = model.visibility === "hide";
   model.isDefault = target.slug === "deepseek-v4-pro";
   if (!model.minimal_client_version) model.minimal_client_version = "0.98.0";
-  if (!Array.isArray(model.available_in_plans) || model.available_in_plans.length === 0) {
-    model.available_in_plans = DEFAULT_AVAILABLE_PLANS.slice();
-  }
+  if (!model.apply_patch_tool_type) model.apply_patch_tool_type = "freeform";
+  if (!model.web_search_tool_type) model.web_search_tool_type = "text_and_image";
+  if (!model.truncation_policy || typeof model.truncation_policy !== "object") model.truncation_policy = { mode: "tokens", limit: 10000 };
+  if (!Array.isArray(model.input_modalities) || model.input_modalities.length === 0) model.input_modalities = ["text", "image"];
+  if (!Array.isArray(model.experimental_supported_tools)) model.experimental_supported_tools = [];
+  if (model.supports_parallel_tool_calls === undefined) model.supports_parallel_tool_calls = true;
+  if (model.supports_image_detail_original === undefined) model.supports_image_detail_original = true;
+  if (model.supports_search_tool === undefined) model.supports_search_tool = true;
+  if (model.supports_reasoning_summaries === undefined) model.supports_reasoning_summaries = true;
+  if (!model.default_reasoning_summary) model.default_reasoning_summary = "none";
+  if (model.support_verbosity === undefined) model.support_verbosity = true;
+  if (!model.default_verbosity) model.default_verbosity = "low";
+  if (model.supportsPersonality === undefined) model.supportsPersonality = true;
+  if (!Array.isArray(model.additionalSpeedTiers)) model.additionalSpeedTiers = Array.isArray(model.additional_speed_tiers) ? model.additional_speed_tiers.slice() : [];
+  if (!Array.isArray(model.additional_speed_tiers)) model.additional_speed_tiers = model.additionalSpeedTiers.slice();
+  if (!Array.isArray(model.service_tiers)) model.service_tiers = [];
+  if (!Array.isArray(model.serviceTiers)) model.serviceTiers = normalizeServiceTiers(model.service_tiers);
+  if (model.upgradeInfo === undefined) model.upgradeInfo = normalizeUpgradeInfo(model.upgrade);
+  if (model.availabilityNux === undefined) model.availabilityNux = normalizeAvailabilityNux(model.availability_nux);
+  model.available_in_plans = mergeStringList(model.available_in_plans, DEFAULT_AVAILABLE_PLANS);
 }
 
 function normalizeReasoningEfforts(levels) {
@@ -445,6 +535,64 @@ function normalizeReasoningEfforts(levels) {
     .map((effort) => String(effort || "").trim())
     .filter(Boolean);
   return efforts.length > 0 ? Array.from(new Set(efforts)) : ["low", "medium", "high", "xhigh"];
+}
+
+function desktopReasoningEffortOptions(levels) {
+  return normalizeReasoningLevels(levels).map((level) => {
+    const effort = typeof level === "string" ? level : level && level.effort;
+    const description = typeof level === "object" && level && level.description
+      ? String(level.description)
+      : defaultReasoningDescription(effort);
+    return {
+      reasoningEffort: String(effort || "medium"),
+      description,
+    };
+  });
+}
+
+function defaultReasoningDescription(effort) {
+  const descriptions = {
+    low: "Fast responses with lighter reasoning",
+    medium: "Balances speed and reasoning depth for everyday tasks",
+    high: "Greater reasoning depth for complex problems",
+    xhigh: "Extra high reasoning depth for complex problems",
+  };
+  return descriptions[String(effort || "")] || "";
+}
+
+function normalizeServiceTiers(tiers) {
+  return (Array.isArray(tiers) ? tiers : [])
+    .map((tier) => {
+      if (!tier || typeof tier !== "object") return null;
+      return {
+        id: String(tier.id || tier.name || "").trim(),
+        name: String(tier.name || tier.id || "").trim(),
+        description: String(tier.description || "").trim(),
+      };
+    })
+    .filter((tier) => tier && tier.id && tier.name);
+}
+
+function normalizeUpgradeInfo(upgrade) {
+  if (!upgrade || typeof upgrade !== "object") return null;
+  return {
+    model: String(upgrade.model || "").trim(),
+    upgradeCopy: upgrade.upgradeCopy === undefined ? null : upgrade.upgradeCopy,
+    modelLink: upgrade.modelLink === undefined ? null : upgrade.modelLink,
+    migrationMarkdown: upgrade.migrationMarkdown === undefined ? null : upgrade.migrationMarkdown,
+  };
+}
+
+function normalizeAvailabilityNux(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    message: String(value.message || "").trim(),
+  };
+}
+
+function normalizeReasoningLevels(levels) {
+  if (Array.isArray(levels) && levels.length > 0) return levels;
+  return defaultReasoningLevels();
 }
 
 function adaptInstructions(model, recipe) {
@@ -549,6 +697,20 @@ function splitList(value) {
   return String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
 }
 
+function mergeStringList(...lists) {
+  const seen = new Set();
+  const merged = [];
+  for (const list of lists) {
+    for (const item of Array.isArray(list) ? list : []) {
+      const value = String(item || "").trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      merged.push(value);
+    }
+  }
+  return merged;
+}
+
 function registerTempCleanup(tempDir) {
   process.once("exit", () => {
     try {
@@ -564,6 +726,12 @@ function stripBom(value) {
 function readPositiveInteger(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return fallback;
+  return Math.floor(number);
+}
+
+function readNonNegativeInteger(value, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return fallback;
   return Math.floor(number);
 }
 
@@ -591,14 +759,38 @@ function validateCodeSeeXCatalog(catalog, targets = TARGET_MODELS) {
 
 function isValidTargetModel(model, target) {
   const contextWindow = readPositiveInteger(model.context_window, 0);
+  const priority = Number(model.priority);
   return model.slug === target.slug
     && model.id === target.slug
     && model.model === target.slug
     && Boolean(model.display_name || model.displayName)
+    && Number.isFinite(priority)
+    && priority >= 0
     && model.supported_in_api === true
     && model.visibility === "list"
+    && typeof model.shell_type === "string"
+    && Boolean(model.apply_patch_tool_type)
+    && Boolean(model.web_search_tool_type)
+    && Array.isArray(model.input_modalities)
+    && model.input_modalities.length > 0
+    && Array.isArray(model.supportedReasoningEfforts)
+    && model.supportedReasoningEfforts.every(isDesktopReasoningEffortOption)
+    && Array.isArray(model.serviceTiers)
+    && Array.isArray(model.service_tiers)
+    && typeof model.supportsPersonality === "boolean"
+    && typeof model.hidden === "boolean"
+    && typeof model.isDefault === "boolean"
+    && model.truncation_policy
+    && typeof model.truncation_policy === "object"
     && contextWindow >= DEFAULT_CONTEXT_WINDOW
     && hasUsableInstructions(model);
+}
+
+function isDesktopReasoningEffortOption(value) {
+  return Boolean(value
+    && typeof value === "object"
+    && typeof value.reasoningEffort === "string"
+    && typeof value.description === "string");
 }
 
 function hasUsableInstructions(model) {
@@ -610,6 +802,7 @@ function hasUsableInstructions(model) {
 
 module.exports = {
   DEFAULT_BASE_MODELS,
+  DEFAULT_AVAILABLE_PLANS,
   FALLBACK_BASE_MODEL_SLUG,
   PACKAGED_CATALOG_SEED_FILE,
   PRIVATE_CATALOG_DIR,

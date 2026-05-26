@@ -205,9 +205,9 @@ body { font-family: system-ui, -apple-system, sans-serif; background-color: var(
 .setting-item > span small { display: block; font-size: 12px; font-weight: 400; line-height: 1.45; }
 .setting-divider { height: 1px; background-color: var(--border-color); margin: 0; transition: var(--theme-transition); }
 
-.segmented-control { display: inline-flex; background: var(--ctrl-bg); padding: 3px; border-radius: 8px; border: 1px solid var(--border-color); transition: var(--theme-transition); }
+.segmented-control { display: inline-flex; max-width: 100%; background: var(--ctrl-bg); padding: 3px; border-radius: 8px; border: 1px solid var(--border-color); transition: var(--theme-transition); }
 .segmented-control input[type="radio"] { display: none; }
-.segmented-control label { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; min-width: 72px; min-height: 30px; padding: 6px 14px; font-size: 13px; font-weight: 600; line-height: 1; color: var(--text-secondary); text-align: center; border-radius: 5px; border: 1px solid transparent; transition: var(--theme-transition); margin: 0; }
+.segmented-control label { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; min-width: 0; min-height: 30px; padding: 6px 14px; font-size: 13px; font-weight: 600; line-height: 1; color: var(--text-secondary); text-align: center; white-space: nowrap; border-radius: 5px; border: 1px solid transparent; transition: var(--theme-transition); margin: 0; }
 .segmented-control input[type="radio"]:checked + label { background: var(--ctrl-selected-bg); color: var(--text-main); box-shadow: var(--shadow-sm); border-color: rgba(0,0,0,0.04); }
 
 .inline-control { min-height: 34px; padding: 7px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); font-size: 13px; line-height: 1.2; color: var(--text-main); background: var(--bg-panel); outline: none; transition: var(--theme-transition); }
@@ -225,15 +225,24 @@ select.inline-control { text-align: center; text-align-last: center; padding-rig
 .update-button { position: relative; }
 .update-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--danger); display: inline-block; flex: none; }
 .update-dot[hidden] { display: none; }
-.billing-row { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 12px; width: 100%; margin-top: 14px; }
-.billing-field { display: inline-flex; align-items: center; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-panel); overflow: hidden; transition: var(--theme-transition); }
+.billing-rate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: 100%; }
+.billing-rate-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-panel); transition: var(--theme-transition); }
+.billing-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
+.billing-model-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.billing-model-meta strong { font-size: 14px; line-height: 1.2; color: var(--text-main); }
+.billing-model-meta .muted { font-size: 12px; line-height: 1.35; }
+.billing-model-badge { flex: none; display: inline-flex; align-items: center; min-height: 24px; padding: 3px 9px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--hover-bg); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; transition: var(--theme-transition); }
+.billing-row { display: grid; grid-template-columns: 1fr; gap: 8px; width: 100%; }
+.billing-field { display: grid; grid-template-columns: minmax(112px, 1fr) minmax(76px, 88px) auto; align-items: center; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); overflow: hidden; transition: var(--theme-transition); }
 .billing-field:focus-within { border-color: var(--info); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1); }
-.billing-prefix, .billing-suffix { padding: 8px 12px; background: var(--ctrl-bg); color: var(--text-secondary); font-size: 12px; font-weight: 500; white-space: nowrap; transition: var(--theme-transition); }
+.billing-prefix, .billing-suffix { padding: 8px 10px; color: var(--text-secondary); font-size: 12px; font-weight: 500; white-space: nowrap; transition: var(--theme-transition); }
 .billing-prefix { border-right: 1px solid var(--border-color); }
 .billing-suffix { border-left: 1px solid var(--border-color); }
-.billing-field input { flex: none; border: none; padding: 8px 10px; width: 84px; outline: none; font-size: 13px; color: var(--text-main); background: transparent; text-align: right; font-variant-numeric: tabular-nums; transition: var(--theme-transition); }
+.billing-field input { border: none; padding: 8px 10px; width: 100%; min-width: 0; outline: none; font-size: 13px; color: var(--text-main); background: var(--bg-panel); text-align: right; font-variant-numeric: tabular-nums; transition: var(--theme-transition); }
 .billing-field input[type="number"]::-webkit-inner-spin-button, .billing-field input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .billing-field input[type="number"] { -moz-appearance: textfield; }
+
+.compact-segmented-control { margin-left: auto; }
 
 /* ==========================================================================
    优化重构：标准高级胶囊型开关 (Premium Custom Toggle Switch Style)
@@ -296,6 +305,7 @@ select.inline-control { text-align: center; text-align-last: center; padding-rig
 .tab-icon { width: 15px; height: 15px; display: inline-block; background: currentColor; }
 .tab-icon-client { -webkit-mask: url("/assets/icons/client.svg") center / contain no-repeat; mask: url("/assets/icons/client.svg") center / contain no-repeat; }
 .tab-icon-proxy { -webkit-mask: url("/assets/icons/proxy.svg") center / contain no-repeat; mask: url("/assets/icons/proxy.svg") center / contain no-repeat; }
+.tab-icon-experimental { -webkit-mask: url("/assets/icons/experimental.svg") center / contain no-repeat; mask: url("/assets/icons/experimental.svg") center / contain no-repeat; }
 .tab-icon-tools { -webkit-mask: url("/assets/icons/tools.svg") center / contain no-repeat; mask: url("/assets/icons/tools.svg") center / contain no-repeat; }
 .config-tab-panel { display: none; }
 .config-tab-panel.active { display: block; }
@@ -542,4 +552,5 @@ select.inline-control { text-align: center; text-align-last: center; padding-rig
 
 @media (max-width: 1024px) {
   .panels-grid, .usage-summary-grid, .about-grid, .dashboard-layout { grid-template-columns: 1fr; }
+  .billing-rate-grid { grid-template-columns: 1fr; }
 }

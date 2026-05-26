@@ -28,6 +28,8 @@ async function streamDeepSeekResponseV2(res, options) {
     logToolCalls,
     logToolResults,
     flushRuntime,
+    onCheckpoint = null,
+    autoCompactionItem = null,
   } = options;
 
   const seq = createSequence();
@@ -108,6 +110,12 @@ async function streamDeepSeekResponseV2(res, options) {
         if (typeof flushRuntime === "function") flushRuntime(config, runtime);
         storedMessages.push(assistantForStorage(visibleAssistant));
         storedMessages.push(...hostedResult.toolMessages);
+        await maybeCheckpoint(onCheckpoint, {
+          storedMessages,
+          rawAssistant: visibleAssistant,
+          usage,
+          reason: "hosted_tool_result",
+        });
         if (external.length > 0 || internal.length > 0) break;
         workingMessages.push(visibleAssistant, ...hostedResult.toolMessages);
         continue;
@@ -115,6 +123,12 @@ async function streamDeepSeekResponseV2(res, options) {
 
       if (internal.length > 0) {
         storedMessages.push(assistantForStorage(visibleAssistant));
+        await maybeCheckpoint(onCheckpoint, {
+          storedMessages,
+          rawAssistant: visibleAssistant,
+          usage,
+          reason: "internal_tool_call",
+        });
         break;
       }
 
@@ -136,8 +150,10 @@ async function streamDeepSeekResponseV2(res, options) {
     emitter.fail(response);
     res.write("data: [DONE]\n\n");
     res.end();
-    return { failed: true, response, usage, storedMessages };
+    return { failed: true, response, usage, storedMessages, rawAssistant };
   }
+
+  if (autoCompactionItem) await emitter.emitItems([autoCompactionItem]);
 
   const response = buildResponseRecord({
     id,
@@ -158,10 +174,17 @@ async function streamDeepSeekResponseV2(res, options) {
   };
 }
 
+async function maybeCheckpoint(onCheckpoint, payload) {
+  if (typeof onCheckpoint !== "function") return;
+  await onCheckpoint(Object.assign({}, payload, {
+    storedMessages: Array.isArray(payload && payload.storedMessages) ? payload.storedMessages.slice() : [],
+  }));
+}
+
 function turnOutputFromAssistant(assistant, usage, toolContext, config, options = {}) {
   const output = responseOutputFromAssistant(assistant, usage, toolContext, config, options);
   const reasoning = assistant && assistant.reasoning_content ? assistant.reasoning_content : "";
-  if (!reasoning || !config.visibleThinkingEnabled) return output;
+  if (!reasoning || !config.visibleThinkingEnabled || options.includeThinkingDisplay === false) return output;
 
   const insertAt = output.findIndex((item) => item && item.type !== "reasoning");
   const thinkingItem = thinkingDisplayMessage(reasoning, config);

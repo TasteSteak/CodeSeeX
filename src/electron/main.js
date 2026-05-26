@@ -1,12 +1,25 @@
 if (process.argv.includes("--proxy-child")) {
   require("../proxy/server").main();
 } else {
-  const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, nativeTheme, shell } = require("electron");
+  const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, nativeTheme, protocol, shell } = require("electron");
+  const fs = require("node:fs");
   const os = require("node:os");
   const path = require("node:path");
   const { readEnvFile } = require("../manager/env-file");
-  const { startManager } = require("../manager/server");
+  const { startDesktopManager } = require("../manager/server");
   const { PRODUCT_NAME } = require("../shared/product");
+
+  protocol.registerSchemesAsPrivileged([{
+    scheme: "codeseex",
+    privileges: {
+      bypassCSP: false,
+      corsEnabled: true,
+      secure: true,
+      standard: true,
+      stream: true,
+      supportFetchAPI: true,
+    },
+  }]);
 
   let managerService = null;
   let mainWindow = null;
@@ -15,6 +28,8 @@ if (process.argv.includes("--proxy-child")) {
   let closeBehavior = "exit";
   let currentConfig = {};
   let tray = null;
+  const trayLanguagePackCache = new Map();
+  let localProtocolRegistered = false;
   let isQuitting = false;
   let pendingShowWindow = false;
   const singleInstanceLock = app.requestSingleInstanceLock();
@@ -33,44 +48,42 @@ if (process.argv.includes("--proxy-child")) {
     const rootDir = app.getAppPath();
     const dataDir = resolveDataDir(rootDir);
     const proxyEnv = readEnvFile(path.join(dataDir, "proxy.env"));
-    const managerHost = process.env.PROXY_HOST || proxyEnv.PROXY_HOST || "127.0.0.1";
-    const managerPort = clampPort(process.env.PROXY_PORT || proxyEnv.PROXY_PORT, 8787);
     let uiTheme = "system";
     closeBehavior = normalizeCloseBehavior(proxyEnv.UI_CLOSE_BEHAVIOR);
     currentConfig = proxyEnv || {};
     applyLoginItemFromConfig(currentConfig);
     uiTheme = normalizeUiTheme(proxyEnv.UI_THEME);
 
-    managerService = await startOwnManager({
-      dataDir,
-      rootDir,
-      host: managerHost,
-      port: managerPort,
-      onConfigChanged(config) {
-        currentConfig = config || {};
-        uiTheme = normalizeUiTheme(config && config.UI_THEME);
-        closeBehavior = normalizeCloseBehavior(config && config.UI_CLOSE_BEHAVIOR);
-        applyWindowTheme(mainWindow, uiTheme);
-        applyLoginItemFromConfig(config || {});
-        refreshTrayMenu();
-        notifyRendererConfigChanged();
-      },
-      onWindowAction(action, payload) {
-        if (action === "theme") {
-          const seq = Number(payload && payload.seq) || 0;
-          if (seq && seq < themePreviewSeq) return;
-          if (seq) themePreviewSeq = seq;
-          uiTheme = normalizeUiTheme(payload && payload.theme);
+    if (!managerService) {
+      managerService = await startOwnManager({
+        dataDir,
+        rootDir,
+        onConfigChanged(config) {
+          currentConfig = config || {};
+          uiTheme = normalizeUiTheme(config && config.UI_THEME);
+          closeBehavior = normalizeCloseBehavior(config && config.UI_CLOSE_BEHAVIOR);
           applyWindowTheme(mainWindow, uiTheme);
-          return;
-        }
-        if (action === "login-item") {
-          applyLoginItem(Boolean(payload && payload.enabled));
-          return;
-        }
-        handleWindowAction(mainWindow, action);
-      },
-    });
+          applyLoginItemFromConfig(config || {});
+          refreshTrayMenu();
+          notifyRendererConfigChanged();
+        },
+        onWindowAction(action, payload) {
+          if (action === "theme") {
+            const seq = Number(payload && payload.seq) || 0;
+            if (seq && seq < themePreviewSeq) return;
+            if (seq) themePreviewSeq = seq;
+            uiTheme = normalizeUiTheme(payload && payload.theme);
+            applyWindowTheme(mainWindow, uiTheme);
+            return;
+          }
+          if (action === "login-item") {
+            applyLoginItem(Boolean(payload && payload.enabled));
+            return;
+          }
+          handleWindowAction(mainWindow, action);
+        },
+      });
+    }
 
     mainWindow = new BrowserWindow({
       width: 1280,
@@ -98,6 +111,11 @@ if (process.argv.includes("--proxy-child")) {
     }
 
     await mainWindow.loadURL(managerService.url);
+    setImmediate(() => {
+      if (!isQuitting && managerService && typeof managerService.startInitialProxy === "function") {
+        managerService.startInitialProxy();
+      }
+    });
   }
 
   function installWindowHandlers() {
@@ -148,22 +166,21 @@ if (process.argv.includes("--proxy-child")) {
     if (managerService) managerService.close();
   });
 
-  function clampPort(value, fallback) {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.min(65535, Math.max(1, Math.floor(parsed)));
-  }
-
-  async function startOwnManager({ dataDir, rootDir, host, port, onConfigChanged, onWindowAction }) {
-    return startManager({
+  async function startOwnManager({ dataDir, rootDir, onConfigChanged, onWindowAction }) {
+    const service = await startDesktopManager({
       dataDir,
       rootDir,
-      host,
-      port,
-      exitOnClose: false,
       onConfigChanged,
       onWindowAction,
     });
+    if (!localProtocolRegistered) {
+      protocol.handle(service.protocol, (request) => {
+        const activeService = managerService || service;
+        return activeService.handleProtocolRequest(request);
+      });
+      localProtocolRegistered = true;
+    }
+    return service;
   }
 
   function resolveDataDir(rootDir) {
@@ -230,39 +247,50 @@ if (process.argv.includes("--proxy-child")) {
   function trayMenuTemplate() {
     const model = normalizeUpstreamModelOverride(currentConfig.UPSTREAM_MODEL_OVERRIDE);
     const thinking = normalizeThinkingMode(currentConfig.DEEPSEEK_THINKING);
+    const temperature = normalizeTemperaturePreset(currentConfig.DEEPSEEK_TEMPERATURE_PRESET);
     return [
-      { label: "Show " + PRODUCT_NAME, click: showMainWindow },
+      { label: trayText("trayShow", { name: PRODUCT_NAME }), click: showMainWindow },
       { type: "separator" },
       {
-        label: "Model",
+        label: trayText("trayModel"),
         submenu: [
-          { label: "Default", type: "radio", checked: model === "default", click: () => updateRuntimeConfig({ UPSTREAM_MODEL_OVERRIDE: "default" }) },
-          { label: "Flash", type: "radio", checked: model === "deepseek-v4-flash", click: () => updateRuntimeConfig({ UPSTREAM_MODEL_OVERRIDE: "deepseek-v4-flash" }) },
-          { label: "Pro", type: "radio", checked: model === "deepseek-v4-pro", click: () => updateRuntimeConfig({ UPSTREAM_MODEL_OVERRIDE: "deepseek-v4-pro" }) },
+          { label: trayText("modelDefault"), type: "radio", checked: model === "default", click: () => updateRuntimeConfig({ UPSTREAM_MODEL_OVERRIDE: "default" }) },
+          { label: trayText("modelFlash"), type: "radio", checked: model === "deepseek-v4-flash", click: () => updateRuntimeConfig({ UPSTREAM_MODEL_OVERRIDE: "deepseek-v4-flash" }) },
+          { label: trayText("modelPro"), type: "radio", checked: model === "deepseek-v4-pro", click: () => updateRuntimeConfig({ UPSTREAM_MODEL_OVERRIDE: "deepseek-v4-pro" }) },
         ],
       },
       {
-        label: "Thinking",
+        label: trayText("trayThinking"),
         submenu: [
-          { label: "Auto", type: "radio", checked: thinking === "auto", click: () => updateRuntimeConfig({ DEEPSEEK_THINKING: "auto" }) },
-          { label: "Force on", type: "radio", checked: thinking === "enabled", click: () => updateRuntimeConfig({ DEEPSEEK_THINKING: "enabled" }) },
-          { label: "Force off", type: "radio", checked: thinking === "disabled", click: () => updateRuntimeConfig({ DEEPSEEK_THINKING: "disabled" }) },
+          { label: trayText("thinkingAuto"), type: "radio", checked: thinking === "auto", click: () => updateRuntimeConfig({ DEEPSEEK_THINKING: "auto" }) },
+          { label: trayText("thinkingEnabled"), type: "radio", checked: thinking === "enabled", click: () => updateRuntimeConfig({ DEEPSEEK_THINKING: "enabled" }) },
+          { label: trayText("thinkingDisabled"), type: "radio", checked: thinking === "disabled", click: () => updateRuntimeConfig({ DEEPSEEK_THINKING: "disabled" }) },
+        ],
+      },
+      {
+        label: trayText("trayTemperature"),
+        submenu: [
+          { label: trayText("temperatureDefault"), type: "radio", checked: temperature === "default", click: () => updateRuntimeConfig({ DEEPSEEK_TEMPERATURE_PRESET: "default" }) },
+          { label: trayText("temperatureStrict"), type: "radio", checked: temperature === "strict", click: () => updateRuntimeConfig({ DEEPSEEK_TEMPERATURE_PRESET: "strict" }) },
+          { label: trayText("temperatureBalanced"), type: "radio", checked: temperature === "balanced", click: () => updateRuntimeConfig({ DEEPSEEK_TEMPERATURE_PRESET: "balanced" }) },
+          { label: trayText("temperatureGeneral"), type: "radio", checked: temperature === "general", click: () => updateRuntimeConfig({ DEEPSEEK_TEMPERATURE_PRESET: "general" }) },
+          { label: trayText("temperatureCreative"), type: "radio", checked: temperature === "creative", click: () => updateRuntimeConfig({ DEEPSEEK_TEMPERATURE_PRESET: "creative" }) },
         ],
       },
       { type: "separator" },
-      { label: "Quit", click: quitFromTray },
+      { label: trayText("trayQuit"), click: quitFromTray },
     ];
   }
 
   async function updateRuntimeConfig(patch) {
-    if (!managerService || !managerService.url) return;
+    if (!managerService || typeof managerService.handleProtocolRequest !== "function") return;
     currentConfig = Object.assign({}, currentConfig, patch || {});
     refreshTrayMenu();
     try {
-      const response = await fetch(managerService.url + "/api/config", { cache: "no-store" });
+      const response = await managerApiRequest("/api/config");
       const config = response.ok ? await response.json() : {};
       const next = Object.assign({}, config || {}, patch || {});
-      await fetch(managerService.url + "/api/config", {
+      await managerApiRequest("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next),
@@ -270,6 +298,11 @@ if (process.argv.includes("--proxy-child")) {
     } catch {
       notifyRendererConfigChanged();
     }
+  }
+
+  function managerApiRequest(pathname, init = {}) {
+    const url = "codeseex://app" + (String(pathname || "/").startsWith("/") ? pathname : "/" + pathname);
+    return managerService.handleProtocolRequest(new Request(url, init));
   }
 
   function notifyRendererConfigChanged() {
@@ -331,11 +364,106 @@ if (process.argv.includes("--proxy-child")) {
     return ["auto", "enabled", "disabled"].includes(normalized) ? normalized : "auto";
   }
 
+  function normalizeTemperaturePreset(value) {
+    const normalized = String(value || "default").trim().toLowerCase();
+    if (normalized === "precise" || normalized === "strict" || normalized === "rigorous") return "strict";
+    if (normalized === "balanced" || normalized === "balance") return "balanced";
+    if (normalized === "general" || normalized === "chat" || normalized === "translation") return "general";
+    if (normalized === "creative" || normalized === "creation") return "creative";
+    return "default";
+  }
+
   function normalizeUpstreamModelOverride(value) {
     const normalized = String(value || "default").trim().toLowerCase();
     if (normalized === "flash" || normalized === "deepseek-v4-flash") return "deepseek-v4-flash";
     if (normalized === "pro" || normalized === "deepseek-v4-pro") return "deepseek-v4-pro";
     return "default";
+  }
+
+  function trayText(key, vars = {}) {
+    const pack = loadTrayLanguagePack(currentConfig);
+    const fallback = trayFallbackText(key);
+    let text = String((pack && pack[key]) || fallback || key);
+    for (const [name, value] of Object.entries(vars || {})) {
+      text = text.replace(new RegExp("\\{" + escapeRegExp(name) + "\\}", "g"), String(value));
+    }
+    return text;
+  }
+
+  function trayFallbackText(key) {
+    const fallback = {
+      modelDefault: "Default",
+      modelFlash: "Flash",
+      modelPro: "Pro",
+      temperatureBalanced: "Balanced",
+      temperatureCreative: "Creative",
+      temperatureDefault: "Default",
+      temperatureGeneral: "General",
+      temperatureStrict: "Strict",
+      thinkingAuto: "Auto",
+      thinkingDisabled: "Force off",
+      thinkingEnabled: "Force on",
+      trayModel: "Model",
+      trayQuit: "Quit",
+      trayShow: "Show {name}",
+      trayTemperature: "Sampling temperature",
+      trayThinking: "Thinking",
+    };
+    return fallback[key] || key;
+  }
+
+  function loadTrayLanguagePack(config) {
+    const rootDir = app.getAppPath();
+    const id = resolveTrayLanguageId(config && config.UI_LANGUAGE, rootDir);
+    return readTrayLanguagePack(rootDir, id) || readTrayLanguagePack(rootDir, "en_us") || {};
+  }
+
+  function resolveTrayLanguageId(value, rootDir) {
+    const requested = normalizeLanguageId(value || "system");
+    if (requested !== "system") return requested;
+    const available = availableTrayLanguages(rootDir);
+    const preferredLanguages = typeof app.getPreferredSystemLanguages === "function" ? app.getPreferredSystemLanguages() : [];
+    for (const locale of preferredLanguages.concat(app.getLocale()).map(normalizeLanguageId)) {
+      if (available.includes(locale)) return locale;
+      const prefix = locale.split("_")[0];
+      const byPrefix = available.find((id) => id === prefix || id.startsWith(prefix + "_"));
+      if (byPrefix) return byPrefix;
+    }
+    return "en_us";
+  }
+
+  function availableTrayLanguages(rootDir) {
+    const dir = path.join(rootDir, "src", "manager", "static", "lang");
+    try {
+      return fs.readdirSync(dir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => normalizeLanguageId(name.replace(/\.json$/i, "")))
+        .filter(Boolean);
+    } catch {
+      return ["en_us"];
+    }
+  }
+
+  function readTrayLanguagePack(rootDir, id) {
+    const filePath = path.join(rootDir, "src", "manager", "static", "lang", normalizeLanguageId(id) + ".json");
+    const cacheKey = filePath;
+    if (trayLanguagePackCache.has(cacheKey)) return trayLanguagePackCache.get(cacheKey);
+    try {
+      const pack = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      trayLanguagePackCache.set(cacheKey, pack);
+      return pack;
+    } catch {
+      trayLanguagePackCache.set(cacheKey, null);
+      return null;
+    }
+  }
+
+  function normalizeLanguageId(value) {
+    return String(value || "en_us").trim().replace(/-/g, "_").toLowerCase() || "en_us";
+  }
+
+  function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   function applyLoginItemFromConfig(config) {

@@ -3,6 +3,7 @@ logs/
 proxy-state.json
 runtime.json
 proxy.env
+scripts/deepseek-agent-smoke.config.json
 node_modules/
 dist/
 out/
@@ -12,4 +13,3 @@ release/
 codex/.generated/
 .codeseex-private/
 build/private/
-src/codex/catalog-seed.c6

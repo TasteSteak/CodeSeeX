@@ -1,0 +1,14 @@
+{
+  "proxyBaseUrl": "http://127.0.0.1:8787/v1",
+  "model": "deepseek-v4-pro",
+  "apiKey": "",
+  "catalogPath": "",
+  "codeseexDataDir": "",
+  "codexBin": "codex",
+  "workspaceDir": "",
+  "prompt": "You are testing CodeSeeX through Codex CLI. First say exactly which model name you are using if visible. Then call a simple shell command to print CODESEEX_SMOKE_OK. Finally answer with JSON only: {\"ok\":true,\"saw\":\"CODESEEX_SMOKE_OK\"}.",
+  "timeoutMs": 180000,
+  "debug": true,
+  "keepTemp": false,
+  "extraConfigToml": ""
+}

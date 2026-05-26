@@ -1,11 +1,15 @@
 "use strict";
 
 const { buildDeepSeekPayload } = require("../src/proxy/deepseek-client");
+const { runDeepSeekTurn } = require("../src/proxy/server");
 const { chatToolCallFromResponseItem, createToolContext, responseToolItemFromChat, splitToolCalls } = require("../src/proxy/tools");
 
-main();
+main().catch((error) => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exitCode = 1;
+});
 
-function main() {
+async function main() {
   const context = createToolContext([{
     type: "namespace",
     name: "mcp__codeseex_smoke__",
@@ -182,8 +186,88 @@ function main() {
   }, webContext);
   assert(webItem.type === "web_search_call", "system web_search must keep native web_search_call shape");
 
+  const communityContext = createToolContext([{
+    type: "function",
+    name: "community_echo",
+    description: "Community hosted echo tool.",
+    parameters: {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+    },
+  }]);
+  communityContext.byName.set("community_echo", {
+    kind: "hosted_community_echo",
+    nativeTool: {
+      async executeProxyTool({ arguments: argsText }) {
+        const parsed = JSON.parse(argsText || "{}");
+        return { ok: true, echoed: parsed.text || "" };
+      },
+    },
+    responseName: "community_echo",
+  });
+  const communityResult = await runDeepSeekTurn({
+    requestBody: { model: "deepseek-v4-pro", stream: false },
+    messages: [{ role: "user", content: "call community echo" }],
+    toolContext: communityContext,
+    config: {},
+    callJson: fakeToolCallJson("community_echo", "{\"text\":\"hello community\"}", "done"),
+  });
+  const communityText = JSON.stringify(communityResult.storedMessages);
+  assert(communityText.includes("hello community"), "community hosted executeProxyTool result was not injected");
+  assert(!communityText.includes("proxy_web_search_failed"), "community hosted tools must not fall through to web_search execution");
+
+  const missingHostedContext = createToolContext([{
+    type: "function",
+    name: "missing_hosted",
+    description: "Missing hosted implementation.",
+    parameters: { type: "object", properties: {} },
+  }]);
+  missingHostedContext.byName.set("missing_hosted", {
+    kind: "hosted_missing",
+    nativeTool: {},
+    responseName: "missing_hosted",
+  });
+  const missingResult = await runDeepSeekTurn({
+    requestBody: { model: "deepseek-v4-pro", stream: false },
+    messages: [{ role: "user", content: "call missing hosted" }],
+    toolContext: missingHostedContext,
+    config: {},
+    callJson: fakeToolCallJson("missing_hosted", "{}", "done"),
+  });
+  const missingText = JSON.stringify(missingResult.storedMessages);
+  assert(missingText.includes("proxy_hosted_tool_not_implemented"), "missing hosted implementation should return an explicit protocol error");
+  assert(!missingText.includes("proxy_web_search_failed"), "missing hosted implementation must not be misrouted to web_search");
+
   console.log("Native MCP passthrough test passed.");
   console.log("Model-facing tools:", names.filter((name) => name.includes("codeseex_smoke")).join(", "));
+}
+
+function fakeToolCallJson(toolName, argsText, finalText) {
+  let count = 0;
+  return async () => {
+    count += 1;
+    if (count === 1) {
+      return {
+        choices: [{
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [{
+              id: "call_" + toolName,
+              type: "function",
+              function: { name: toolName, arguments: argsText },
+            }],
+          },
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      };
+    }
+    return {
+      choices: [{ message: { role: "assistant", content: finalText || "done" } }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+  };
 }
 
 function assert(condition, message) {
