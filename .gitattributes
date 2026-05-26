@@ -1,1 +1,17 @@
 * text=auto eol=lf
+
+# Keep release source archives focused on runtime source.
+.github export-ignore
+.github/** export-ignore
+test export-ignore
+test/** export-ignore
+debug export-ignore
+debug/** export-ignore
+logs export-ignore
+logs/** export-ignore
+dist export-ignore
+dist/** export-ignore
+node_modules export-ignore
+node_modules/** export-ignore
+.codeseex-private export-ignore
+.codeseex-private/** export-ignore

@@ -8,9 +8,9 @@ const {
   PACKAGED_CATALOG_SEED_FILE,
   PRIVATE_CATALOG_DIR,
   codexCliInvocation,
-} = require("../src/codex/model-catalog");
+} = require("./model-catalog");
 
-const rootDir = path.resolve(__dirname, "..");
+const rootDir = path.resolve(__dirname, "..", "..");
 const outputPath = path.join(rootDir, "src", "codex", PACKAGED_CATALOG_SEED_FILE);
 const privateJsonPath = path.join(rootDir, PRIVATE_CATALOG_DIR, "model-catalog.json");
 

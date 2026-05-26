@@ -205,7 +205,7 @@ function assertBuildCatalogSeedReusesPackagedSeedWithoutNative() {
   const seedPath = path.join(__dirname, "..", "src", "codex", "catalog-seed.c6");
   if (!fs.existsSync(seedPath)) return;
   const before = fs.readFileSync(seedPath);
-  execFileSync(process.execPath, [path.join(__dirname, "build-catalog-seed.js")], {
+  execFileSync(process.execPath, [path.join(__dirname, "..", "src", "codex", "build-catalog-seed.js")], {
     cwd: path.join(__dirname, ".."),
     encoding: "utf8",
     env: {
