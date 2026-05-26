@@ -17,6 +17,7 @@ function run() {
   testResponseChainReconstructsDeltaHistory();
   testCompactionIsModelVisible();
   testCodeseexCompactionPayloadIsEffective();
+  testCodeseexCompactionDoesNotRecursivelySummarizeItself();
   testAutomaticCompactionThreshold();
   testAutomaticCompactionKeepsHighInformationAnchors();
   testAutomaticCompactionOmitsEphemeralReplyDirectives();
@@ -259,6 +260,43 @@ function testCodeseexCompactionPayloadIsEffective() {
   assert.ok(text.includes("CodeSeeX compacted conversation state"));
   assert.ok(text.includes("shell_command"));
   assert.ok(text.includes("COMPACT_FACT"));
+}
+
+function testCodeseexCompactionDoesNotRecursivelySummarizeItself() {
+  const config = { compactionSecret: "unit-test-compaction-secret-value" };
+  const input = normalizeInput([
+    { type: "message", role: "user", content: "Remember recursive compact marker CODESEEX_NO_RECURSIVE_COMPACT." },
+  ]);
+  const firstCompiled = compileContext({
+    requestBody: { model: "deepseek-v4-pro", input },
+    normalizedInput: input,
+    config,
+  });
+  const firstCompact = buildCodeseexCompaction({
+    requestBody: { model: "deepseek-v4-pro", input },
+    normalizedInput: input,
+    compiledContext: firstCompiled,
+    config,
+  });
+  const secondInput = normalizeInput([
+    { type: "compaction", id: firstCompact.payload.id, encrypted_content: firstCompact.encrypted_content },
+    { type: "message", role: "user", content: "Continue after compact." },
+  ]);
+  const secondCompiled = compileContext({
+    requestBody: { model: "deepseek-v4-pro", input: secondInput },
+    normalizedInput: secondInput,
+    config,
+  });
+  const secondCompact = buildCodeseexCompaction({
+    requestBody: { model: "deepseek-v4-pro", input: secondInput },
+    normalizedInput: secondInput,
+    compiledContext: secondCompiled,
+    config,
+  });
+
+  assert.ok(secondCompact.payload.messages.some((message) => JSON.stringify(message).includes("CODESEEX_NO_RECURSIVE_COMPACT")));
+  assert.deepEqual(secondCompact.payload.compaction_summaries, [], "CodeSeeX encrypted compactions must not feed rendered summaries back into later compactions");
+  assert.ok(secondCompact.text.length < firstCompact.text.length + 2500, "re-compacting should stay bounded rather than nesting prior rendered compaction text");
 }
 
 function testAutomaticCompactionThreshold() {

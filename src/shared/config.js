@@ -10,6 +10,7 @@ const DEFAULT_BILLING_RATES_CNY = Object.freeze({
   flash: Object.freeze({ cachedInput: 0.02, cacheMissInput: 1, output: 2 }),
   pro: Object.freeze({ cachedInput: 0.025, cacheMissInput: 3, output: 6 }),
 });
+const DEFAULT_MAX_RESPONSE_CHAIN_DEPTH = 10000;
 
 function parseBool(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -106,8 +107,9 @@ function normalizeUpstreamModelOverride(value) {
 
 function normalizeMaxResponseChainDepth(value) {
   const raw = String(value === undefined || value === null ? "" : value).trim().toLowerCase();
-  if (!raw || raw === "0" || raw === "unlimited" || raw === "infinite" || raw === "none") return 0;
-  return clampInt(raw, 0, 100, 500000);
+  if (!raw) return DEFAULT_MAX_RESPONSE_CHAIN_DEPTH;
+  if (raw === "0" || raw === "unlimited" || raw === "infinite" || raw === "none") return 0;
+  return clampInt(raw, DEFAULT_MAX_RESPONSE_CHAIN_DEPTH, 100, 500000);
 }
 
 function normalizeTemperaturePreset(value) {

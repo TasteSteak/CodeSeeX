@@ -7,18 +7,33 @@ const { buildResponseRecord, buildStoredRecord, normalizeInput } = require("../s
 const { compileContext } = require("../src/proxy/context-compiler");
 const { resolvePreviousContext } = require("../src/proxy/conversation-state");
 const { createProxyContext } = require("../src/proxy/server");
+const { normalizeMaxResponseChainDepth } = require("../src/shared/config");
 const { readJsonStrict } = require("../src/shared/json-store");
 
 function run() {
+  testMaxResponseChainDepthDefaultsToSafetyCap();
   testStrictJsonReadRejectsInvalidState();
   testCreateProxyContextDoesNotOverwriteInvalidState();
   testCreateProxyContextRecoversInterruptedRequests();
   testStoredRecordLifecycleShape();
   testIncompleteRecordsOnlyContributeSafeFacts();
   testLegacyUpstreamMessagesStillReconstruct();
+  testLegacyCumulativeRecordsDoNotDuplicateHistory();
+  testLoopedResponseChainStopsSafely();
+  testSelfLoopedResponseChainStopsSafely();
   testChainDepthIsIndependentFromStorageSoftLimit();
+  testDefaultChainDepthHasSafetyCap();
   testOptionalChainDepthCapStillWorks();
   console.log("agent state tests passed");
+}
+
+function testMaxResponseChainDepthDefaultsToSafetyCap() {
+  assert.equal(normalizeMaxResponseChainDepth(undefined), 10000);
+  assert.equal(normalizeMaxResponseChainDepth(""), 10000);
+  assert.equal(normalizeMaxResponseChainDepth("0"), 0);
+  assert.equal(normalizeMaxResponseChainDepth("unlimited"), 0);
+  assert.equal(normalizeMaxResponseChainDepth("25"), 100);
+  assert.equal(normalizeMaxResponseChainDepth("500001"), 500000);
 }
 
 function testStrictJsonReadRejectsInvalidState() {
@@ -211,6 +226,80 @@ function testLegacyUpstreamMessagesStillReconstruct() {
   assert.equal(previous.chain_diagnostic.legacy_record_count, 1);
 }
 
+function testLegacyCumulativeRecordsDoNotDuplicateHistory() {
+  const context = { config: { maxStoredResponses: 100 }, state: { responses: {} } };
+  context.state.responses.resp_legacy_1 = {
+    id: "resp_legacy_1",
+    created_at: 1,
+    previous_response_id: null,
+    upstream_messages: [
+      { role: "user", content: "LEGACY_CUMULATIVE_ROOT" },
+      { role: "assistant", content: "legacy root answer" },
+    ],
+  };
+  context.state.responses.resp_legacy_2 = {
+    id: "resp_legacy_2",
+    created_at: 2,
+    previous_response_id: "resp_legacy_1",
+    upstream_messages: [
+      { role: "user", content: "LEGACY_CUMULATIVE_ROOT" },
+      { role: "assistant", content: "legacy root answer" },
+      { role: "user", content: "LEGACY_CUMULATIVE_LEAF" },
+    ],
+  };
+
+  const previous = resolvePreviousContext("resp_legacy_2", context);
+  const text = JSON.stringify(previous.upstream_messages);
+  assert.equal((text.match(/LEGACY_CUMULATIVE_ROOT/g) || []).length, 1);
+  assert.ok(text.includes("LEGACY_CUMULATIVE_LEAF"));
+  assert.equal(previous.chain_diagnostic.legacy_record_count, 2);
+}
+
+function testLoopedResponseChainStopsSafely() {
+  const context = { config: { maxStoredResponses: 100 }, state: { responses: {} } };
+  context.state.responses.resp_loop_a = {
+    id: "resp_loop_a",
+    status: "completed",
+    created_at: 1,
+    previous_response_id: "resp_loop_b",
+    turn_messages: [{ role: "user", content: "LOOP_A_SURVIVES_ONCE" }],
+    turn_tool_facts: [],
+  };
+  context.state.responses.resp_loop_b = {
+    id: "resp_loop_b",
+    status: "completed",
+    created_at: 2,
+    previous_response_id: "resp_loop_a",
+    turn_messages: [{ role: "user", content: "LOOP_B_SURVIVES_ONCE" }],
+    turn_tool_facts: [],
+  };
+
+  const previous = resolvePreviousContext("resp_loop_a", context);
+  const text = JSON.stringify(previous.upstream_messages);
+  assert.equal(previous.chain_diagnostic.loop_detected, true);
+  assert.equal(previous.chain_diagnostic.record_count, 2);
+  assert.equal((text.match(/LOOP_A_SURVIVES_ONCE/g) || []).length, 1);
+  assert.equal((text.match(/LOOP_B_SURVIVES_ONCE/g) || []).length, 1);
+}
+
+function testSelfLoopedResponseChainStopsSafely() {
+  const context = { config: { maxStoredResponses: 100 }, state: { responses: {} } };
+  context.state.responses.resp_self_loop = {
+    id: "resp_self_loop",
+    status: "completed",
+    created_at: 1,
+    previous_response_id: "resp_self_loop",
+    turn_messages: [{ role: "user", content: "SELF_LOOP_SURVIVES_ONCE" }],
+    turn_tool_facts: [],
+  };
+
+  const previous = resolvePreviousContext("resp_self_loop", context);
+  const text = JSON.stringify(previous.upstream_messages);
+  assert.equal(previous.chain_diagnostic.loop_detected, true);
+  assert.equal(previous.chain_diagnostic.record_count, 1);
+  assert.equal((text.match(/SELF_LOOP_SURVIVES_ONCE/g) || []).length, 1);
+}
+
 function testChainDepthIsIndependentFromStorageSoftLimit() {
   const context = { config: { maxStoredResponses: 10 }, state: { responses: {} } };
   let previousId = null;
@@ -234,6 +323,29 @@ function testChainDepthIsIndependentFromStorageSoftLimit() {
   assert.equal(previous.chain_diagnostic.record_count, 140);
   assert.equal(previous.chain_diagnostic.truncated, false);
   assert.ok(JSON.stringify(previous.upstream_messages).includes("chain user 0"));
+}
+
+function testDefaultChainDepthHasSafetyCap() {
+  const context = { config: { maxStoredResponses: 20000, maxResponseChainDepth: 10000 }, state: { responses: {} } };
+  let previousId = null;
+  for (let index = 0; index < 10025; index += 1) {
+    const id = "resp_default_cap_" + index;
+    context.state.responses[id] = {
+      id,
+      status: "completed",
+      created_at: index,
+      previous_response_id: previousId,
+      turn_messages: [{ role: "user", content: "default capped chain user " + index }],
+      turn_tool_facts: [],
+    };
+    previousId = id;
+  }
+
+  const previous = resolvePreviousContext(previousId, context);
+  assert.equal(previous.chain_diagnostic.record_count, 10000);
+  assert.equal(previous.chain_diagnostic.truncated, true);
+  assert.ok(JSON.stringify(previous.upstream_messages).includes("default capped chain user 10024"));
+  assert.ok(!JSON.stringify(previous.upstream_messages).includes("default capped chain user 0"));
 }
 
 function testOptionalChainDepthCapStillWorks() {

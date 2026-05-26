@@ -16,11 +16,12 @@ This release focuses on high-fidelity agent context, safer request state persist
 - Added Flash and Pro billing rate categories with separate cached-input, cache-miss-input, and output rates.
 - Added structured handling for Codex typed image/tool content so screenshot payloads keep stable metadata without injecting base64 into model context.
 - Added proxy-hosted community tool execution support through an explicit `executeProxyTool()` hook.
-- Added direct fidelity and agent-state test coverage for compaction, context retention, interrupted turns, catalog seed generation, desktop port isolation, and native tool flows.
+- Added direct fidelity and agent-state test coverage for compaction, context retention, interrupted turns, legacy response state, catalog seed generation, desktop port isolation, and native tool flows.
 
 ### Changed
 
 - Default context handling now uses the model catalog context budget instead of a fixed short `60 messages / 120 KB` history window.
+- Response-chain reconstruction now has a high default safety cap to protect damaged state files while still allowing explicit unlimited debugging via `MAX_RESPONSE_CHAIN_DEPTH=0`.
 - Assistant self-descriptions are treated as lower-priority evidence than user messages, tool calls, tool results, file facts, MCP facts, and compacted verified facts.
 - Interrupted or failed responses no longer contribute incomplete assistant final text to future context.
 - Official DeepSeek requests use `/v1/chat/completions` compatibility routing by default, while custom upstream URLs remain unaffected.
