@@ -94,7 +94,7 @@ function testToolProtocolValidityForIncompleteCalls() {
 }
 
 function testStorageCompactsLargeToolOutput() {
-  const bigOutput = "sk-1234567890abcdefghijklmnop\n" + "A".repeat(200000);
+  const bigOutput = "token:TEST_SECRET_TOKEN_SHOULD_BE_REDACTED\n" + "A".repeat(200000);
   const input = normalizeInput([
     { type: "function_call", id: "fc_1", call_id: "call_1", name: "read_file_range", arguments: "{\"path\":\"a.txt\"}" },
     { type: "function_call_output", id: "out_1", call_id: "call_1", output: bigOutput },
@@ -107,7 +107,7 @@ function testStorageCompactsLargeToolOutput() {
   const stored = buildStorageMessages(compiled, [], {});
   const storedText = JSON.stringify(stored);
   assert.ok(storedText.length < 120000, "storage should be compacted");
-  assert.ok(!storedText.includes("sk-1234567890abcdefghijklmnop"), "storage should redact API-key shaped values");
+  assert.ok(!storedText.includes("TEST_SECRET_TOKEN_SHOULD_BE_REDACTED"), "storage should redact API-key shaped values");
   assert.ok(storedText.includes("sha256="), "storage should include deterministic truncation hash");
 }
 
@@ -588,13 +588,13 @@ function testLargeBase64MessageContentIsOmitted() {
 
 function testContextDiagnosticRedactsSecrets() {
   const sanitized = sanitizeDebugValue({
-    prompt: "token sk-1234567890abcdefghijklmnop and Bearer abcdef1234567890",
-    nested: { api_key: "sk-22222222222222222222" },
+    prompt: "token:TEST_SECRET_TOKEN_SHOULD_BE_REDACTED and Bearer TEST_BEARER_TOKEN_SHOULD_BE_REDACTED",
+    nested: { api_key: "TEST_API_KEY_SHOULD_BE_REDACTED" },
   });
   const text = JSON.stringify(sanitized);
-  assert.ok(!text.includes("sk-1234567890abcdefghijklmnop"));
-  assert.ok(!text.includes("Bearer abcdef1234567890"));
-  assert.ok(!text.includes("sk-22222222222222222222"));
+  assert.ok(!text.includes("TEST_SECRET_TOKEN_SHOULD_BE_REDACTED"));
+  assert.ok(!text.includes("TEST_BEARER_TOKEN_SHOULD_BE_REDACTED"));
+  assert.ok(!text.includes("TEST_API_KEY_SHOULD_BE_REDACTED"));
 }
 
 function testThinkingModeAndVisibilityAreSeparate() {
