@@ -34,6 +34,7 @@ function cleanupStaleProxyProcesses(options = {}) {
       includeProxy,
       includeManager,
       includeDesktop,
+      trustPortOwners: options.trustPortOwners === true,
       reason: "port",
     });
   }
@@ -66,7 +67,7 @@ function cleanupStaleProxyProcesses(options = {}) {
 function addTargetIfConfirmed(targets, proc, options) {
   if (!proc || !proc.pid) return;
   const type = classifyProxyProcess(proc, options.rootDir, {
-    trustedSignal: options.reason === "runtime" || options.reason === "port",
+    trustedSignal: options.reason === "runtime" || (options.reason === "port" && options.trustPortOwners === true),
   });
   if (!type) return;
   if (type === "proxy" && !options.includeProxy) return;

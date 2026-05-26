@@ -43,6 +43,7 @@ This release focuses on high-fidelity agent context, safer request state persist
 - Fixed official DeepSeek endpoint compatibility regressions affecting users whose network or deployment expected `/v1/chat/completions`.
 - Fixed screenshot and image tool results being stringified into large `data:image/...;base64` text blocks, which could destroy prompt-cache continuity and inflate request cost.
 - Fixed unknown proxy-hosted tools falling through to Web Search execution; unsupported hosted tools now return an explicit protocol error.
+- Fixed stale-process cleanup so an unrelated process occupying the proxy port is not treated as a trusted CodeSeeX process on POSIX systems.
 - Fixed Codex checkpoint compaction logging so `/compact`-style requests appear as context compaction start/completion events instead of ordinary conversation requests.
 - Fixed client settings ordering, sampling temperature styling, and related tray localization gaps.
 
