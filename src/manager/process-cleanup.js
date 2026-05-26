@@ -85,6 +85,7 @@ function addTargetIfConfirmed(targets, proc, options) {
 }
 
 function classifyProxyProcess(proc, rootDir, options = {}) {
+  if (isShellProcess(proc)) return null;
   const root = normalizePath(rootDir);
   const commandLine = normalizeText(proc.commandLine || "");
   const executablePath = normalizePath(proc.executablePath || "");
@@ -106,6 +107,21 @@ function classifyProxyProcess(proc, rootDir, options = {}) {
   }
 
   return null;
+}
+
+function isShellProcess(proc) {
+  const name = path.basename(String(proc.name || proc.executablePath || "")).toLowerCase();
+  return name === "sh"
+    || name === "bash"
+    || name === "zsh"
+    || name === "dash"
+    || name === "fish"
+    || name === "cmd"
+    || name === "cmd.exe"
+    || name === "powershell"
+    || name === "powershell.exe"
+    || name === "pwsh"
+    || name === "pwsh.exe";
 }
 
 function isProxyCommand(commandLine) {

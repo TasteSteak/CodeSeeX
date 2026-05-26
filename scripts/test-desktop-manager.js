@@ -4,6 +4,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 
+const { classifyProxyProcess } = require("../src/manager/process-cleanup");
 const { startDesktopManager } = require("../src/manager/server");
 
 main().catch((error) => {
@@ -12,6 +13,7 @@ main().catch((error) => {
 });
 
 async function main() {
+  testShellProcessIsNeverClassifiedAsProxy();
   const rootDir = path.resolve(__dirname, "..");
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codeseex-desktop-manager-"));
   const occupiedPort = await occupyRandomPort();
@@ -85,6 +87,25 @@ async function main() {
   }
 
   console.log("Desktop manager port isolation test passed.");
+}
+
+function testShellProcessIsNeverClassifiedAsProxy() {
+  const rootDir = path.resolve(__dirname, "..");
+  const shellProcess = {
+    pid: 123,
+    name: "bash",
+    executablePath: "/usr/bin/bash",
+    commandLine: "bash -e \"node --check " + path.join(rootDir, "src/proxy/server.js") + "\"",
+  };
+  const proxyProcess = {
+    pid: 124,
+    name: "node",
+    executablePath: process.execPath,
+    commandLine: process.execPath + " " + path.join(rootDir, "proxy.js"),
+  };
+
+  assert.equal(classifyProxyProcess(shellProcess, rootDir), null);
+  assert.equal(classifyProxyProcess(proxyProcess, rootDir), "proxy");
 }
 
 async function occupyRandomPort() {

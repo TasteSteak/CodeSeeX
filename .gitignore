@@ -4,12 +4,16 @@ proxy-state.json
 runtime.json
 proxy.env
 scripts/deepseek-agent-smoke.config.json
+scripts/*deepseek*smoke*.json
+scripts/*fidelity*smoke*.json
 node_modules/
 dist/
 out/
 release/
 *.tsbuildinfo
 *.log
+/*.bat
+/*.cmd
 codex/.generated/
 .codeseex-private/
 build/private/
