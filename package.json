@@ -1,0 +1,19 @@
+{
+  "name": "codeseex-next-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/codeseex-ui",
+    "apps/codeseex-desktop"
+  ],
+  "scripts": {
+    "dev:proxy": "cargo run -p codeseex-proxy",
+    "dev:ui": "npm --workspace apps/codeseex-ui run dev",
+    "dev:desktop": "npm --workspace apps/codeseex-desktop run tauri:dev",
+    "start:proxy:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-proxy-windows.ps1",
+    "start:desktop:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-desktop-windows.ps1",
+    "check:windows": "powershell -ExecutionPolicy Bypass -File scripts/check-windows.ps1",
+    "smoke:context:windows": "powershell -ExecutionPolicy Bypass -File scripts/context-fidelity-smoke-windows.ps1",
+    "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && npm --workspace apps/codeseex-ui run check && npm --workspace apps/codeseex-ui run build"
+  }
+}

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="CodeSeeX">
+  <defs>
+    <path id="cloudShape" d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
+    <linearGradient id="leftCloudGradient" x1="1" y1="20" x2="15" y2="6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111922"/>
+      <stop offset="1" stop-color="#283440"/>
+    </linearGradient>
+    <linearGradient id="rightCloudGradient" x1="8" y1="18" x2="23" y2="4" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17212B"/>
+      <stop offset="1" stop-color="#43505D"/>
+    </linearGradient>
+    <linearGradient id="cloudGradient" x1="3.5" y1="20" x2="20.5" y2="4" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#081017"/>
+      <stop offset="0.58" stop-color="#0E151C"/>
+      <stop offset="1" stop-color="#30363D"/>
+    </linearGradient>
+    <linearGradient id="promptMetalGradient" x1="6" y1="9.5" x2="17.5" y2="16.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F8FAFC"/>
+      <stop offset="0.24" stop-color="#B8C0CC"/>
+      <stop offset="0.48" stop-color="#FFFFFF"/>
+      <stop offset="0.72" stop-color="#7B8490"/>
+      <stop offset="1" stop-color="#E2E8F0"/>
+    </linearGradient>
+  </defs>
+  <use href="#cloudShape" transform="translate(0.5 2.15) scale(0.72)" fill="url(#leftCloudGradient)"/>
+  <use href="#cloudShape" transform="translate(5.15 1.15) scale(0.74)" fill="url(#rightCloudGradient)"/>
+  <g transform="translate(1.15 1.85) scale(0.9)">
+    <use href="#cloudShape" fill="url(#cloudGradient)"/>
+  </g>
+  <g transform="translate(6.6 10.6) scale(0.8)" fill="none" stroke="url(#promptMetalGradient)" stroke-width="1.62" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M1.2 1.05 4.18 4.02 1.38 7.05"/>
+    <path d="M7.15 7.08h4.95"/>
+  </g>
+</svg>

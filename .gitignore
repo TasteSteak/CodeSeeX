@@ -1,0 +1,14 @@
+/target/
+/node_modules/
+/dist/
+/.svelte-kit/
+/.tauri/
+/.vite/
+*.log
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+

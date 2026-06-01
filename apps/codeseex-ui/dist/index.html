@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en_us">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeSeeX</title>
+  <link rel="icon" href="/assets/icons/app.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="windowbar">
+    <div class="window-actions" aria-label="Window controls">
+      <button class="window-action window-action-minimize" type="button" data-window-action="minimize" aria-label="Minimize" title="Minimize">
+        <span aria-hidden="true"></span>
+      </button>
+      <button class="window-action window-action-maximize" type="button" data-window-action="maximize" aria-label="Maximize" title="Maximize">
+        <span aria-hidden="true"></span>
+      </button>
+      <button class="window-action window-action-close" type="button" data-window-action="close" aria-label="Close" title="Close">
+        <span aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+
+  <div class="layout-container">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon app-icon" aria-hidden="true"></div>
+        <div class="brand-text">
+          <div class="title" data-product-name>CodeSeeX</div>
+          <div class="subtitle" data-i18n="brandSubtitle">DeepSeek Bridge</div>
+        </div>
+      </div>
+
+      <div class="status-indicator" id="statusPill">
+        <span class="status-dot"></span>
+        <span class="status-text" id="running">Connecting...</span>
+      </div>
+
+      <nav class="nav-menu">
+        <a href="#" class="nav-item active" data-view="console" data-i18n="navConsole">Dashboard</a>
+        <a href="#" class="nav-item" data-view="usage" data-i18n="navUsage">Usage</a>
+        <a href="#" class="nav-item" data-view="logs" data-i18n="navLogs">Logs</a>
+        <a href="#" class="nav-item" data-view="config" data-i18n="navConfig">Settings</a>
+        <a href="#" class="nav-item" data-view="about"><span data-i18n="navAbout">About</span><span class="update-dot" id="aboutUpdateDot" hidden></span></a>
+      </nav>
+
+      <div class="sidebar-footer" data-i18n="sidebarFooter">
+        Unofficial tool for learning and research only.
+        Follow Codex and DeepSeek terms.
+      </div>
+    </aside>
+
+    <main class="workspace view-console" id="workspace">
+      <header class="page-header">
+        <div class="header-titles">
+          <h1 id="pageTitle">Dashboard</h1>
+          <p id="pageSubtitle">Monitor proxy status, latest completed turn, and core runtime metrics.</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-primary" id="startButton" type="button" data-i18n="start">Start</button>
+          <button class="btn btn-secondary" id="restartButton" type="button" data-i18n="restart">Restart</button>
+          <button class="btn btn-danger" id="stopButton" type="button" data-i18n="stop">Stop</button>
+        </div>
+      </header>
+
+      <section class="metrics-grid dashboard-metrics">
+        <div class="metric-card">
+          <span class="metric-label" id="pidLabel" data-i18n="proxyPid">Proxy process PID</span>
+          <span class="metric-value" id="pid">-</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label" data-i18n="activeRequests">Active requests</span>
+          <span class="metric-value" id="activeRequests">0</span>
+        </div>
+      </section>
+
+      <section class="panels-grid">
+        <div class="dashboard-panel dashboard-layout">
+          <div class="dashboard-left">
+            <div class="panel">
+              <div class="panel-header">
+                <h2 data-i18n="recentTurn">Latest completed turn</h2>
+              </div>
+              <div class="panel-body info-list selectable" id="lastTurnCard">
+                <div class="info-row"><span data-i18n="noTurn">No completed turn</span><strong>-</strong></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h2 data-i18n="runtimeStats">Runtime stats</h2>
+              </div>
+              <div class="panel-body info-list selectable">
+                <div class="info-row"><span data-i18n="completedTurns">Completed turns</span><strong id="completedTurns">0</strong></div>
+                <div class="info-row"><span data-i18n="failedTurns">Failed requests</span><strong id="failedTurns">0</strong></div>
+                <div class="info-row"><span data-i18n="lastCompletedAt">Last completed at</span><strong id="lastCompletedAt">-</strong></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel balance-panel dashboard-balance-panel">
+            <div class="panel-header"><h2 class="icon-heading" id="balanceTitle"><span class="heading-icon heading-icon-coin" aria-hidden="true"></span><span data-i18n="balanceTitle">Balance</span></h2></div>
+            <div class="panel-body info-list selectable">
+              <div class="info-row"><span id="balanceAvailabilityLabel" data-i18n="balanceAvailability">Availability</span><strong id="balanceAvailability">-</strong></div>
+              <div class="info-row"><span id="balanceTotalLabel" data-i18n="balanceTotal">Total balance</span><strong id="balanceTotal">-</strong></div>
+              <div class="info-row"><span id="balanceGrantedLabel" data-i18n="balanceGranted">Granted balance</span><strong id="balanceGranted">-</strong></div>
+              <div class="info-row"><span id="balanceToppedUpLabel" data-i18n="balanceToppedUp">Topped-up balance</span><strong id="balanceToppedUp">-</strong></div>
+              <div class="form-actions">
+                <button class="btn btn-secondary" type="button" id="refreshBalanceButton" data-i18n="balanceRefresh">Refresh balance</button>
+                <span class="muted" id="balanceStatus" data-i18n="balanceUnchecked">Not checked</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="usage-page page-stack">
+          <section class="usage-summary-grid">
+            <div class="metric-card"><span class="metric-label" data-i18n="usageTotalTurns">Total records</span><span class="metric-value selectable" id="usageTotalTurns">0</span></div>
+            <div class="metric-card"><span class="metric-label" data-i18n="usageCacheHitRate">Overall cache hit rate</span><span class="metric-value selectable" id="usageCacheHitRate">-</span></div>
+            <div class="metric-card"><span class="metric-label" data-i18n="averageMs">Average latency</span><span class="metric-value selectable" id="usageAverageMs">-</span></div>
+            <div class="metric-card"><span class="metric-label" data-i18n="totalCost">Estimated total cost</span><span class="metric-value selectable" id="usageTotalCost">CNY 0.0000</span></div>
+          </section>
+
+          <section class="panel usage-detail-panel">
+            <div class="panel-header">
+              <h2 data-i18n="detailRows">Conversation details</h2>
+            </div>
+            <div class="panel-body usage-table-wrap">
+              <table class="usage-table selectable">
+                <thead>
+                  <tr>
+                    <th data-i18n="time">Time</th>
+                    <th data-i18n="model">Model</th>
+                    <th data-i18n="cacheHit">Cache hit</th>
+                    <th data-i18n="cacheMiss">Cache miss</th>
+                    <th data-i18n="output">Output</th>
+                    <th data-i18n="total">Total</th>
+                    <th data-i18n="elapsed">Latency</th>
+                    <th data-i18n="cost">Cost</th>
+                  </tr>
+                </thead>
+                <tbody id="usageRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <div class="log-page page-stack">
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2 data-i18n="eventTrace">Event trace</h2>
+            </div>
+            <div class="panel-body">
+              <div class="log-list selectable" id="logStream"></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="config-page page-stack">
+          <section class="panel config-panel">
+            <div class="panel-header">
+              <div class="config-tabs segmented-control">
+                <input type="radio" name="CONFIG_TAB" id="config_tab_client" value="client" checked>
+                <label for="config_tab_client"><span class="tab-icon tab-icon-client" aria-hidden="true"></span><span data-i18n="configTabClient">Client</span></label>
+                <input type="radio" name="CONFIG_TAB" id="config_tab_proxy" value="proxy">
+                <label for="config_tab_proxy"><span class="tab-icon tab-icon-proxy" aria-hidden="true"></span><span data-i18n="configTabProxy">Proxy</span></label>
+                <input type="radio" name="CONFIG_TAB" id="config_tab_tools" value="tools">
+                <label for="config_tab_tools"><span class="tab-icon tab-icon-tools" aria-hidden="true"></span><span data-i18n="configTabTools">Tools</span></label>
+                <input type="radio" name="CONFIG_TAB" id="config_tab_experimental" value="experimental">
+                <label for="config_tab_experimental"><span class="tab-icon tab-icon-experimental" aria-hidden="true"></span><span data-i18n="configTabExperimental">Experimental</span></label>
+              </div>
+              <div class="config-status-area">
+                <span class="config-restart-text muted" id="restartRequiredBadge" hidden data-i18n="restartRequired">Some changes require restarting the proxy</span>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="config-tab-panel active" data-config-panel="client">
+                <h3 class="config-section-title" data-i18n="personalization">Personalization</h3>
+                <div class="setting-item">
+                  <label data-i18n="theme">Theme</label>
+                  <div class="segmented-control" id="ctrl-theme">
+                    <input type="radio" name="UI_THEME" id="theme_system" value="system" checked>
+                    <label for="theme_system" data-i18n="themeSystem">System</label>
+                    <input type="radio" name="UI_THEME" id="theme_light" value="light">
+                    <label for="theme_light" data-i18n="themeLight">Light</label>
+                    <input type="radio" name="UI_THEME" id="theme_dark" value="dark">
+                    <label for="theme_dark" data-i18n="themeDark">Dark</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label for="UI_LANGUAGE" data-i18n="language">Language</label>
+                  <select id="UI_LANGUAGE" class="inline-control" style="width: 180px;"></select>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <span data-i18n="showThinking">Show thinking</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="SHOW_THINKING">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <h3 class="config-section-title" data-i18n="other">Other</h3>
+                <div class="setting-item">
+                  <span>
+                    <span data-i18n="autoStart">Start at login</span>
+                    <small class="muted" data-i18n="autoStartHint">Starts in the tray without opening the main window.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="AUTO_START">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="closeBehavior">Close behavior</label>
+                  <div class="segmented-control" id="ctrl-close-behavior">
+                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_exit" value="exit" checked>
+                    <label for="close_exit" data-i18n="closeBehaviorExit">Exit</label>
+                    <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_tray" value="tray">
+                    <label for="close_tray" data-i18n="closeBehaviorTray">Minimize to tray</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="logRetention">Log retention</label>
+                  <div class="segmented-control" id="ctrl-log-retention">
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_1" value="1">
+                    <label for="log_retention_1" data-i18n="logRetention1d">1 day</label>
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_3" value="3">
+                    <label for="log_retention_3" data-i18n="logRetention3d">3 days</label>
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_7" value="7" checked>
+                    <label for="log_retention_7" data-i18n="logRetention7d">7 days</label>
+                    <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_30" value="30">
+                    <label for="log_retention_30" data-i18n="logRetention30d">30 days</label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="config-tab-panel" data-config-panel="proxy">
+                <h3 class="config-section-title" data-i18n="proxyConnection">Connection</h3>
+                <div class="setting-item">
+                  <span>
+                    <label for="DEEPSEEK_BASE_URL" data-i18n="deepseekBaseUrl">DeepSeek upstream URL</label>
+                    <small class="muted" data-i18n="deepseekBaseUrlHint">Leave blank to use the official DeepSeek API. For self-hosted deployments, enter your OpenAI-compatible endpoint, for example http://127.0.0.1:8000/v1.</small>
+                  </span>
+                  <input type="url" id="DEEPSEEK_BASE_URL" class="inline-control wide-control" spellcheck="false" placeholder="https://api.deepseek.com/">
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <span>
+                    <label for="PROXY_PORT" data-i18n="proxyListenPort">CodeSeeX listen port</label>
+                    <small class="muted" data-i18n="proxyListenPortHint">Used by the local Codex API endpoint. Restart the proxy after changing it.</small>
+                  </span>
+                  <input type="number" id="PROXY_PORT" class="inline-control" min="1" max="65535" step="1" style="width: 120px;">
+                </div>
+                <div class="setting-divider"></div>
+
+                <h3 class="config-section-title" data-i18n="modelBehavior">Model behavior</h3>
+                <div class="setting-item">
+                  <label data-i18n="upstreamModel">Upstream model</label>
+                  <div class="segmented-control" id="ctrl-upstream-model">
+                    <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_default" value="default" checked>
+                    <label for="model_default" data-i18n="modelDefault">Default</label>
+                    <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_flash" value="deepseek-v4-flash">
+                    <label for="model_flash" data-i18n="modelFlash">Flash</label>
+                    <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_pro" value="deepseek-v4-pro">
+                    <label for="model_pro" data-i18n="modelPro">Pro</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="thinkingMode">Thinking mode</label>
+                  <div class="segmented-control" id="ctrl-thinking">
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_auto" value="auto" checked>
+                    <label for="tk_auto" data-i18n="thinkingAuto">Auto</label>
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_enabled" value="enabled">
+                    <label for="tk_enabled" data-i18n="thinkingEnabled">Force on</label>
+                    <input type="radio" name="DEEPSEEK_THINKING" id="tk_disabled" value="disabled">
+                    <label for="tk_disabled" data-i18n="thinkingDisabled">Force off</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <label data-i18n="temperaturePreset">Sampling temperature</label>
+                  <div class="segmented-control compact-segmented-control" id="ctrl-temperature-preset">
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_default" value="default" checked>
+                    <label for="temp_default" data-i18n="temperatureDefault">Default</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_strict" value="strict">
+                    <label for="temp_strict" data-i18n="temperatureStrict">Strict</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_balanced" value="balanced">
+                    <label for="temp_balanced" data-i18n="temperatureBalanced">Balanced</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_general" value="general">
+                    <label for="temp_general" data-i18n="temperatureGeneral">General</label>
+                    <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_creative" value="creative">
+                    <label for="temp_creative" data-i18n="temperatureCreative">Creative</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <h3 class="config-section-title" data-i18n="usageDisplay">Usage display</h3>
+                <div class="setting-item setting-item-block">
+                  <span>
+                    <span data-i18n="billingMode">Billing rates</span>
+                    <small class="muted" data-i18n="billingUnit">Unit: CNY / 1M tokens</small>
+                  </span>
+
+                  <div class="billing-rate-grid mt-12">
+                    <div class="billing-rate-card">
+                      <div class="billing-card-header">
+                        <div class="billing-model-meta">
+                          <strong data-i18n="billingFlash">Flash</strong>
+                          <small class="muted" data-i18n="billingFlashHint">Fast, low-cost requests</small>
+                        </div>
+                        <span class="billing-model-badge" data-i18n="billingFlashBadge">Fast</span>
+                      </div>
+                      <div class="billing-row">
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
+                          <input type="number" id="BILLING_FLASH_CACHED_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
+                          <input type="number" id="BILLING_FLASH_CACHE_MISS_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
+                          <input type="number" id="BILLING_FLASH_OUTPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="billing-rate-card">
+                      <div class="billing-card-header">
+                        <div class="billing-model-meta">
+                          <strong data-i18n="billingPro">Pro</strong>
+                          <small class="muted" data-i18n="billingProHint">Agent and complex coding tasks</small>
+                        </div>
+                        <span class="billing-model-badge" data-i18n="billingProBadge">Deep</span>
+                      </div>
+                      <div class="billing-row">
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
+                          <input type="number" id="BILLING_PRO_CACHED_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
+                          <input type="number" id="BILLING_PRO_CACHE_MISS_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
+                          <input type="number" id="BILLING_PRO_OUTPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <h3 class="config-section-title" data-i18n="codexAdapter">Codex adapter</h3>
+                <div class="setting-item">
+                  <label data-i18n="catalogMode">Catalog mode</label>
+                  <div class="segmented-control" id="ctrl-catalog-mode">
+                    <input type="radio" name="CATALOG_MODE" id="catalog_default" value="default" checked>
+                    <label for="catalog_default" data-i18n="catalogModeDefault">Default</label>
+                    <input type="radio" name="CATALOG_MODE" id="catalog_auto" value="auto">
+                    <label for="catalog_auto" data-i18n="catalogModeAuto">Auto</label>
+                    <input type="radio" name="CATALOG_MODE" id="catalog_builtin" value="builtin">
+                    <label for="catalog_builtin" data-i18n="catalogModeBuiltin">Built-in</label>
+                  </div>
+                </div>
+                <section class="config-toml-card">
+                  <div class="config-toml-header">
+                    <h3 data-i18n="configTomlTitle">config.toml configuration</h3>
+                    <span class="copy-status" id="configTomlCopyStatus" aria-live="polite"></span>
+                    <button class="btn btn-secondary icon-only-btn" type="button" id="copyTomlButton" title="Copy">
+                      <span aria-hidden="true"></span>
+                    </button>
+                  </div>
+                  <pre class="toml-snippet config-toml-code selectable" id="configTomlCode">-</pre>
+                  <p class="muted" id="configTomlStatus" data-i18n="codexAdapterMissing">Codex adapter catalog is not ready.</p>
+                </section>
+              </div>
+
+              <div class="config-tab-panel" data-config-panel="tools">
+                <div class="tool-config-list" id="toolConfigList"></div>
+              </div>
+
+              <div class="config-tab-panel" data-config-panel="experimental">
+                <h3 class="config-section-title" data-i18n="experimentalFeatures">Experimental features</h3>
+                <div class="setting-item">
+                  <span>
+                    <span data-i18n="deepseekOfficialV1Compat">Official DeepSeek request path</span>
+                    <small class="muted" data-i18n="deepseekOfficialV1CompatHint">When enabled, official DeepSeek requests use /v1/chat/completions. When disabled, they use /chat/completions. Custom upstream URLs are not affected.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="DEEPSEEK_OFFICIAL_V1_COMPAT">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="about-page page-stack">
+          <section class="panel about-hero">
+            <div class="panel-body about-hero-body">
+              <div class="about-mark app-icon" aria-hidden="true"></div>
+              <div>
+                <span class="eyebrow">Desktop Bridge</span>
+                <h2 id="appProductName" data-product-name>CodeSeeX</h2>
+                <p id="appDescription" data-i18n="productDescription">Local Codex and DeepSeek bridge with a desktop manager.</p>
+                <div class="version-pill" id="appVersion">v-</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="about-grid">
+            <div class="panel about-info-panel">
+              <div class="panel-header"><h2 data-i18n="versionInfo">Version info</h2></div>
+              <div class="panel-body info-list selectable">
+                <div class="info-row"><span data-i18n="appName">App name</span><strong id="appName">-</strong></div>
+                <div class="info-row"><span data-i18n="currentVersion">Version</span><strong id="aboutVersion">-</strong></div>
+                <div class="info-row"><span data-i18n="license">License</span><strong id="appLicense">-</strong></div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header"><h2 data-i18n="projectSupport">Project &amp; support</h2></div>
+              <div class="panel-body about-actions">
+                <button class="btn btn-secondary btn-link-icon" type="button" data-about-action="source"><span aria-hidden="true"></span><span data-i18n="source">View source</span></button>
+                <button class="btn btn-secondary btn-link-icon" type="button" data-about-action="feedback"><span aria-hidden="true"></span><span data-i18n="feedback">Feedback</span></button>
+                <button class="btn btn-secondary btn-link-icon" type="button" data-about-action="license"><span aria-hidden="true"></span><span data-i18n="licenseButton">License</span></button>
+                <button class="btn btn-primary btn-link-icon update-button" type="button" data-about-action="update"><span aria-hidden="true"></span><span data-i18n="checkUpdate">Check updates</span><span class="update-dot" id="updateButtonDot" hidden></span></button>
+                <p class="about-status" id="aboutStatus" data-i18n="ready">Ready.</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="loading-overlay" id="loadingOverlay" hidden>
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <strong id="loadingTitle" data-i18n="busyTitle">Processing</strong>
+      <span id="loadingDetail" data-i18n="busyDetail">Please wait...</span>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
