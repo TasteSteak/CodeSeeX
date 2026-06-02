@@ -347,8 +347,7 @@ fn response_item_is_display_only(item: &Value) -> bool {
 
 fn response_text_is_display_only(text: &str) -> bool {
     let text = text.trim();
-    text.starts_with("---\ncodeseex_display_only:")
-        || text.starts_with("---\n**DeepSeek Thinking**")
+    text.starts_with("**DeepSeek Thinking**")
         || text.starts_with("已使用工具 `")
         || (text.starts_with("已使用 ") && text.contains(" 个工具\n`"))
 }
@@ -796,7 +795,7 @@ mod tests {
             {
                 "type": "message",
                 "role": "assistant",
-                "content": [{ "type": "output_text", "text": "---\n**DeepSeek Thinking**\n> hidden\n---" }]
+                "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> hidden" }]
             },
             {
                 "type": "message",

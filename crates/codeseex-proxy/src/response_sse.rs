@@ -329,18 +329,20 @@ pub(crate) fn thinking_display_added_sse_events(
             "sequence_number": next_sequence(sequence)
         }),
     ));
-    bytes.extend_from_slice(&sse_bytes(
-        "response.output_text.delta",
-        json!({
-            "type": "response.output_text.delta",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": 0,
-            "delta": prefix,
-            "sequence_number": next_sequence(sequence)
-        }),
-    ));
+    if !prefix.is_empty() {
+        bytes.extend_from_slice(&sse_bytes(
+            "response.output_text.delta",
+            json!({
+                "type": "response.output_text.delta",
+                "response_id": response_id,
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "delta": prefix,
+                "sequence_number": next_sequence(sequence)
+            }),
+        ));
+    }
     Bytes::from(bytes)
 }
 

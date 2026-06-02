@@ -108,13 +108,13 @@ fn tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "apply_patch",
-                "description": "Apply a Codex-style patch to files under the configured workspace root. The patch string must use the native apply_patch grammar: begin with *** Begin Patch, end with *** End Patch, and use *** Add File, *** Update File, *** Delete File, optional *** Move to, and exact context lines. Prefer small patches and re-read the target file before retrying after a context mismatch.",
+                "description": "Apply a Codex-style patch to files under the configured workspace root. The patch string must use the native apply_patch grammar: begin with *** Begin Patch, end with *** End Patch, and use *** Add File, *** Update File, or *** Delete File as top-level file operations. To rename or move a file, use *** Update File: <old path> followed immediately by *** Move to: <new path> before any @@, context, removed, or added lines. Prefer small patches and re-read the target file before retrying after a context mismatch.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "patch": {
                             "type": "string",
-                            "description": "Raw patch text. First line must be *** Begin Patch and last line must be *** End Patch. Do not use unified diff headers such as --- or +++."
+                            "description": "Raw patch text. First line must be *** Begin Patch and last line must be *** End Patch. Top-level headers are only *** Add File, *** Update File, and *** Delete File. For rename/move, put *** Move to: <new path> immediately after the *** Update File: <old path> line, before any context or hunk lines. Do not use unified diff headers such as --- or +++."
                         }
                     },
                     "required": ["patch"],
@@ -378,9 +378,11 @@ fn parse_patch(patch: &str) -> Result<Vec<PatchOperation>, String> {
             let mut hunks = Vec::new();
             let mut current = PatchHunk::default();
             let mut move_to = None;
+            let mut seen_hunk_or_change = false;
             while index < lines.len() && !is_patch_header(lines[index]) {
                 let hunk_line = lines[index];
                 if hunk_line.starts_with("@@") {
+                    seen_hunk_or_change = true;
                     if !current.lines.is_empty() {
                         hunks.push(current);
                         current = PatchHunk::default();
@@ -389,6 +391,17 @@ fn parse_patch(patch: &str) -> Result<Vec<PatchOperation>, String> {
                     continue;
                 }
                 if let Some(target) = hunk_line.strip_prefix("*** Move to: ") {
+                    if seen_hunk_or_change || !current.lines.is_empty() {
+                        return Err(
+                            "*** Move to must immediately follow *** Update File before any hunk or context lines."
+                                .to_owned(),
+                        );
+                    }
+                    if move_to.is_some() {
+                        return Err(
+                            "Patch update can contain only one *** Move to line.".to_owned()
+                        );
+                    }
                     move_to = Some(target.trim().to_owned());
                     index += 1;
                     continue;
@@ -396,6 +409,7 @@ fn parse_patch(patch: &str) -> Result<Vec<PatchOperation>, String> {
                 let Some((prefix, text)) = split_patch_line(hunk_line) else {
                     return Err(format!("Invalid update line prefix: {hunk_line}"));
                 };
+                seen_hunk_or_change = true;
                 current.lines.push(match prefix {
                     ' ' => PatchLine::Context(text.to_owned()),
                     '-' => PatchLine::Remove(text.to_owned()),
@@ -1484,6 +1498,40 @@ mod tests {
         assert!(is_executable_tool_enabled("web_search", &[]));
         assert!(is_executable_tool_enabled("list_directory", &enabled));
         assert!(!is_executable_tool_enabled("read_file_range", &enabled));
+    }
+
+    #[test]
+    fn apply_patch_move_to_must_immediately_follow_update_file() {
+        let good = parse_patch(
+            &[
+                "*** Begin Patch",
+                "*** Update File: old.txt",
+                "*** Move to: new.txt",
+                " unchanged",
+                "*** End Patch",
+            ]
+            .join("\n"),
+        )
+        .expect("move immediately after update should parse");
+        match &good[0] {
+            PatchOperation::Update { move_to, .. } => {
+                assert_eq!(move_to.as_deref(), Some("new.txt"));
+            }
+            _ => panic!("expected update operation"),
+        }
+
+        let bad = parse_patch(
+            &[
+                "*** Begin Patch",
+                "*** Update File: old.txt",
+                " unchanged",
+                "*** Move to: new.txt",
+                "*** End Patch",
+            ]
+            .join("\n"),
+        )
+        .expect_err("late move should match native apply_patch rejection");
+        assert!(bad.contains("immediately follow"), "{bad}");
     }
 
     #[test]

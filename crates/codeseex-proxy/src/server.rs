@@ -804,6 +804,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
             let visible_thinking_enabled = show_thinking_enabled(&config);
             let mut completed_tool_iterations = 0_u32;
             let mut tool_loop_diagnostics = ToolLoopDiagnostics::default();
+            let mut thinking_title_emitted = false;
             while let Some(response) = next_response.take() {
                 let iteration = completed_tool_iterations;
                 let turn_item_id = format!("msg_{}", Uuid::new_v4().simple());
@@ -966,7 +967,12 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                                 let current_output_index = output_index;
                                 thinking_output_index = Some(current_output_index);
                                 output_index += 1;
-                                let thinking_prefix = thinking_display_prefix();
+                                let thinking_prefix = if thinking_title_emitted {
+                                    ""
+                                } else {
+                                    thinking_title_emitted = true;
+                                    thinking_display_prefix()
+                                };
                                 thinking_text.push_str(thinking_prefix);
                                 yield thinking_display_added_sse_events(
                                     &response_id,
@@ -1650,6 +1656,7 @@ mod tests {
             .to_owned()
         } else {
             concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"after tool\"}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"content\":\"directory checked\"}}],\"usage\":{\"prompt_tokens\":10,\"prompt_cache_hit_tokens\":4,\"completion_tokens\":2,\"total_tokens\":12}}\n\n",
                 "data: [DONE]\n\n"
             )
@@ -2301,6 +2308,13 @@ mod tests {
         );
         assert!(body.contains("DeepSeek Thinking"), "{body}");
         assert!(body.contains("codeseex_display_only"), "{body}");
+        assert_eq!(
+            body.matches("\"delta\":\"**DeepSeek Thinking**\\n\"")
+                .count(),
+            1,
+            "{body}"
+        );
+        assert!(body.contains("after tool"), "{body}");
         assert!(body.contains("已使用工具 `list_directory`"), "{body}");
         assert!(body.contains("\"type\":\"proxy_tool_call\""), "{body}");
         assert!(body.contains("directory checked"), "{body}");
@@ -2313,14 +2327,14 @@ mod tests {
         let reasoning_done = body
             .find("response.reasoning_summary_text.done")
             .expect("reasoning should close before tool display");
-        let thinking_done = body
+        let thinking_added = body
             .find("\"codeseex_display_only\":\"thinking_markdown\"")
-            .expect("thinking display should close before tool display");
+            .expect("thinking display should be emitted before tool display");
         let proxy_tool = body
             .find("\"type\":\"proxy_tool_call\"")
             .expect("proxy tool item should be emitted");
         assert!(reasoning_done < proxy_tool, "{body}");
-        assert!(thinking_done < proxy_tool, "{body}");
+        assert!(thinking_added < proxy_tool, "{body}");
 
         let requests = fake_state
             .requests
@@ -2793,6 +2807,13 @@ mod tests {
         assert!(body.contains("*** Begin Patch"), "{body}");
         assert!(!body.contains("patch-ok"), "{body}");
         assert!(body.contains("encrypted_content"), "{body}");
+        let thinking_done = body
+            .find("response.output_text.done")
+            .expect("thinking display should close before native tool completion");
+        let completed = body
+            .find("response.completed")
+            .expect("stream should complete");
+        assert!(thinking_done < completed, "{body}");
         assert!(
             !patch_file.exists(),
             "proxy must not execute native apply_patch"

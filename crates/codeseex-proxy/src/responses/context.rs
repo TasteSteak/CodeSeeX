@@ -245,9 +245,7 @@ fn response_item_is_display_only(item: &Value) -> bool {
 
 fn response_text_is_display_only(text: &str) -> bool {
     let text = text.trim();
-    if text.starts_with("---\ncodeseex_display_only:")
-        || text.starts_with("---\n**DeepSeek Thinking**")
-        || text.starts_with("**DeepSeek Thinking**")
+    if text.starts_with("**DeepSeek Thinking**")
         || text.starts_with("\u{5df2}\u{4f7f}\u{7528}\u{5de5}\u{5177} `")
         || text.starts_with("\u{4f7f}\u{7528}\u{5de5}\u{5177} `")
         || (text.starts_with("\u{5df2}\u{4f7f}\u{7528} ")
@@ -255,9 +253,7 @@ fn response_text_is_display_only(text: &str) -> bool {
     {
         return true;
     }
-    text.starts_with("---\ncodeseex_display_only:")
-        || text.starts_with("---\n**DeepSeek Thinking**")
-        || text.starts_with("宸蹭娇鐢ㄥ伐鍏?`")
+    text.starts_with("宸蹭娇鐢ㄥ伐鍏?`")
         || (text.starts_with("宸蹭娇鐢?") && text.contains(" 涓伐鍏穃n`"))
 }
 
@@ -445,10 +441,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_only_detection_accepts_legacy_and_current_thinking_markdown() {
-        assert!(response_text_is_display_only(
-            "---\n**DeepSeek Thinking**\n> old format\n---"
-        ));
+    fn display_only_detection_accepts_current_thinking_markdown() {
         assert!(response_text_is_display_only(
             "**DeepSeek Thinking**\n> current format"
         ));

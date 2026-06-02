@@ -264,6 +264,13 @@ fn normalize_apply_patch_response_input(arguments: &str) -> String {
     if let Some(input) = value.get("input").and_then(Value::as_str) {
         return normalize_patch_newlines(input);
     }
+    if let Some(command) = value.get("command").and_then(Value::as_array) {
+        if command.first().and_then(Value::as_str) == Some("apply_patch") {
+            if let Some(patch) = command.get(1).and_then(Value::as_str) {
+                return normalize_patch_newlines(patch);
+            }
+        }
+    }
     normalize_patch_newlines(arguments)
 }
 
@@ -291,6 +298,25 @@ mod tests {
         assert_eq!(item["name"], "apply_patch");
         assert_eq!(item["call_id"], "call_patch");
         assert_eq!(item["input"], "*** Begin Patch\n*** End Patch");
+    }
+
+    #[test]
+    fn apply_patch_command_arguments_map_to_raw_native_input() {
+        let patch = [
+            "*** Begin Patch",
+            "*** Update File: old.txt",
+            "*** Move to: new.txt",
+            "*** End Patch",
+        ]
+        .join("\n");
+        let item = native_apply_patch_response_item_from_chat_call(&call(
+            "call_patch",
+            "apply_patch",
+            &json!({ "command": ["apply_patch", patch] }).to_string(),
+        ));
+
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["input"], patch);
     }
 
     #[test]
