@@ -40,7 +40,52 @@ pub(crate) fn web_search_call_output_response_item(call: &ChatToolCall, output: 
 }
 
 pub(crate) fn normalize_patch_newlines(value: &str) -> String {
-    value.replace("\r\n", "\n").replace('\r', "\n")
+    normalize_unified_hunk_headers(&value.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn normalize_unified_hunk_headers(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for (index, line) in value.split('\n').enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        if let Some(normalized) = normalize_unified_hunk_header(line) {
+            output.push_str(&normalized);
+        } else {
+            output.push_str(line);
+        }
+    }
+    output
+}
+
+fn normalize_unified_hunk_header(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (_old_range, rest) = take_unified_range(rest)?;
+    let rest = rest.strip_prefix(" +")?;
+    let (_new_range, rest) = take_unified_range(rest)?;
+    let tail = rest.strip_prefix(" @@")?.trim_start();
+    if tail.is_empty() {
+        Some("@@".to_owned())
+    } else {
+        Some(format!("@@ {tail}"))
+    }
+}
+
+fn take_unified_range(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.as_bytes();
+    let mut end = take_ascii_digits(bytes, 0)?;
+    if bytes.get(end) == Some(&b',') {
+        end = take_ascii_digits(bytes, end + 1)?;
+    }
+    Some((&value[..end], &value[end..]))
+}
+
+fn take_ascii_digits(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut end = start;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    (end > start).then_some(end)
 }
 
 fn flush_proxy_tool_group(output: &mut Vec<Value>, proxy_group: &mut Vec<Value>) {
@@ -303,6 +348,32 @@ mod tests {
         assert_eq!(item["name"], "apply_patch");
         assert_eq!(item["call_id"], "call_patch");
         assert_eq!(item["input"], "*** Begin Patch\n*** End Patch");
+    }
+
+    #[test]
+    fn apply_patch_normalizes_unified_nm_hunk_headers() {
+        let item = native_apply_patch_response_item_from_chat_call(&call(
+            "call_patch",
+            "apply_patch",
+            r#"{"patch":"*** Begin Patch\n*** Update File: src/main.rs\n@@ -10,2 +10,3 @@ fn main\n old\n+new\n*** End Patch"}"#,
+        ));
+
+        assert_eq!(
+            item["input"],
+            "*** Begin Patch\n*** Update File: src/main.rs\n@@ fn main\n old\n+new\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn apply_patch_normalizes_bare_unified_nm_hunk_headers() {
+        let input = normalize_patch_newlines(
+            "*** Begin Patch\r\n*** Update File: src/lib.rs\r\n@@ -1 +1,2 @@\r\n old\r\n+new\r\n*** End Patch",
+        );
+
+        assert_eq!(
+            input,
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n old\n+new\n*** End Patch"
+        );
     }
 
     #[test]

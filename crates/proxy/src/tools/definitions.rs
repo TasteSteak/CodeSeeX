@@ -56,7 +56,7 @@ fn codex_native_tool_definition(id: &str) -> Option<Value> {
                     "properties": {
                         "patch": {
                             "type": "string",
-                            "description": "Raw apply_patch text. Use exactly one patch document: a single *** Begin Patch, then one or more *** Add File / *** Update File / *** Delete File operations for all files, then a single *** End Patch. For move/rename, use *** Update File: old path followed immediately by *** Move to: new path before hunks."
+                            "description": "Raw apply_patch text. Use exactly one patch document: a single *** Begin Patch, then one or more *** Add File / *** Update File / *** Delete File operations for all files, then a single *** End Patch. For move/rename, use *** Update File: old path followed immediately by *** Move to: new path before hunks. Standard unified hunk headers like @@ -10,2 +10,3 @@ are accepted and normalized to native Codex @@ headers."
                         }
                     },
                     "required": ["patch"],
