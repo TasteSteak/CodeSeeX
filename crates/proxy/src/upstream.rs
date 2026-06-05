@@ -1,4 +1,3 @@
-use codeseex_core::codex_auth::read_codex_auth_api_key;
 use codeseex_core::config::UpstreamConfig;
 use codeseex_core::urls::chat_completions_url;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -20,7 +19,7 @@ pub async fn post_chat_completions(
         HeaderValue::from_static("application/json, text/event-stream"),
     );
 
-    if let Some(auth) = resolve_authorization_header(upstream, inbound_auth) {
+    if let Some(auth) = resolve_authorization_header(upstream, inbound_auth, &payload) {
         if let Ok(value) = HeaderValue::from_str(&auth) {
             headers.insert(AUTHORIZATION, value);
         }
@@ -37,15 +36,25 @@ pub async fn post_chat_completions(
 fn resolve_authorization_header(
     upstream: &UpstreamConfig,
     inbound_auth: Option<&str>,
+    payload: &Value,
 ) -> Option<String> {
-    inbound_auth
+    upstream
+        .api_key
+        .as_deref()
         .and_then(format_bearer_header)
-        .or_else(|| upstream.api_key.as_deref().and_then(format_bearer_header))
         .or_else(|| {
-            read_codex_auth_api_key()
-                .as_deref()
-                .and_then(format_bearer_header)
+            (!payload_looks_like_codex_app_request(payload))
+                .then(|| inbound_auth.and_then(format_bearer_header))
+                .flatten()
         })
+}
+
+fn payload_looks_like_codex_app_request(payload: &Value) -> bool {
+    payload.get("client_metadata").is_some()
+        || payload.get("prompt_cache_key").is_some()
+        || payload
+            .pointer("/metadata/x-codex-installation-id")
+            .is_some()
 }
 
 fn format_bearer_header(value: &str) -> Option<String> {
@@ -74,11 +83,30 @@ mod tests {
     }
 
     #[test]
-    fn inbound_authorization_takes_precedence() {
+    fn inbound_authorization_is_not_forwarded_for_codex_app_payloads() {
         assert_eq!(
             resolve_authorization_header(
-                &upstream_with_key(Some("configured-key")),
-                Some("Bearer inbound-key")
+                &upstream_with_key(None),
+                Some("Bearer inbound-key"),
+                &serde_json::json!({
+                    "client_metadata": {
+                        "x-codex-installation-id": "codex-install"
+                    },
+                    "prompt_cache_key": "thread"
+                })
+            )
+            .as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn inbound_authorization_can_authenticate_plain_external_clients() {
+        assert_eq!(
+            resolve_authorization_header(
+                &upstream_with_key(None),
+                Some("Bearer inbound-key"),
+                &serde_json::json!({ "input": "private smoke" })
             )
             .as_deref(),
             Some("Bearer inbound-key")
@@ -88,13 +116,21 @@ mod tests {
     #[test]
     fn configured_key_accepts_raw_or_bearer_form() {
         assert_eq!(
-            resolve_authorization_header(&upstream_with_key(Some("configured-key")), None)
-                .as_deref(),
+            resolve_authorization_header(
+                &upstream_with_key(Some("configured-key")),
+                None,
+                &serde_json::json!({})
+            )
+            .as_deref(),
             Some("Bearer configured-key")
         );
         assert_eq!(
-            resolve_authorization_header(&upstream_with_key(Some("Bearer configured-key")), None)
-                .as_deref(),
+            resolve_authorization_header(
+                &upstream_with_key(Some("Bearer configured-key")),
+                None,
+                &serde_json::json!({})
+            )
+            .as_deref(),
             Some("Bearer configured-key")
         );
     }

@@ -21,7 +21,7 @@ M1 proxy loop is in place:
 - Serve `/v1/models`, `/v1/chat/completions`, `/v1/responses`, `/api/status`, and `/api/codex-adapter/generate`.
 - Forward to official DeepSeek or a custom OpenAI-compatible upstream.
 - Record request lifecycle and events in SQLite.
-- Rebuild completed `previous_response_id` chains from SQLite state.
+- Bridge completed `previous_response_id` chains only when Codex actually uses server-side chaining; Codex full-context requests are not duplicated as durable transcripts.
 
 M2 desktop management has started:
 
@@ -77,7 +77,7 @@ On Windows, use the helper script when working from a normal PowerShell session:
 .\scripts\start-desktop-windows.ps1
 ```
 
-The scripts load MSVC Build Tools, keep Cargo caches on `D:\DevTools\CodeSeeXNext` when available, and check or launch the Rust/Tauri workspace. The desktop UI is served from `apps/ui/public` through Tauri's custom protocol; there is no Vite dev server in the normal workflow.
+The scripts load MSVC Build Tools, import `.env` when present, keep Cargo caches on `D:\DevTools\CodeSeeXNext` when available, and check or launch the Rust/Tauri workspace. The desktop UI is served from `apps/ui/public` through Tauri's custom protocol; there is no Vite dev server in the normal workflow.
 
 For a quick desktop smoke test from Explorer or `cmd.exe`, run:
 

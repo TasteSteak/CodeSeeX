@@ -5,7 +5,6 @@ use crate::config_payload::{
 use crate::http_utils::{config_version, is_newer_version, normalize_version_label, now_seconds};
 use crate::tools::registry::{enabled_tool_ids, tool_registry, tool_settings};
 use codeseex_core::catalog::{build_codeseex_catalog, codex_toml_snippet, write_catalog_atomic};
-use codeseex_core::codex_auth::read_codex_auth_api_key;
 use codeseex_core::models::available_models;
 use codeseex_core::urls::balance_url;
 use codeseex_core::{AppConfig, UserConfig};
@@ -363,7 +362,13 @@ impl ManagerRuntime {
 
     pub async fn balance(&self) -> ManagerJsonResponse {
         let config = self.active_config();
-        let Some(api_key) = read_codex_auth_api_key() else {
+        let Some(api_key) = config
+            .upstream
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             return ok(json!({
                 "ok": false,
                 "code": "missing_api_key",

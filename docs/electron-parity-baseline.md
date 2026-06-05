@@ -50,8 +50,8 @@ Regression guard:
 
 Old behavior:
 
-- The balance panel reads the API key from Codex `auth.json`, not from a separately typed CodeSeeX secret.
-- Auth lookup supports `CODEX_AUTH_JSON` / `CODEX_AUTH_FILE`, `CODEX_HOME/auth.json`, `%USERPROFILE%\.codex\auth.json`, and `%APPDATA%\codex\auth.json`.
+- The balance panel reads the API key from CodeSeeX upstream config / `DEEPSEEK_API_KEY`.
+- Codex `auth.json` is owned by Codex/OpenAI and must not be used as the DeepSeek/custom upstream credential source.
 - The balance URL is derived from the configured upstream base URL by stripping a trailing `/v1` and appending `/user/balance`.
 - Official DeepSeek therefore uses `https://api.deepseek.com/user/balance`, while custom/self-hosted upstream keys are not accidentally sent to the official host.
 - The manager API returns a stable JSON body for success and failure so the UI can render a normal unavailable state.
@@ -59,7 +59,7 @@ Old behavior:
 Regression guard:
 
 - A configured custom base URL like `http://127.0.0.1:9000/v1` must query `http://127.0.0.1:9000/user/balance`.
-- The Authorization header for balance checks must come from Codex `auth.json` when available.
+- The Authorization header for balance checks must come from CodeSeeX upstream config / `DEEPSEEK_API_KEY`.
 - Balance failures should return `{ ok: false, code, message }` rather than surfacing as a UI transport crash.
 
 ## Tool Declaration Rules

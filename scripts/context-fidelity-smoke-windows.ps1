@@ -184,7 +184,7 @@ try {
     throw "proxy did not become ready on $ProxyPort"
   }
 
-  Write-Step "checking balance URL and auth.json key source"
+  Write-Step "checking balance URL and CodeSeeX API key source"
   $balance = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$ProxyPort/api/deepseek/balance" -TimeoutSec 15
   if (-not $balance.ok) {
     throw "balance query failed: $($balance | ConvertTo-Json -Compress)"
@@ -196,8 +196,8 @@ try {
   if ($balanceRequest.path -ne "/user/balance") {
     throw "balance URL should strip trailing /v1; got $($balanceRequest.path)"
   }
-  if ($balanceRequest.authorization -ne "Bearer auth-json-test-key") {
-    throw "balance query should use CODEX auth.json key; got $($balanceRequest.authorization)"
+  if ($balanceRequest.authorization -ne "Bearer test-key") {
+    throw "balance query should use CodeSeeX DEEPSEEK_API_KEY and ignore Codex auth.json; got $($balanceRequest.authorization)"
   }
   if ($balance.balance_infos[0].total_balance -ne "8.8") {
     throw "balance response was not normalized correctly"

@@ -63,7 +63,7 @@ This checklist is the migration guardrail for replacing the Electron implementat
 - Language selection supports system, English, and Chinese at minimum.
 - Dark/light theme boundaries remain visible.
 - Logs distinguish normal conversation requests from context compaction requests.
-- Balance query reads Codex auth when available and respects custom upstream limitations.
+- Balance query reads CodeSeeX upstream config / `DEEPSEEK_API_KEY` and must not use Codex `auth.json`.
 - Update checks are silent and red-dot-ready, with no automatic download.
 - Packaging emits only the intended installer artifacts.
 

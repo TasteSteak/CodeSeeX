@@ -11,6 +11,36 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $LogDir = Join-Path $DevRoot "Logs"
 
+function Import-CodeSeeXDotEnv {
+  param([string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return
+  }
+
+  Get-Content -LiteralPath $Path | ForEach-Object {
+    $line = $_.Trim()
+    if (-not $line -or $line.StartsWith("#") -or -not $line.Contains("=")) {
+      return
+    }
+    $parts = $line.Split("=", 2)
+    $name = $parts[0].Trim()
+    $value = $parts[1].Trim()
+    if (-not $name -or [Environment]::GetEnvironmentVariable($name, "Process")) {
+      return
+    }
+    if (
+      ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+      ($value.StartsWith("'") -and $value.EndsWith("'"))
+    ) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+    [Environment]::SetEnvironmentVariable($name, $value, "Process")
+  }
+}
+
+Import-CodeSeeXDotEnv (Join-Path $RepoRoot ".env")
+
 $env:CARGO_HOME = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $DevRoot "Cargo" }
 $env:CARGO_TARGET_DIR = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $DevRoot "CargoTarget" }
 $env:TEMP = Join-Path $DevRoot "Temp"
