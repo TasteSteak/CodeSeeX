@@ -103,12 +103,13 @@ where
                 Some(&json!({
                     "log_retention_days": maintenance.log_retention_days,
                     "deleted_events": maintenance.deleted_events,
-                    "sanitized_requests": maintenance.sanitized_requests,
-                    "request_sanitize_batches": maintenance.request_sanitize_batches,
-                    "request_sanitize_limit_reached": maintenance.request_sanitize_limit_reached
-                })),
-            )
-            .await;
+                                        "sanitized_requests": maintenance.sanitized_requests,
+                                        "request_sanitize_batches": maintenance.request_sanitize_batches,
+                                        "request_sanitize_limit_reached": maintenance.request_sanitize_limit_reached,
+                                        "vacuumed_storage": maintenance.vacuumed_storage
+                                    })),
+                                )
+                                .await;
     }
     let recovered = store
         .recover_interrupted_requests("proxy_started_with_in_progress_checkpoint")

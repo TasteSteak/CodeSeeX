@@ -244,7 +244,8 @@ impl ManagerRuntime {
                                         "deleted_events": report.deleted_events,
                                         "sanitized_requests": report.sanitized_requests,
                                         "request_sanitize_batches": report.request_sanitize_batches,
-                                        "request_sanitize_limit_reached": report.request_sanitize_limit_reached
+                                        "request_sanitize_limit_reached": report.request_sanitize_limit_reached,
+                                        "vacuumed_storage": report.vacuumed_storage
                                     })),
                                 )
                                 .await;
@@ -255,7 +256,8 @@ impl ManagerRuntime {
                             "deleted_events": report.deleted_events,
                             "sanitized_requests": report.sanitized_requests,
                             "request_sanitize_batches": report.request_sanitize_batches,
-                            "request_sanitize_limit_reached": report.request_sanitize_limit_reached
+                            "request_sanitize_limit_reached": report.request_sanitize_limit_reached,
+                            "vacuumed_storage": report.vacuumed_storage
                         })
                     }
                     Err(error) => {

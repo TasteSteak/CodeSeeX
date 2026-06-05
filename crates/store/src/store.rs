@@ -17,6 +17,10 @@ const COMPACT_STORAGE_ARRAY_HEAD_ITEMS: usize = 80;
 const COMPACT_STORAGE_ARRAY_TAIL_ITEMS: usize = 20;
 const COMPACT_STORAGE_OBJECT_KEYS: usize = 128;
 const MAX_STORAGE_TOOL_FACTS_PER_REQUEST: usize = 100;
+const CODEX_FULL_CONTEXT_INPUT_ITEMS_THRESHOLD: usize = 80;
+const CODEX_FULL_CONTEXT_TURN_MESSAGES_THRESHOLD: usize = 80;
+const CODEX_FULL_CONTEXT_STORAGE_TAIL_ITEMS: usize = 32;
+const RECENT_TOOL_FACT_RETENTION_HOURS: i64 = 24;
 const TOOL_FACT_OMITTED_PREFIX: &str = "[CodeSeeX storage omitted ";
 const TOOL_FACT_OMITTED_SUFFIX: &str = " older tool fact(s) after exceeding durable state budget]";
 const MAINTENANCE_LARGE_FIELD_BYTES: i64 = 256 * 1024;
@@ -76,6 +80,7 @@ pub struct MaintenanceReport {
     pub sanitized_requests: u64,
     pub request_sanitize_batches: u64,
     pub request_sanitize_limit_reached: bool,
+    pub vacuumed_storage: bool,
 }
 
 struct RequestSanitizeReport {
@@ -255,7 +260,10 @@ impl Store {
         .bind(previous_response_id)
         .bind(RequestStatus::InProgress.as_str())
         .bind(model)
-        .bind(storage_json_string(input)?)
+        .bind(storage_request_input_json_string(
+            previous_response_id,
+            input,
+        )?)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -279,13 +287,28 @@ impl Store {
         .await?
         .rows_affected();
         let request_sanitize = self.sanitize_large_request_payloads().await?;
+        let vacuumed_storage = if deleted_events > 0 || request_sanitize.sanitized_requests > 0 {
+            self.vacuum_storage().await?;
+            true
+        } else {
+            false
+        };
         Ok(MaintenanceReport {
             log_retention_days,
             deleted_events,
             sanitized_requests: request_sanitize.sanitized_requests,
             request_sanitize_batches: request_sanitize.batches,
             request_sanitize_limit_reached: request_sanitize.limit_reached,
+            vacuumed_storage,
         })
+    }
+
+    async fn vacuum_storage(&self) -> Result<()> {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("VACUUM;").execute(&self.pool).await?;
+        Ok(())
     }
 
     async fn sanitize_large_request_payloads(&self) -> Result<RequestSanitizeReport> {
@@ -320,13 +343,19 @@ impl Store {
     async fn sanitize_large_request_payload_batch(&self) -> Result<RequestSanitizeBatch> {
         let rows = sqlx::query(
             r#"
-            SELECT id, input_json, response_json, turn_messages_json, tool_facts_json, diagnostic_json
+            SELECT id, previous_response_id, input_json, response_json, turn_messages_json, tool_facts_json, diagnostic_json
             FROM requests
             WHERE length(input_json) > ?1
                OR COALESCE(length(response_json), 0) > ?1
                OR COALESCE(length(turn_messages_json), 0) > ?1
                OR COALESCE(length(tool_facts_json), 0) > ?1
                OR COALESCE(length(diagnostic_json), 0) > ?1
+               OR (
+                    previous_response_id IS NULL
+                    AND input_json LIKE '%"prompt_cache_key"%'
+                    AND input_json LIKE '%"instructions"%'
+                    AND input_json LIKE '%"tools"%'
+               )
             ORDER BY updated_at ASC
             LIMIT ?2;
             "#,
@@ -340,18 +369,21 @@ impl Store {
         let mut changed = 0_u64;
         for row in rows {
             let id: String = row.try_get("id")?;
+            let previous_response_id: Option<String> = row.try_get("previous_response_id")?;
             let input_json: String = row.try_get("input_json")?;
             let response_json: Option<String> = row.try_get("response_json")?;
             let turn_messages_json: Option<String> = row.try_get("turn_messages_json")?;
             let tool_facts_json: Option<String> = row.try_get("tool_facts_json")?;
             let diagnostic_json: Option<String> = row.try_get("diagnostic_json")?;
 
-            let next_input_json = sanitize_json_text("requests.input_json", Some(&input_json))?
-                .unwrap_or(input_json.clone());
+            let input_value: Value = parse_json_field("requests.input_json", &input_json)?;
+            let next_input_json =
+                storage_request_input_json_string(previous_response_id.as_deref(), &input_value)?;
             let next_response_json =
                 sanitize_json_text("requests.response_json", response_json.as_deref())?;
             let next_turn_messages_json = sanitize_value_array_json_text(
                 "requests.turn_messages_json",
+                stored_input_is_codex_full_context_slice(&next_input_json),
                 turn_messages_json.as_deref(),
             )?;
             let next_tool_facts_json = sanitize_tool_facts_json_text(
@@ -688,15 +720,21 @@ impl Store {
 
     pub async fn recent_tool_fact_records(&self, limit: u32) -> Result<Vec<RecentToolFactRecord>> {
         let limit = i64::from(limit.clamp(1, 1_000));
+        let cutoff = Utc::now()
+            .checked_sub_signed(Duration::hours(RECENT_TOOL_FACT_RETENTION_HOURS))
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
         let rows = sqlx::query(
             r#"
             SELECT response_json, tool_facts_json
             FROM requests
             WHERE tool_facts_json IS NOT NULL
+              AND updated_at >= ?1
             ORDER BY updated_at DESC
-            LIMIT ?1;
+            LIMIT ?2;
             "#,
         )
+        .bind(cutoff)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -722,6 +760,15 @@ impl Store {
 
     pub async fn replace_request_turn_messages(&self, id: &str, messages: &[Value]) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let row = sqlx::query("SELECT input_json FROM requests WHERE id = ?1 LIMIT 1;")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let slice_codex_full_context = row
+            .as_ref()
+            .and_then(|row| row.try_get::<String, _>("input_json").ok())
+            .map(|text| stored_input_is_codex_full_context_slice(&text))
+            .unwrap_or(false);
         let result = sqlx::query(
             r#"
             UPDATE requests
@@ -731,7 +778,10 @@ impl Store {
             "#,
         )
         .bind(id)
-        .bind(storage_json_array_string(messages)?)
+        .bind(storage_turn_messages_json_string(
+            slice_codex_full_context,
+            messages,
+        )?)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -1140,6 +1190,120 @@ fn duration_ms(start: &str, end: &str) -> u64 {
     u64::try_from(millis).unwrap_or(0)
 }
 
+fn storage_request_input_json_string(
+    previous_response_id: Option<&str>,
+    value: &Value,
+) -> Result<String> {
+    let value = request_input_for_storage(previous_response_id, value);
+    storage_json_string(&value)
+}
+
+fn request_input_for_storage(previous_response_id: Option<&str>, value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    let mut stored = serde_json::Map::new();
+    for key in ["model", "prompt_cache_key"] {
+        if let Some(value) = object.get(key) {
+            stored.insert(key.to_owned(), value.clone());
+        }
+    }
+
+    if let Some(input) = object.get("input") {
+        let full_context = request_looks_like_codex_full_context(previous_response_id, value);
+        stored.insert(
+            "input".to_owned(),
+            if full_context {
+                tail_slice_value(input, CODEX_FULL_CONTEXT_STORAGE_TAIL_ITEMS)
+            } else {
+                input.clone()
+            },
+        );
+        if full_context {
+            let (original_input_bytes, original_input_hash) = json_value_storage_stats(input);
+            stored.insert(
+                "_codeseex_storage".to_owned(),
+                json!({
+                    "mode": "codex_full_context_slice",
+                    "reason": "Codex already owns and resends full conversation context; CodeSeeX stores only bounded adapter replay state.",
+                    "original_input_items": input.as_array().map(Vec::len).unwrap_or(0),
+                    "retained_tail_items": input.as_array().map(|items| items.len().min(CODEX_FULL_CONTEXT_STORAGE_TAIL_ITEMS)).unwrap_or(0),
+                    "original_input_bytes": original_input_bytes,
+                    "original_input_hash": original_input_hash
+                }),
+            );
+        }
+        return Value::Object(stored);
+    }
+
+    if let Some(messages) = object.get("messages") {
+        stored.insert("messages".to_owned(), messages.clone());
+        return Value::Object(stored);
+    }
+
+    value.clone()
+}
+
+fn request_looks_like_codex_full_context(
+    previous_response_id: Option<&str>,
+    value: &Value,
+) -> bool {
+    if previous_response_id.is_some() {
+        return false;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("prompt_cache_key").is_none()
+        || object.get("instructions").is_none()
+        || object.get("tools").is_none()
+    {
+        return false;
+    }
+    object
+        .get("input")
+        .and_then(Value::as_array)
+        .map(|items| items.len() > CODEX_FULL_CONTEXT_INPUT_ITEMS_THRESHOLD)
+        .unwrap_or(false)
+}
+
+fn storage_turn_messages_json_string(
+    slice_codex_full_context: bool,
+    values: &[Value],
+) -> Result<String> {
+    let values = turn_messages_for_storage(slice_codex_full_context, values);
+    storage_json_array_string(&values)
+}
+
+fn turn_messages_for_storage(slice_codex_full_context: bool, values: &[Value]) -> Vec<Value> {
+    if !slice_codex_full_context || values.len() <= CODEX_FULL_CONTEXT_TURN_MESSAGES_THRESHOLD {
+        return values.to_vec();
+    }
+    tail_slice(values, CODEX_FULL_CONTEXT_STORAGE_TAIL_ITEMS)
+}
+
+fn stored_input_is_codex_full_context_slice(text: &str) -> bool {
+    text.contains("\"mode\":\"codex_full_context_slice\"")
+        || text.contains("\"mode\": \"codex_full_context_slice\"")
+}
+
+fn tail_slice_value(value: &Value, limit: usize) -> Value {
+    value
+        .as_array()
+        .map(|items| Value::Array(tail_slice(items, limit)))
+        .unwrap_or_else(|| value.clone())
+}
+
+fn tail_slice<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
+    let start = items.len().saturating_sub(limit);
+    items[start..].to_vec()
+}
+
+fn json_value_storage_stats(value: &Value) -> (usize, String) {
+    let serialized = serde_json::to_string(value).unwrap_or_default();
+    (serialized.len(), stable_hash_hex(serialized.as_bytes()))
+}
+
 fn storage_json_string(value: &Value) -> Result<String> {
     let sanitized = sanitize_json_for_storage(value);
     let serialized = serde_json::to_string(&sanitized)?;
@@ -1256,10 +1420,14 @@ fn sanitize_json_text(label: &str, text: Option<&str>) -> Result<Option<String>>
     .transpose()
 }
 
-fn sanitize_value_array_json_text(label: &str, text: Option<&str>) -> Result<Option<String>> {
+fn sanitize_value_array_json_text(
+    label: &str,
+    slice_codex_full_context: bool,
+    text: Option<&str>,
+) -> Result<Option<String>> {
     text.map(|text| {
         let values = parse_json_field::<Vec<Value>>(label, text)?;
-        storage_json_array_string(&values)
+        storage_turn_messages_json_string(slice_codex_full_context, &values)
     })
     .transpose()
 }
@@ -1583,6 +1751,45 @@ mod tests {
             .expect("recent tool facts");
         assert_eq!(facts.len(), 1);
         assert!(facts[0].contains("Shanghai weather"));
+
+        remove_temp_db(store, path).await;
+    }
+
+    #[tokio::test]
+    async fn recent_tool_facts_ignores_stale_adapter_facts() {
+        let path = temp_db_path("recent-tool-facts-stale");
+        let store = Store::open(&path).await.expect("open store");
+
+        let input = json!({
+            "input": [{"role":"user","content":[{"type":"input_text","text":"search"}]}]
+        });
+        store
+            .checkpoint_request("resp_old_search", None, Some("deepseek-v4-pro"), &input)
+            .await
+            .expect("checkpoint request");
+        store
+            .append_request_tool_fact(
+                "resp_old_search",
+                "tool=web_search call_id=call_old ok=true result=stale",
+            )
+            .await
+            .expect("append tool fact");
+        let old_ts = Utc::now()
+            .checked_sub_signed(Duration::hours(RECENT_TOOL_FACT_RETENTION_HOURS + 1))
+            .expect("old timestamp")
+            .to_rfc3339();
+        sqlx::query("UPDATE requests SET updated_at = ?2 WHERE id = ?1;")
+            .bind("resp_old_search")
+            .bind(old_ts)
+            .execute(&store.pool)
+            .await
+            .expect("backdate request");
+
+        let facts = store
+            .recent_tool_facts(10)
+            .await
+            .expect("recent tool facts");
+        assert!(facts.is_empty(), "{facts:?}");
 
         remove_temp_db(store, path).await;
     }
@@ -1916,7 +2123,6 @@ mod tests {
             .expect("response context chain");
         let stored = serde_json::to_string(&chain[0].input).expect("stored input json");
         assert!(stored.contains("[inline-data-url omitted"), "{stored}");
-        assert!(stored.contains("[redacted sensitive value]"), "{stored}");
         assert!(!stored.contains("sk-should-not-be-stored"), "{stored}");
         assert!(!stored.contains(&"A".repeat(2048)), "{stored}");
 
@@ -1970,6 +2176,155 @@ mod tests {
         let joined = serde_json::to_string(&chain[0].input).expect("stored input json");
         assert!(joined.contains("small item 0000"), "{joined}");
         assert!(joined.contains("small item 3999"), "{joined}");
+
+        remove_temp_db(store, path).await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_request_slices_codex_full_context_payload() {
+        let path = temp_db_path("codex-full-context-slice");
+        let store = Store::open(&path).await.expect("open store");
+        let items = (0..150)
+            .map(|index| {
+                json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": format!("history item {index:03}") }]
+                })
+            })
+            .collect::<Vec<_>>();
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "thread-full-context",
+            "instructions": "system instructions should not be durable state",
+            "tools": [{"type": "function", "function": {"name": "expensive_tool"}}],
+            "input": items
+        });
+        let raw_len = serde_json::to_string(&input).expect("raw input").len();
+
+        store
+            .checkpoint_request("resp_full_context", None, Some("deepseek-v4-pro"), &input)
+            .await
+            .expect("checkpoint request");
+
+        let stored_json: String =
+            sqlx::query_scalar("SELECT input_json FROM requests WHERE id = ?1;")
+                .bind("resp_full_context")
+                .fetch_one(&store.pool)
+                .await
+                .expect("stored input");
+        assert!(stored_json.len() < raw_len / 2, "{stored_json}");
+        let stored: Value = serde_json::from_str(&stored_json).expect("stored json");
+        assert!(stored.get("instructions").is_none(), "{stored}");
+        assert!(stored.get("tools").is_none(), "{stored}");
+        assert_eq!(
+            stored
+                .pointer("/_codeseex_storage/mode")
+                .and_then(Value::as_str),
+            Some("codex_full_context_slice")
+        );
+        let stored_items = stored
+            .get("input")
+            .and_then(Value::as_array)
+            .expect("stored input items");
+        assert_eq!(stored_items.len(), CODEX_FULL_CONTEXT_STORAGE_TAIL_ITEMS);
+        assert!(serde_json::to_string(&stored_items[0])
+            .expect("first retained item")
+            .contains("history item 118"));
+
+        remove_temp_db(store, path).await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_request_keeps_delta_input_when_previous_response_id_is_used() {
+        let path = temp_db_path("previous-response-delta");
+        let store = Store::open(&path).await.expect("open store");
+        let items = (0..120)
+            .map(|index| {
+                json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": format!("delta item {index:03}") }]
+                })
+            })
+            .collect::<Vec<_>>();
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "thread-with-previous",
+            "instructions": "not replayed from adapter state",
+            "tools": [{"type": "function", "function": {"name": "tool"}}],
+            "input": items
+        });
+
+        store
+            .checkpoint_request(
+                "resp_delta",
+                Some("resp_parent"),
+                Some("deepseek-v4-pro"),
+                &input,
+            )
+            .await
+            .expect("checkpoint request");
+
+        let stored_json: String =
+            sqlx::query_scalar("SELECT input_json FROM requests WHERE id = ?1;")
+                .bind("resp_delta")
+                .fetch_one(&store.pool)
+                .await
+                .expect("stored input");
+        let stored: Value = serde_json::from_str(&stored_json).expect("stored json");
+        assert!(stored.get("_codeseex_storage").is_none(), "{stored}");
+        assert_eq!(
+            stored.get("input").and_then(Value::as_array).map(Vec::len),
+            Some(120)
+        );
+        assert!(stored.get("instructions").is_none(), "{stored}");
+        assert!(stored.get("tools").is_none(), "{stored}");
+
+        remove_temp_db(store, path).await;
+    }
+
+    #[tokio::test]
+    async fn turn_messages_are_sliced_for_codex_full_context_without_parent() {
+        let path = temp_db_path("turn-messages-full-context-slice");
+        let store = Store::open(&path).await.expect("open store");
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "thread-turn-slice",
+            "instructions": "instructions",
+            "tools": [{"type": "function", "function": {"name": "tool"}}],
+            "input": (0..120).map(|index| json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": format!("history {index}") }]
+            })).collect::<Vec<_>>()
+        });
+        store
+            .checkpoint_request("resp_turn_slice", None, Some("deepseek-v4-pro"), &input)
+            .await
+            .expect("checkpoint request");
+        let messages = (0..120)
+            .map(|index| {
+                json!({
+                    "role": "user",
+                    "content": format!("compiled history message {index:03}")
+                })
+            })
+            .collect::<Vec<_>>();
+
+        store
+            .replace_request_turn_messages("resp_turn_slice", &messages)
+            .await
+            .expect("replace turn messages");
+
+        let stored_json: String =
+            sqlx::query_scalar("SELECT turn_messages_json FROM requests WHERE id = ?1;")
+                .bind("resp_turn_slice")
+                .fetch_one(&store.pool)
+                .await
+                .expect("stored turn messages");
+        let stored: Vec<Value> = serde_json::from_str(&stored_json).expect("stored messages");
+        assert_eq!(stored.len(), CODEX_FULL_CONTEXT_STORAGE_TAIL_ITEMS);
+        assert!(serde_json::to_string(&stored[0])
+            .expect("first retained message")
+            .contains("compiled history message 088"));
 
         remove_temp_db(store, path).await;
     }
