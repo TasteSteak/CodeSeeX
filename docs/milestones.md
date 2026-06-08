@@ -9,7 +9,7 @@ The first milestone proves the lightweight architecture without carrying over th
 Acceptance criteria:
 
 - `codeseex-proxy` starts on `127.0.0.1:8787`.
-- `/api/codex-adapter/generate` writes `~/.codeseex-next/model-catalog.json` and returns a copyable TOML snippet.
+- `/api/codex-adapter/generate` writes `~/.codeseex/model-catalog.json` and returns a copyable TOML snippet.
 - `/v1/models` lists `deepseek-v4-flash` and `deepseek-v4-pro`.
 - `/v1/chat/completions` forwards JSON and streaming requests to the configured upstream.
 - `/v1/responses` accepts basic Codex Responses input and maps non-tool output back to Responses-shaped results.
@@ -87,7 +87,7 @@ Current progress:
 - Streaming regular built-in/community tool calls are emitted as display-only/proxy diagnostic output, then CodeSeeX executes the bounded tool, keeps current-request facts, and continues the upstream stream. Apply Patch uses native `custom_tool_call` events and is executed by Codex.
 - Built-in tool calls write separate call/result events to `logs/*.jsonl`; verified tool facts stay scoped to the current request/process bridge.
 - Configurable built-in and community execution is gated by the persisted enabled-tool list; system tools are always enabled. Read-only tools revalidate workspace boundaries before touching files, and Web Search returns compact text-only evidence.
-- Community tool manifests are discovered from `~/.codeseex-next/extension/tools/<tool>/manifest.json` for the desktop Tools page.
+- Community tool manifests are discovered from `~/.codeseex/extension/tools/<tool>/manifest.json` for the desktop Tools page.
 - Community tools default to disabled and can persist safe UI config fields into the existing TOML `[tools.settings]` table.
 - Enabled community tools are advertised only when their manifest declares `execution.type = "command"`; execution runs as a child process with no shell, minimal environment variables, timeout handling, and bounded output capture.
 

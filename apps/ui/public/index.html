@@ -245,6 +245,20 @@
 
                 <div class="setting-item">
                   <span>
+                    <label data-i18n="networkProxyMode">Outbound network proxy</label>
+                    <small class="muted" data-i18n="networkProxyModeHint">Used by upstream requests, Web Search, Vision, and update checks. Restart the proxy after changing it.</small>
+                  </span>
+                  <div class="segmented-control" id="ctrl-network-proxy">
+                    <input type="radio" name="NETWORK_PROXY_MODE" id="network_proxy_system" value="system" checked>
+                    <label for="network_proxy_system" data-i18n="networkProxyMode_system">Follow system</label>
+                    <input type="radio" name="NETWORK_PROXY_MODE" id="network_proxy_none" value="none">
+                    <label for="network_proxy_none" data-i18n="networkProxyMode_none">No proxy</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <span>
                     <label for="PROXY_PORT" data-i18n="proxyListenPort">CodeSeeX listen port</label>
                     <small class="muted" data-i18n="proxyListenPortHint">Used by the local Codex API endpoint. Restart the proxy after changing it.</small>
                   </span>
@@ -361,17 +375,6 @@
                 <div class="setting-divider"></div>
 
                 <h3 class="config-section-title" data-i18n="codexAdapter">Codex adapter</h3>
-                <div class="setting-item">
-                  <label data-i18n="catalogMode">Catalog mode</label>
-                  <div class="segmented-control" id="ctrl-catalog-mode">
-                    <input type="radio" name="CATALOG_MODE" id="catalog_default" value="default" checked>
-                    <label for="catalog_default" data-i18n="catalogModeDefault">Default</label>
-                    <input type="radio" name="CATALOG_MODE" id="catalog_auto" value="auto">
-                    <label for="catalog_auto" data-i18n="catalogModeAuto">Auto</label>
-                    <input type="radio" name="CATALOG_MODE" id="catalog_builtin" value="builtin">
-                    <label for="catalog_builtin" data-i18n="catalogModeBuiltin">Built-in</label>
-                  </div>
-                </div>
                 <section class="config-toml-card">
                   <div class="config-toml-header">
                     <h3 data-i18n="configTomlTitle">config.toml configuration</h3>

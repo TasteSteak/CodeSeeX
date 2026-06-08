@@ -8,7 +8,7 @@ Codex owns conversation context and decides what to send to third-party provider
 
 - Keep active request lifecycle, recent usage, and `previous_response_id` bridge data in memory for the current process.
 - Clear recent request state on restart; stale `previous_response_id` references must not be silently reconstructed from old local data.
-- Write visible/debug diagnostics to `logs/YYYY-MM-DD.jsonl` with bounded, redacted details.
+- Write user-visible events to `logs/YYYY-MM-DD.jsonl` with compact, redacted details.
 - Keep CodeSeeX-owned tool facts only inside the current request/process bridge or inside explicit compact response items.
 - Store user configuration in `config.toml`, generated Codex catalog in `model-catalog.json`, extensions under `extension/`, language overrides under `lang/`, and local compact key material under `secrets/`.
 
@@ -27,7 +27,8 @@ CodeSeeX must not store:
 
 - `/api/status` and `/api/usage` report current-process runtime state.
 - Restarting the proxy clears active requests, last turn, and recent usage history.
-- `/api/events` reads sanitized JSONL logs from `logs/`, not SQLite.
+- `/api/events` reads compact user JSONL logs from `logs/`, not SQLite.
+- Diagnostic events are not persisted by default; development diagnostics require explicit opt-in logging.
 - Log maintenance deletes old log files according to `log_retention_days`.
 - Legacy `codeseex.db` files are ignored and not automatically deleted.
 

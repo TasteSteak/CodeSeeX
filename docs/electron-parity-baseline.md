@@ -1,12 +1,12 @@
 # CodeSeeX Electron Verified Logic Baseline
 
-This document records the verified behavior of the existing Electron implementation before fixing the Tauri/Rust rewrite. It is the migration baseline: CodeSeeX Next must match these behaviors before adding new abstractions.
+This document records the verified behavior of the existing Electron implementation before fixing the Tauri/Rust rewrite. It is the migration baseline: CodeSeeX must match these behaviors before adding new abstractions.
 
 ## Why This Exists
 
 The latest failing conversation shows a low-level Responses compatibility regression:
 
-- Conversation file: `C:\Users\Administrator\.codex\sessions\2026\05\28\rollout-2026-05-28T15-56-38-019e6d95-de35-7b72-bc75-ede1e3d6a876.jsonl`
+- Conversation file: `%USERPROFILE%\.codex\sessions\YYYY\MM\DD\rollout-<timestamp>-<id>.jsonl`
 - Initial failures at `15:56` were upstream `400`:
   - `Tool names must be unique.`
   - `gpt-5.4-mini` was forwarded to DeepSeek instead of being mapped to a supported DeepSeek model.
@@ -50,8 +50,8 @@ Regression guard:
 
 Old behavior:
 
-- The balance panel reads the API key from CodeSeeX upstream config / `DEEPSEEK_API_KEY`.
-- Codex `auth.json` is owned by Codex/OpenAI and must not be used as the DeepSeek/custom upstream credential source.
+- The balance panel reads the API key directly from the Codex auth source, including a cached request Authorization header when available.
+- CodeSeeX manager config is not the balance credential source; legacy `upstream.api_key` TOML is deserialized for compatibility but ignored by runtime config application.
 - The balance URL is derived from the configured upstream base URL by stripping a trailing `/v1` and appending `/user/balance`.
 - Official DeepSeek therefore uses `https://api.deepseek.com/user/balance`, while custom/self-hosted upstream keys are not accidentally sent to the official host.
 - The manager API returns a stable JSON body for success and failure so the UI can render a normal unavailable state.
@@ -59,7 +59,7 @@ Old behavior:
 Regression guard:
 
 - A configured custom base URL like `http://127.0.0.1:9000/v1` must query `http://127.0.0.1:9000/user/balance`.
-- The Authorization header for balance checks must come from CodeSeeX upstream config / `DEEPSEEK_API_KEY`.
+- The Authorization header for balance checks must come from the direct Codex auth source, not from manager UI configuration.
 - Balance failures should return `{ ok: false, code, message }` rather than surfacing as a UI transport crash.
 
 ## Tool Declaration Rules
@@ -183,7 +183,7 @@ Regression guard:
 - UI/logs should show messages like `Tool names must be unique` or unsupported model errors.
 - A failed request should be persisted as failed, not silently turned into an empty completed turn.
 
-## Compatibility Checklist Before Fixing Next
+## Compatibility Checklist Before Replacing Electron
 
 Before changing Rust code, verify each item against old behavior:
 
@@ -202,7 +202,7 @@ Before changing Rust code, verify each item against old behavior:
 
 ## Immediate Regression Hypothesis From The Latest Trace
 
-The latest trace strongly points to three concrete Next regressions:
+The latest trace strongly points to three concrete Tauri/Rust regressions:
 
 1. Missing Responses message `phase` caused Codex to treat generated text as non-final/ambiguous, then reissue the same turn with previous assistant outputs included in `input`.
 2. Tool declarations initially duplicated `apply_patch`, causing DeepSeek `400 Tool names must be unique`.

@@ -1,4 +1,5 @@
 target/
+work/
 node_modules/
 dist/
 .svelte-kit/
@@ -12,3 +13,10 @@ dist/
 .env.*
 !.env.example
 .private/
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.appimage
+*.deb
+*.rpm

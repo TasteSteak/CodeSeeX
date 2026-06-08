@@ -1,5 +1,5 @@
 use codeseex_core::context::redact_inline_data_urls;
-use codeseex_core::WebSearchProxyMode;
+use codeseex_core::NetworkProxyMode;
 use futures_util::future::join_all;
 use serde_json::{json, Value};
 
@@ -23,7 +23,7 @@ use super::{MAX_OPEN_TARGETS, MAX_TEXT_CHARS};
 const MAX_REDIRECTS: usize = 5;
 
 pub(super) async fn many(
-    proxy_mode: WebSearchProxyMode,
+    proxy_mode: NetworkProxyMode,
     urls: &[String],
     open_ids: &[String],
     unresolved_ids: &[String],
@@ -301,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn many_reports_invalid_urls_as_failures() {
         let result = many(
-            WebSearchProxyMode::System,
+            NetworkProxyMode::System,
             &["://bad-url".to_owned()],
             &[],
             &[],

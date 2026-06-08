@@ -3,6 +3,9 @@ use codeseex_core::{
 };
 use serde_json::{json, Value};
 use std::env;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, SubmenuBuilder};
@@ -15,7 +18,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tokio::sync::oneshot;
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const TRAY_ID: &str = "codeseex-next";
+const TRAY_ID: &str = "codeseex";
 const PRODUCT_NAME: &str = "CodeSeeX";
 
 #[derive(Default)]
@@ -100,6 +103,15 @@ fn desktop_refresh_tray(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn desktop_open_external(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http and https links can be opened externally".to_owned());
+    }
+    open_external_url(url)
+}
+
+#[tauri::command]
 async fn desktop_manager_request(
     app: AppHandle,
     state: State<'_, DesktopRuntime>,
@@ -168,13 +180,13 @@ pub fn run() {
         ))
         .setup(|app| {
             if let Err(error) = start_embedded_proxy(app.handle().clone()) {
-                eprintln!("[codeseex-next] failed to start embedded proxy: {error}");
+                eprintln!("[codeseex] failed to start embedded proxy: {error}");
             }
             create_tray(app.handle())?;
             sync_configured_autostart(app.handle());
             let windows = app.webview_windows();
             eprintln!(
-                "[codeseex-next] desktop setup complete; windows={}",
+                "[codeseex] desktop setup complete; windows={}",
                 windows.keys().cloned().collect::<Vec<_>>().join(",")
             );
             if !launched_from_autostart() {
@@ -201,7 +213,7 @@ pub fn run() {
                 WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
             ) {
                 eprintln!(
-                    "[codeseex-next] window event: label={} event={event:?}",
+                    "[codeseex] window event: label={} event={event:?}",
                     window.label()
                 );
             }
@@ -211,6 +223,7 @@ pub fn run() {
             desktop_apply_theme,
             desktop_apply_autostart,
             desktop_refresh_tray,
+            desktop_open_external,
             desktop_manager_request
         ])
         .build(tauri::generate_context!())
@@ -288,7 +301,7 @@ fn start_embedded_proxy(app: AppHandle) -> Result<(), String> {
                     Some(message.clone()),
                     true,
                 );
-                eprintln!("[codeseex-next] embedded proxy stopped: {message}");
+                eprintln!("[codeseex] embedded proxy stopped: {message}");
             }
         }
     });
@@ -762,7 +775,7 @@ fn handle_tray_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
     };
 
     if let Err(error) = result {
-        eprintln!("[codeseex-next] tray action failed: {error}");
+        eprintln!("[codeseex] tray action failed: {error}");
         return;
     }
 
@@ -837,7 +850,7 @@ fn launched_from_autostart() -> bool {
 fn sync_configured_autostart<R: Runtime>(app: &AppHandle<R>) {
     if let Some(enabled) = configured_autostart() {
         if let Err(error) = apply_autostart(app, enabled) {
-            eprintln!("[codeseex-next] autostart sync failed: {error}");
+            eprintln!("[codeseex] autostart sync failed: {error}");
         }
     }
 }
@@ -847,9 +860,25 @@ fn apply_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<bool
     if enabled {
         manager.enable().map_err(string_error)?;
     } else {
-        manager.disable().map_err(string_error)?;
+        match manager.disable() {
+            Ok(()) => {}
+            Err(error) if autostart_not_found_error(&error) => return Ok(false),
+            Err(error) => return Err(string_error(error)),
+        }
     }
-    manager.is_enabled().map_err(string_error)
+    match manager.is_enabled() {
+        Ok(value) => Ok(value),
+        Err(error) if !enabled && autostart_not_found_error(&error) => Ok(false),
+        Err(error) => Err(string_error(error)),
+    }
+}
+
+fn autostart_not_found_error(error: &impl std::fmt::Display) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("os error 2")
+        || text.contains("not found")
+        || text.contains("cannot find the file")
+        || text.contains("找不到指定的文件")
 }
 
 fn main_window<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R>, String> {
@@ -878,7 +907,7 @@ fn spawn_main_window<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     std::thread::spawn(move || {
         if let Err(error) = create_and_focus_main_window(&app) {
-            eprintln!("[codeseex-next] create main window failed: {error}");
+            eprintln!("[codeseex] create main window failed: {error}");
         }
         app.state::<DesktopRuntime>()
             .creating_window
@@ -925,6 +954,37 @@ fn parse_theme(value: &str) -> Option<Theme> {
         "light" => Some(Theme::Light),
         _ => None,
     }
+}
+
+fn open_external_url(url: &str) -> Result<(), String> {
+    let mut command = external_open_command(url);
+    command.spawn().map_err(string_error)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn external_open_command(url: &str) -> Command {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let mut command = Command::new("rundll32.exe");
+    command
+        .arg("url.dll,FileProtocolHandler")
+        .arg(url)
+        .creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn external_open_command(url: &str) -> Command {
+    let mut command = Command::new("open");
+    command.arg(url);
+    command
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn external_open_command(url: &str) -> Command {
+    let mut command = Command::new("xdg-open");
+    command.arg(url);
+    command
 }
 
 fn toggle_maximize(app: &AppHandle) -> Result<(), String> {
@@ -998,5 +1058,16 @@ mod tests {
         };
         let i18n = TrayI18n::from_user_config(&user_config);
         assert_eq!(i18n.text("trayModel", &[]), "Model");
+    }
+
+    #[test]
+    fn autostart_not_found_is_treated_as_disabled() {
+        assert!(autostart_not_found_error(
+            &"系统找不到指定的文件。 (os error 2)"
+        ));
+        assert!(autostart_not_found_error(
+            &"The system cannot find the file specified. (os error 2)"
+        ));
+        assert!(!autostart_not_found_error(&"access denied"));
     }
 }

@@ -35,7 +35,7 @@ The only public compatibility contract for Codex is `/v1/*`. The `/api/*` routes
 
 ## Data Directory
 
-Development data lives under `~/.codeseex-next`:
+User data lives under `~/.codeseex`:
 
 - `config.toml`: readable CodeSeeX config.
 - `model-catalog.json`: generated Codex model catalog.
@@ -46,7 +46,7 @@ Development data lives under `~/.codeseex-next`:
 - `lang/`: user or third-party language overrides.
 - `extension/tools/<tool>/manifest.json`: optional community tool metadata and explicit command execution declarations.
 
-The `-next` data directory is development-only isolation. The final product remains CodeSeeX, so the release plan should use the normal CodeSeeX data location or an explicit in-app upgrade path rather than framing this as a separate product migration.
+CodeSeeX uses the normal CodeSeeX data location. Any migration work should be framed as an in-app upgrade path rather than a separate product line.
 
 ## State Boundary
 

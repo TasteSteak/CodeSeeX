@@ -1,3 +1,4 @@
+use codeseex_core::codex_auth::read_codex_auth_api_key;
 use codeseex_core::config::UpstreamConfig;
 use codeseex_core::urls::chat_completions_url;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -38,15 +39,31 @@ fn resolve_authorization_header(
     inbound_auth: Option<&str>,
     payload: &Value,
 ) -> Option<String> {
-    upstream
-        .api_key
-        .as_deref()
-        .and_then(format_bearer_header)
-        .or_else(|| {
-            (!payload_looks_like_codex_app_request(payload))
-                .then(|| inbound_auth.and_then(format_bearer_header))
-                .flatten()
-        })
+    resolve_authorization_header_with_direct_key(upstream, inbound_auth, payload, || {
+        read_codex_auth_api_key(false)
+    })
+}
+
+fn resolve_authorization_header_with_direct_key<F>(
+    upstream: &UpstreamConfig,
+    inbound_auth: Option<&str>,
+    payload: &Value,
+    direct_key: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    let can_use_inbound = !payload_looks_like_codex_app_request(payload);
+    let configured_auth = upstream.api_key.as_deref().and_then(format_bearer_header);
+    let inbound_auth = inbound_auth.and_then(format_bearer_header);
+    if can_use_inbound {
+        if let Some(auth) = inbound_auth {
+            return Some(auth);
+        }
+    }
+    direct_key()
+        .and_then(|value| format_bearer_header(&value))
+        .or(configured_auth)
 }
 
 fn payload_looks_like_codex_app_request(payload: &Value) -> bool {
@@ -85,7 +102,7 @@ mod tests {
     #[test]
     fn inbound_authorization_is_not_forwarded_for_codex_app_payloads() {
         assert_eq!(
-            resolve_authorization_header(
+            resolve_authorization_header_with_direct_key(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
                 &serde_json::json!({
@@ -93,7 +110,8 @@ mod tests {
                         "x-codex-installation-id": "codex-install"
                     },
                     "prompt_cache_key": "thread"
-                })
+                }),
+                || None
             )
             .as_deref(),
             None
@@ -103,10 +121,11 @@ mod tests {
     #[test]
     fn inbound_authorization_can_authenticate_plain_external_clients() {
         assert_eq!(
-            resolve_authorization_header(
+            resolve_authorization_header_with_direct_key(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
-                &serde_json::json!({ "input": "private smoke" })
+                &serde_json::json!({ "input": "private smoke" }),
+                || None
             )
             .as_deref(),
             Some("Bearer inbound-key")
@@ -116,22 +135,74 @@ mod tests {
     #[test]
     fn configured_key_accepts_raw_or_bearer_form() {
         assert_eq!(
-            resolve_authorization_header(
+            resolve_authorization_header_with_direct_key(
                 &upstream_with_key(Some("configured-key")),
                 None,
-                &serde_json::json!({})
+                &serde_json::json!({}),
+                || None
             )
             .as_deref(),
             Some("Bearer configured-key")
         );
         assert_eq!(
-            resolve_authorization_header(
+            resolve_authorization_header_with_direct_key(
                 &upstream_with_key(Some("Bearer configured-key")),
                 None,
-                &serde_json::json!({})
+                &serde_json::json!({}),
+                || None
             )
             .as_deref(),
             Some("Bearer configured-key")
+        );
+    }
+
+    #[test]
+    fn direct_codex_auth_key_can_authenticate_codex_app_payloads() {
+        assert_eq!(
+            resolve_authorization_header_with_direct_key(
+                &upstream_with_key(None),
+                Some("Bearer inbound-key"),
+                &serde_json::json!({
+                    "client_metadata": {
+                        "x-codex-installation-id": "codex-install"
+                    }
+                }),
+                || Some("direct-key".to_owned())
+            )
+            .as_deref(),
+            Some("Bearer direct-key")
+        );
+    }
+
+    #[test]
+    fn direct_codex_auth_key_precedes_configured_fallback_for_codex_app_payloads() {
+        assert_eq!(
+            resolve_authorization_header_with_direct_key(
+                &upstream_with_key(Some("configured-key")),
+                Some("Bearer inbound-key"),
+                &serde_json::json!({
+                    "client_metadata": {
+                        "x-codex-installation-id": "codex-install"
+                    }
+                }),
+                || Some("direct-key".to_owned())
+            )
+            .as_deref(),
+            Some("Bearer direct-key")
+        );
+    }
+
+    #[test]
+    fn inbound_authorization_precedes_configured_fallback_for_plain_external_clients() {
+        assert_eq!(
+            resolve_authorization_header_with_direct_key(
+                &upstream_with_key(Some("configured-key")),
+                Some("Bearer inbound-key"),
+                &serde_json::json!({ "input": "private smoke" }),
+                || Some("direct-key".to_owned())
+            )
+            .as_deref(),
+            Some("Bearer inbound-key")
         );
     }
 }

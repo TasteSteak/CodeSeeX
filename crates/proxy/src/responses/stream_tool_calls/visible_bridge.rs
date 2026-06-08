@@ -257,15 +257,9 @@ impl VisibleToolState {
         if self.consumed_arguments >= self.arguments.len() {
             return None;
         }
-        let Some(kind) = self.kind else {
-            return None;
-        };
-        let Some(item_id) = self.item_id.as_deref() else {
-            return None;
-        };
-        let Some(output_index) = self.output_index else {
-            return None;
-        };
+        let kind = self.kind?;
+        let item_id = self.item_id.as_deref()?;
+        let output_index = self.output_index?;
         let chunk = &self.arguments[self.consumed_arguments..];
         self.consumed_arguments = self.arguments.len();
         match kind {

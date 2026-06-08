@@ -24,6 +24,7 @@ const RECENT_TOOL_FACT_REQUEST_LIMIT: u32 = 200;
 pub(crate) struct BuiltResponseContext {
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) current_messages: Vec<ChatMessage>,
+    pub(crate) current_image_refs: Vec<String>,
     pub(crate) tool_facts: Vec<String>,
     pub(crate) diagnostic: Value,
     pub(crate) history_message_count: usize,
@@ -236,6 +237,8 @@ pub(crate) async fn build_response_context(
         input.get("input").unwrap_or(&Value::Null),
         &current_valid_tool_call_ids,
     );
+    let current_image_refs =
+        collect_current_input_image_refs(input.get("input").unwrap_or(&Value::Null));
     let current_message_count = current_context.messages.len();
     let current_context_diagnostic = current_context.diagnostic.clone();
     messages.extend(current_context.messages.clone());
@@ -251,15 +254,101 @@ pub(crate) async fn build_response_context(
         "pre_budget_messages": pre_budget_message_count,
         "budget": budgeted.diagnostic,
         "current_input": current_context_diagnostic,
+        "current_input_images": current_image_refs.len(),
         "recovered_tool_facts": recovered_tool_facts.len()
     });
 
     BuiltResponseContext {
         messages: budgeted.messages,
         current_messages: current_context.messages,
+        current_image_refs,
         tool_facts,
         diagnostic,
         history_message_count,
+    }
+}
+
+fn collect_current_input_image_refs(input: &Value) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut seen = HashSet::new();
+    match input {
+        Value::Array(items) => {
+            for item in items {
+                collect_current_input_item_image_refs(item, &mut refs, &mut seen);
+            }
+        }
+        Value::Object(_) => collect_current_input_item_image_refs(input, &mut refs, &mut seen),
+        _ => {}
+    }
+    refs
+}
+
+fn collect_current_input_item_image_refs(
+    item: &Value,
+    refs: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let item_type = item.get("type").and_then(Value::as_str);
+    if matches!(item_type, Some("input_image" | "image")) {
+        collect_image_ref_from_part(item, refs, seen);
+        return;
+    }
+    let role = item.get("role").and_then(Value::as_str);
+    if role != Some("user") {
+        return;
+    }
+    if let Some(content) = item.get("content") {
+        collect_image_refs_from_content(content, refs, seen);
+    } else {
+        collect_image_ref_from_part(item, refs, seen);
+    }
+}
+
+fn collect_image_refs_from_content(
+    content: &Value,
+    refs: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match content {
+        Value::Array(parts) => {
+            for part in parts {
+                collect_image_ref_from_part(part, refs, seen);
+            }
+        }
+        Value::Object(_) => collect_image_ref_from_part(content, refs, seen),
+        _ => {}
+    }
+}
+
+fn collect_image_ref_from_part(part: &Value, refs: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let part_type = part.get("type").and_then(Value::as_str);
+    if !matches!(part_type, Some("input_image" | "image" | "image_url")) {
+        return;
+    }
+    for key in ["image_url", "url", "image", "data_url"] {
+        if let Some(value) = part.get(key) {
+            collect_image_ref_value(value, refs, seen);
+        }
+    }
+}
+
+fn collect_image_ref_value(value: &Value, refs: &mut Vec<String>, seen: &mut HashSet<String>) {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            if !text.is_empty() && seen.insert(text.to_owned()) {
+                refs.push(text.to_owned());
+            }
+        }
+        Value::Object(object) => {
+            if let Some(url) = object.get("url").and_then(Value::as_str) {
+                let url = url.trim();
+                if !url.is_empty() && seen.insert(url.to_owned()) {
+                    refs.push(url.to_owned());
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -973,6 +1062,9 @@ fn select_budgeted_message_blocks(
             .iter()
             .any(|index| selected_indexes.contains(index))
         {
+            for index in &block.indexes {
+                selected_indexes.insert(*index);
+            }
             continue;
         }
         let block_bytes = block
@@ -1174,6 +1266,51 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn current_input_images_are_kept_out_of_chat_context() {
+        let dir =
+            std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
+        let store = Store::open(&dir).await.expect("open store");
+        let state = ProxyState {
+            config: Arc::new(AppConfig {
+                data_dir: dir.clone(),
+                ..Default::default()
+            }),
+            client: reqwest::Client::new(),
+            store,
+        };
+        let input = json!({
+            "input": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "describe this image" },
+                    { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
+                ]
+            }]
+        });
+
+        let built = build_response_context(&state, &input, None).await;
+
+        assert_eq!(
+            built.current_image_refs,
+            vec!["data:image/png;base64,AAAA".to_owned()]
+        );
+        assert_eq!(built.current_messages.len(), 1);
+        assert_eq!(built.current_messages[0].content, "describe this image");
+        assert_eq!(
+            built
+                .diagnostic
+                .get("current_input_images")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        let serialized = serde_json::to_string(&built.messages).expect("messages json");
+        assert!(!serialized.contains("data:image"));
+        assert!(!serialized.contains("AAAA"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn budget_keeps_tool_protocol_groups_together() {
         let tool_calls = vec![json!({
@@ -1236,10 +1373,52 @@ mod tests {
             .any(|message| message.tool_call_id.as_deref() == Some("call_current")));
     }
 
+    #[test]
+    fn budget_keeps_whole_tool_group_when_one_result_is_current() {
+        let tool_calls = vec![
+            json!({
+                "id": "call_a",
+                "type": "function",
+                "function": { "name": "list_directory", "arguments": "{\"path\":\".\"}" }
+            }),
+            json!({
+                "id": "call_b",
+                "type": "function",
+                "function": { "name": "read_file_range", "arguments": "{\"path\":\"Cargo.toml\"}" }
+            }),
+        ];
+        let messages = vec![
+            ChatMessage::assistant_tool_calls(tool_calls, ""),
+            ChatMessage::tool_result("call_a", "a".repeat(4_000_000)),
+            ChatMessage::tool_result("call_b", "b".repeat(4_000_000)),
+            ChatMessage::text("user", "continue after current result"),
+        ];
+
+        let budgeted = budget_messages_for_upstream(messages, 2);
+        let ids = budgeted
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<HashSet<_>>();
+
+        assert!(budgeted.messages.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .map(|calls| {
+                    calls.iter().any(|call| call["id"] == "call_a")
+                        && calls.iter().any(|call| call["id"] == "call_b")
+                })
+                .unwrap_or(false)
+        }));
+        assert!(ids.contains("call_a"), "{ids:?}");
+        assert!(ids.contains("call_b"), "{ids:?}");
+    }
+
     #[tokio::test]
     async fn history_drops_unresolved_client_tool_call_for_normal_followup() {
         let dir =
-            std::env::temp_dir().join(format!("codeseex-next-context-{}", Uuid::new_v4().simple()));
+            std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
         let store = Store::open(&dir).await.expect("open store");
         let state = ProxyState {
             config: Arc::new(AppConfig {
@@ -1323,7 +1502,7 @@ mod tests {
     #[tokio::test]
     async fn history_keeps_parent_client_tool_call_for_matching_output() {
         let dir =
-            std::env::temp_dir().join(format!("codeseex-next-context-{}", Uuid::new_v4().simple()));
+            std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
         let store = Store::open(&dir).await.expect("open store");
         let state = ProxyState {
             config: Arc::new(AppConfig {
@@ -1418,7 +1597,7 @@ mod tests {
     #[tokio::test]
     async fn current_web_search_call_without_output_does_not_recover_global_persisted_fact() {
         let dir =
-            std::env::temp_dir().join(format!("codeseex-next-context-{}", Uuid::new_v4().simple()));
+            std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
         let store = Store::open(&dir).await.expect("open store");
         let state = ProxyState {
             config: Arc::new(AppConfig {
@@ -1496,7 +1675,7 @@ mod tests {
     async fn empty_client_web_search_call_does_not_recover_global_fact_when_prior_final_text_matches(
     ) {
         let dir =
-            std::env::temp_dir().join(format!("codeseex-next-context-{}", Uuid::new_v4().simple()));
+            std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
         let store = Store::open(&dir).await.expect("open store");
         let state = ProxyState {
             config: Arc::new(AppConfig {
@@ -1618,7 +1797,7 @@ mod tests {
     #[tokio::test]
     async fn compact_response_replay_replaces_parent_history() {
         let dir =
-            std::env::temp_dir().join(format!("codeseex-next-context-{}", Uuid::new_v4().simple()));
+            std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
         let store = Store::open(&dir).await.expect("open store");
         let config = AppConfig {
             data_dir: dir.clone(),

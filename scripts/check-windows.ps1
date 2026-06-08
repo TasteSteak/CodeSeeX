@@ -2,12 +2,16 @@ param(
   [string]$VsDevCmd = $env:CODESEEX_VSDEVCMD,
   [string]$CargoHome = $env:CARGO_HOME,
   [string]$CargoTargetDir = $env:CARGO_TARGET_DIR,
-  [string]$DevRoot = "D:\DevTools\CodeSeeXNext"
+  [string]$DevRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+if (-not $DevRoot) {
+  $DevRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "CodeSeeX\Dev"
+}
 
 if (-not $CargoHome) {
   $CargoHome = Join-Path $DevRoot "Cargo"

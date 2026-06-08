@@ -4,9 +4,9 @@ This checklist is the migration guardrail for replacing the Electron implementat
 
 ## Release Gate
 
-- Do not call Next a replacement until every P0 item is verified against real Codex App traffic.
-- Keep the temporary data directory as `~/.codeseex-next` during development.
-- The final product remains CodeSeeX; Next is only the implementation workspace name.
+- Do not call the Tauri/Rust implementation a replacement until every P0 item is verified against real Codex App traffic.
+- Use the release data directory `~/.codeseex`; development scripts may still override `CODESEEX_DATA_DIR` for isolated smoke tests.
+- The final product and implementation name are CodeSeeX.
 - Any behavior that differs from Electron must be deliberate, documented, and tested.
 
 ## P0 Protocol Parity
@@ -59,13 +59,15 @@ This checklist is the migration guardrail for replacing the Electron implementat
 - The manager exposes Overview, Configuration, Tools, Logs/Usage, and About/Update status.
 - Logs/Usage show current-process usage plus file-backed logs; recent request state is not preserved across restart.
 - `config.toml` remains copy-only; CodeSeeX does not edit the user's Codex config.
+- Windows NSIS installs support client-aligned language selection and current-user/all-users install mode.
+- Windows NSIS upgrades detect the legacy Electron uninstall key, run the legacy uninstaller, and clean installer residuals without deleting `~/.codeseex`.
 
 ## P1 Product Parity
 
 - Language selection supports system, English, and Chinese at minimum.
 - Dark/light theme boundaries remain visible.
 - Logs distinguish normal conversation requests from context compaction requests.
-- Balance query reads CodeSeeX upstream config / `DEEPSEEK_API_KEY` and must not use Codex `auth.json`.
+- Balance query reads the direct Codex auth source, including cached request Authorization, and must not depend on manager UI key configuration.
 - Update checks are silent and red-dot-ready, with no automatic download.
 - Packaging emits only the intended installer artifacts.
 
@@ -78,3 +80,4 @@ This checklist is the migration guardrail for replacing the Electron implementat
 - Real Codex App: manual compact, automatic compact-like long context replay, and post-compact follow-up.
 - Fake upstream: usage mapping, streaming tool loop with `reasoning_content`, upstream 400/500 errors, and interrupted stream.
 - Desktop smoke: fresh data dir, configured data dir, port conflict, tray actions, autostart read/write, and update check failure.
+- Installer smoke: fresh Windows install, legacy Electron current-user upgrade, legacy Electron all-users upgrade, same-version repair, and uninstall without app data deletion.

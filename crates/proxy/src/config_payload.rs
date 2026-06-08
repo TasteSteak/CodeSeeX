@@ -1,7 +1,8 @@
 use codeseex_core::models::{TemperaturePreset, UpstreamModelOverride};
 use codeseex_core::{
-    AppConfig, UserBillingConfig, UserCatalogConfig, UserConfig, UserModelConfig, UserProxyConfig,
-    UserToolsConfig, UserUiConfig, UserUpstreamConfig, UserWebSearchToolConfig, WebSearchProxyMode,
+    parse_network_proxy_mode, AppConfig, NetworkProxyMode, UserBillingConfig, UserConfig,
+    UserModelConfig, UserNetworkConfig, UserProxyConfig, UserToolsConfig, UserUiConfig,
+    UserUpstreamConfig,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -18,7 +19,6 @@ pub(crate) fn user_config_from_payload(
 
     if payload.get("DEEPSEEK_BASE_URL").is_some()
         || payload.get("DEEPSEEK_OFFICIAL_V1_COMPAT").is_some()
-        || payload.get("DEEPSEEK_API_KEY").is_some()
     {
         let upstream = config
             .upstream
@@ -28,9 +28,6 @@ pub(crate) fn user_config_from_payload(
         }
         if payload.get("DEEPSEEK_OFFICIAL_V1_COMPAT").is_some() {
             upstream.official_v1_compat = value_bool(payload, "DEEPSEEK_OFFICIAL_V1_COMPAT");
-        }
-        if payload.get("DEEPSEEK_API_KEY").is_some() {
-            upstream.api_key = value_string(payload, "DEEPSEEK_API_KEY");
         }
     }
 
@@ -48,14 +45,6 @@ pub(crate) fn user_config_from_payload(
         if payload.get("DEEPSEEK_THINKING").is_some() {
             model.thinking = value_string(payload, "DEEPSEEK_THINKING");
         }
-    }
-
-    if payload.get("CATALOG_MODE").is_some() {
-        config
-            .catalog
-            .get_or_insert_with(UserCatalogConfig::default)
-            .mode = value_string(payload, "CATALOG_MODE")
-            .map(|value| normalize_catalog_mode(&value).to_owned());
     }
 
     if payload.get("UI_THEME").is_some()
@@ -118,28 +107,31 @@ pub(crate) fn user_config_from_payload(
         }
     }
 
-    let community_config_keys =
-        crate::community_tools::community_tool_config_keys(&app_config.data_dir);
-    let has_tool_settings = community_config_keys
+    if payload.get("NETWORK_PROXY_MODE").is_some() || payload.get("WEB_SEARCH_PROXY_MODE").is_some()
+    {
+        let network = config
+            .network
+            .get_or_insert_with(UserNetworkConfig::default);
+        network.proxy = value_network_proxy(payload, "NETWORK_PROXY_MODE")
+            .or_else(|| value_network_proxy(payload, "WEB_SEARCH_PROXY_MODE"));
+        clear_legacy_web_search_proxy(&mut config);
+    }
+
+    let mut tool_config_keys = crate::tools::registry::builtin_tool_config_keys();
+    tool_config_keys.extend(crate::community_tools::community_tool_config_keys(
+        &app_config.data_dir,
+    ));
+    let has_tool_settings = tool_config_keys
         .iter()
         .any(|key| payload.get(key).is_some());
-    if payload.get("ENABLED_TOOLS").is_some()
-        || payload.get("WEB_SEARCH_PROXY_MODE").is_some()
-        || has_tool_settings
-    {
+    if payload.get("ENABLED_TOOLS").is_some() || has_tool_settings {
         let tools = config.tools.get_or_insert_with(UserToolsConfig::default);
         if payload.get("ENABLED_TOOLS").is_some() {
             tools.enabled = value_string_list(payload, "ENABLED_TOOLS").map(configurable_tool_ids);
         }
-        if payload.get("WEB_SEARCH_PROXY_MODE").is_some() {
-            let web_search = tools
-                .web_search
-                .get_or_insert_with(UserWebSearchToolConfig::default);
-            web_search.proxy = value_web_search_proxy(payload, "WEB_SEARCH_PROXY_MODE");
-        }
         if has_tool_settings {
             let settings = tools.settings.get_or_insert_with(BTreeMap::new);
-            for key in community_config_keys {
+            for key in tool_config_keys {
                 let Some(value) = payload.get(&key) else {
                     continue;
                 };
@@ -149,10 +141,43 @@ pub(crate) fn user_config_from_payload(
                     settings.insert(key, value);
                 }
             }
+            normalize_builtin_tool_settings(settings);
         }
     }
 
     config
+}
+
+fn clear_legacy_web_search_proxy(config: &mut UserConfig) {
+    let Some(tools) = config.tools.as_mut() else {
+        return;
+    };
+    if let Some(web_search) = tools.web_search.as_mut() {
+        web_search.proxy = None;
+    }
+    if tools
+        .web_search
+        .as_ref()
+        .is_some_and(|web_search| web_search.proxy.is_none())
+    {
+        tools.web_search = None;
+    }
+}
+
+fn normalize_builtin_tool_settings(settings: &mut BTreeMap<String, String>) {
+    migrate_tool_setting(settings, "VISUAL_SEARCH_URL", "VISION_ANALYZE_URL");
+    migrate_tool_setting(settings, "VISUAL_SEARCH_MODEL", "VISION_ANALYZE_MODEL");
+    migrate_tool_setting(settings, "VISUAL_SEARCH_API_KEY", "VISION_API_KEY");
+}
+
+fn migrate_tool_setting(settings: &mut BTreeMap<String, String>, old_key: &str, new_key: &str) {
+    if settings.contains_key(new_key) {
+        settings.remove(old_key);
+        return;
+    }
+    if let Some(value) = settings.remove(old_key) {
+        settings.insert(new_key.to_owned(), value);
+    }
 }
 
 fn configurable_tool_ids(ids: Vec<String>) -> Vec<String> {
@@ -163,6 +188,23 @@ fn configurable_tool_ids(ids: Vec<String>) -> Vec<String> {
                 id.as_str(),
                 "apply_patch" | "web_search" | "mcp" | "mcp_server"
             )
+        })
+        .map(|id| {
+            if matches!(
+                id.as_str(),
+                "visual_search"
+                    | "vision_generate"
+                    | "image_gen"
+                    | "imagegen"
+                    | "image_generation"
+                    | "generate_image"
+                    | "image_generate"
+                    | "create_image"
+            ) {
+                "vision_analyze".to_owned()
+            } else {
+                id
+            }
         })
         .filter(|id| seen.insert(id.clone()))
         .collect()
@@ -271,12 +313,8 @@ fn value_temperature(payload: &Value, key: &str) -> Option<TemperaturePreset> {
     }
 }
 
-fn value_web_search_proxy(payload: &Value, key: &str) -> Option<WebSearchProxyMode> {
-    match value_string(payload, key)?.to_ascii_lowercase().as_str() {
-        "none" | "no_proxy" | "direct" => Some(WebSearchProxyMode::None),
-        "system" | "follow_system" | "default" => Some(WebSearchProxyMode::System),
-        _ => None,
-    }
+fn value_network_proxy(payload: &Value, key: &str) -> Option<NetworkProxyMode> {
+    parse_network_proxy_mode(&value_string(payload, key)?)
 }
 
 pub(crate) fn model_override_to_ui(value: UpstreamModelOverride) -> &'static str {
@@ -297,10 +335,179 @@ pub(crate) fn temperature_to_ui(value: TemperaturePreset) -> &'static str {
     }
 }
 
-pub(crate) fn normalize_catalog_mode(value: &str) -> &'static str {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "auto" => "auto",
-        "builtin" | "built-in" | "built_in" => "builtin",
-        _ => "default",
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn payload_does_not_persist_api_key_or_catalog_mode() {
+        let config = user_config_from_payload(
+            &json!({
+                "DEEPSEEK_BASE_URL": "http://127.0.0.1:9000/v1",
+                "DEEPSEEK_API_KEY": "should-not-be-saved",
+                "CATALOG_MODE": "auto"
+            }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+
+        assert_eq!(
+            config
+                .upstream
+                .as_ref()
+                .and_then(|upstream| upstream.base_url.as_deref()),
+            Some("http://127.0.0.1:9000/v1")
+        );
+        assert!(config
+            .upstream
+            .as_ref()
+            .and_then(|upstream| upstream.api_key.as_ref())
+            .is_none());
+        assert!(config.catalog.is_none());
+    }
+
+    #[test]
+    fn payload_persists_vision_tool_settings() {
+        let config = user_config_from_payload(
+            &json!({
+                "ENABLED_TOOLS": ["vision_analyze"],
+                "VISION_ANALYZE_URL": "https://vision.example.com/v1",
+                "VISION_ANALYZE_MODEL": "vision-model",
+                "VISION_GENERATE_URL": "https://vision.example.com/v1/images/generations",
+                "VISION_GENERATE_MODEL": "image-model",
+                "VISION_API_KEY": "visual-secret"
+            }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+        let tools = config.tools.expect("tools config");
+        assert_eq!(
+            tools.enabled.as_deref(),
+            Some(&["vision_analyze".to_owned()][..])
+        );
+        let settings = tools.settings.expect("tool settings");
+        assert_eq!(
+            settings.get("VISION_ANALYZE_URL").map(String::as_str),
+            Some("https://vision.example.com/v1")
+        );
+        assert_eq!(
+            settings.get("VISION_ANALYZE_MODEL").map(String::as_str),
+            Some("vision-model")
+        );
+        assert_eq!(
+            settings.get("VISION_GENERATE_URL").map(String::as_str),
+            Some("https://vision.example.com/v1/images/generations")
+        );
+        assert_eq!(
+            settings.get("VISION_GENERATE_MODEL").map(String::as_str),
+            Some("image-model")
+        );
+        assert_eq!(
+            settings.get("VISION_API_KEY").map(String::as_str),
+            Some("visual-secret")
+        );
+    }
+
+    #[test]
+    fn payload_persists_network_proxy_outside_tool_config() {
+        let config = user_config_from_payload(
+            &json!({ "NETWORK_PROXY_MODE": "none" }),
+            UserConfig {
+                tools: Some(UserToolsConfig {
+                    web_search: Some(codeseex_core::UserWebSearchToolConfig {
+                        proxy: Some(NetworkProxyMode::System),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &AppConfig::default(),
+        );
+
+        assert_eq!(
+            config.network.as_ref().and_then(|network| network.proxy),
+            Some(NetworkProxyMode::None)
+        );
+        assert!(config
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.web_search.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn payload_accepts_legacy_web_search_proxy_key_as_network_proxy() {
+        let config = user_config_from_payload(
+            &json!({ "WEB_SEARCH_PROXY_MODE": "none" }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+
+        assert_eq!(
+            config.network.as_ref().and_then(|network| network.proxy),
+            Some(NetworkProxyMode::None)
+        );
+    }
+
+    #[test]
+    fn payload_canonicalizes_legacy_visual_search_tool_id() {
+        let config = user_config_from_payload(
+            &json!({ "ENABLED_TOOLS": ["visual_search"] }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+        let tools = config.tools.expect("tools config");
+        assert_eq!(
+            tools.enabled.as_deref(),
+            Some(&["vision_analyze".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn payload_canonicalizes_vision_generate_to_vision_module() {
+        let config = user_config_from_payload(
+            &json!({ "ENABLED_TOOLS": ["vision_generate", "image_gen"] }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+        let tools = config.tools.expect("tools config");
+        assert_eq!(
+            tools.enabled.as_deref(),
+            Some(&["vision_analyze".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn payload_migrates_legacy_visual_search_tool_settings() {
+        let config = user_config_from_payload(
+            &json!({
+                "VISUAL_SEARCH_URL": "https://vision.example.com/v1",
+                "VISUAL_SEARCH_MODEL": "vision-model",
+                "VISUAL_SEARCH_API_KEY": "visual-secret"
+            }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+        let settings = config
+            .tools
+            .expect("tools config")
+            .settings
+            .expect("tool settings");
+        assert_eq!(
+            settings.get("VISION_ANALYZE_URL").map(String::as_str),
+            Some("https://vision.example.com/v1")
+        );
+        assert_eq!(
+            settings.get("VISION_ANALYZE_MODEL").map(String::as_str),
+            Some("vision-model")
+        );
+        assert_eq!(
+            settings.get("VISION_API_KEY").map(String::as_str),
+            Some("visual-secret")
+        );
+        assert!(!settings.contains_key("VISUAL_SEARCH_URL"));
+        assert!(!settings.contains_key("VISUAL_SEARCH_MODEL"));
+        assert!(!settings.contains_key("VISUAL_SEARCH_API_KEY"));
     }
 }

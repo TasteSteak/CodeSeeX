@@ -156,7 +156,7 @@ pub(super) fn bytes_have_binary_markers(bytes: &[u8]) -> bool {
         return false;
     }
     let sample = &bytes[..bytes.len().min(4096)];
-    sample.starts_with(b"%PDF") || sample.iter().any(|byte| *byte == 0)
+    sample.starts_with(b"%PDF") || sample.contains(&0)
 }
 
 pub(super) fn decode_text_bytes(bytes: &[u8], content_type: &str) -> (String, &'static str, bool) {

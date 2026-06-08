@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const MODEL_FLASH: &str = "deepseek-v4-flash";
 pub const MODEL_PRO: &str = "deepseek-v4-pro";
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
-pub const DEFAULT_EFFECTIVE_CONTEXT_PERCENT: u8 = 90;
+pub const DEFAULT_EFFECTIVE_CONTEXT_PERCENT: u8 = 95;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelInfo {

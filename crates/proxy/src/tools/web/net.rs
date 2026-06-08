@@ -1,4 +1,4 @@
-use codeseex_core::WebSearchProxyMode;
+use codeseex_core::NetworkProxyMode;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::error::Error;
@@ -11,8 +11,8 @@ pub(super) fn user_agent() -> &'static str {
     "Mozilla/5.0 (compatible; CodeSeeX/1.0; +https://localhost)"
 }
 
-pub(super) fn web_client(proxy_mode: WebSearchProxyMode) -> reqwest::Client {
-    apply_proxy_mode(reqwest::Client::builder(), proxy_mode)
+pub(super) fn web_client(proxy_mode: NetworkProxyMode) -> reqwest::Client {
+    crate::network::apply_proxy_mode(reqwest::Client::builder(), proxy_mode)
         .http1_only()
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         .timeout(std::time::Duration::from_secs(30))
@@ -20,108 +20,14 @@ pub(super) fn web_client(proxy_mode: WebSearchProxyMode) -> reqwest::Client {
         .expect("build web client")
 }
 
-pub(super) fn no_redirect_client(proxy_mode: WebSearchProxyMode) -> reqwest::Client {
-    apply_proxy_mode(reqwest::Client::builder(), proxy_mode)
+pub(super) fn no_redirect_client(proxy_mode: NetworkProxyMode) -> reqwest::Client {
+    crate::network::apply_proxy_mode(reqwest::Client::builder(), proxy_mode)
         .http1_only()
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("build no-redirect web client")
-}
-
-fn apply_proxy_mode(
-    builder: reqwest::ClientBuilder,
-    proxy_mode: WebSearchProxyMode,
-) -> reqwest::ClientBuilder {
-    match proxy_mode {
-        WebSearchProxyMode::System => {
-            if let Some(proxy_url) = system_proxy_url() {
-                if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
-                    return builder.proxy(proxy);
-                }
-            }
-            builder
-        }
-        WebSearchProxyMode::None => builder.no_proxy(),
-    }
-}
-
-fn system_proxy_url() -> Option<String> {
-    env_proxy_url().or_else(windows_internet_settings_proxy_url)
-}
-
-fn env_proxy_url() -> Option<String> {
-    ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"]
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .find_map(|value| normalize_proxy_server(&value))
-}
-
-#[cfg(windows)]
-fn windows_internet_settings_proxy_url() -> Option<String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
-    use winreg::RegKey;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let settings = hkcu
-        .open_subkey_with_flags(
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-            KEY_READ,
-        )
-        .ok()?;
-    let enabled = settings
-        .get_value::<u32, _>("ProxyEnable")
-        .ok()
-        .or_else(|| {
-            settings
-                .get_value::<u64, _>("ProxyEnable")
-                .ok()
-                .and_then(|value| u32::try_from(value).ok())
-        })?;
-    if enabled == 0 {
-        return None;
-    }
-    let server = settings.get_value::<String, _>("ProxyServer").ok()?;
-    normalize_proxy_server(&server)
-}
-
-#[cfg(not(windows))]
-fn windows_internet_settings_proxy_url() -> Option<String> {
-    None
-}
-
-fn normalize_proxy_server(value: &str) -> Option<String> {
-    let selected = select_proxy_server(value)?;
-    let selected = selected.trim();
-    if selected.is_empty() {
-        return None;
-    }
-    if selected.contains("://") {
-        return Some(selected.to_owned());
-    }
-    Some(format!("http://{selected}"))
-}
-
-fn select_proxy_server(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if !trimmed.contains('=') {
-        return Some(trimmed);
-    }
-    let entries = trimmed
-        .split(';')
-        .filter_map(|entry| entry.split_once('='))
-        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
-        .collect::<Vec<_>>();
-    for wanted in ["https", "http"] {
-        if let Some((_, value)) = entries.iter().find(|(key, _)| key == wanted) {
-            return Some(*value);
-        }
-    }
-    entries.first().map(|(_, value)| *value)
 }
 
 pub(super) async fn fetch_text(client: &reqwest::Client, url: reqwest::Url, accept: &str) -> Value {
@@ -172,27 +78,6 @@ pub(super) async fn fetch_text(client: &reqwest::Client, url: reqwest::Url, acce
         "bytes": bytes.len(),
         "truncated": byte_truncated
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalizes_plain_system_proxy_server() {
-        assert_eq!(
-            normalize_proxy_server("127.0.0.1:7890").as_deref(),
-            Some("http://127.0.0.1:7890")
-        );
-    }
-
-    #[test]
-    fn normalizes_protocol_mapped_system_proxy_server() {
-        assert_eq!(
-            normalize_proxy_server("http=127.0.0.1:7890;https=127.0.0.1:7891").as_deref(),
-            Some("http://127.0.0.1:7891")
-        );
-    }
 }
 
 pub(super) fn request_error_message(error: &reqwest::Error) -> String {

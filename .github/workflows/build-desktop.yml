@@ -1,0 +1,196 @@
+name: Build desktop artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Check JavaScript and language JSON
+        run: |
+          node --check apps/ui/public/app.js
+          node -e "const fs=require('fs'); for (const f of fs.readdirSync('apps/ui/public/lang')) JSON.parse(fs.readFileSync('apps/ui/public/lang/'+f,'utf8'));"
+
+      - name: Test proxy crates
+        run: cargo test -p codeseex-core -p codeseex-store -p codeseex-proxy
+
+      - name: Check desktop crate
+        run: cargo check -p codeseex-desktop --no-default-features --features tauri/custom-protocol
+
+  package:
+    name: ${{ matrix.label }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            bundle_args: --bundles nsis
+            artifact_name: CodeSeeX-Windows-x64
+          - label: macOS arm64
+            os: macos-14
+            bundle_args: --bundles dmg
+            artifact_name: CodeSeeX-MacOS-arm64
+          - label: Linux x64
+            os: ubuntu-24.04
+            bundle_args: --bundles appimage
+            artifact_name: CodeSeeX-Linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
+
+      - name: Install Windows bundler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Tauri bundle
+        working-directory: apps/desktop/src-tauri
+        run: cargo tauri build --ci --no-sign --features tauri/custom-protocol ${{ matrix.bundle_args }}
+
+      - name: Upload ${{ matrix.label }} artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            target/release/bundle/**/*
+            apps/desktop/src-tauri/target/release/bundle/**/*
+
+  release:
+    name: Publish GitHub Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Build release notes
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v version="$VERSION" '
+            $0 ~ "^## " version "([[:space:]]|$)" { in_section = 1; print; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            printf 'CodeSeeX %s\n' "$VERSION" > release-notes.md
+          fi
+
+      - name: Prepare product assets
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release-upload
+
+          for file in release-assets/**/*; do
+            if [ ! -f "$file" ]; then
+              continue
+            fi
+
+            case "$file" in
+              release-assets/CodeSeeX-Windows-*/*.exe)
+                cp "$file" "release-upload/Windows-CodeSeeX.Setup.${VERSION}.exe"
+                ;;
+              release-assets/CodeSeeX-MacOS-*/*.dmg)
+                cp "$file" "release-upload/MacOS-CodeSeeX-${VERSION}-arm64.dmg"
+                ;;
+              release-assets/CodeSeeX-Linux-*/*.AppImage)
+                cp "$file" "release-upload/Linux-CodeSeeX-${VERSION}.AppImage"
+                ;;
+            esac
+          done
+
+          find release-upload -maxdepth 1 -type f -print | sort
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(release-upload/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No product assets found."
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "CodeSeeX $VERSION" --notes-file release-notes.md --draft=false --prerelease=false --latest
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "CodeSeeX $VERSION" --notes-file release-notes.md --latest
+          fi

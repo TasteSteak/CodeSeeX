@@ -4,7 +4,8 @@ use crate::tools::chat_protocol::{
 };
 use crate::tools::diagnostics::{attach_tool_loop_warning, ToolLoopDiagnostics};
 use crate::tools::hosted::{
-    execute_code_tool, is_code_tool_executable, summarize_tool_result, tool_fact_line,
+    execute_code_tool, is_code_tool_executable, summarize_tool_result,
+    summarize_tool_result_for_log, tool_fact_line,
 };
 use crate::tools::ownership::{
     is_web_search_tool, partition_tool_calls, proxy_executed_calls_in_order,
@@ -27,6 +28,7 @@ pub(crate) struct ToolLoopContext<'a> {
     pub(crate) tool_context: &'a crate::tools::ToolExecutionContext,
     pub(crate) community_tools: &'a crate::community_tools::CommunityToolSet,
     pub(crate) external_tool_context: &'a crate::tool_passthrough::ToolContext,
+    pub(crate) current_image_refs: &'a [String],
 }
 
 pub(crate) enum ToolLoopResult {
@@ -157,6 +159,7 @@ pub(crate) async fn complete_chat_with_tools(
                 context.config,
                 context.tool_context,
                 messages,
+                context.current_image_refs,
                 context.community_tools,
                 &call,
             )
@@ -179,6 +182,7 @@ pub(crate) async fn complete_chat_with_tools(
                     )
                     .await;
             }
+            let result_log_summary = summarize_tool_result_for_log(&result);
             let result_summary = summarize_tool_result(&result);
             let result_text = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_owned());
             let result_text = redact_inline_data_urls(&result_text);
@@ -200,7 +204,7 @@ pub(crate) async fn complete_chat_with_tools(
                         "name": call.name,
                         "iteration": iteration + 1,
                         "ok": result.get("ok").and_then(Value::as_bool),
-                        "summary": result_summary
+                        "summary": result_log_summary
                     })),
                 )
                 .await;

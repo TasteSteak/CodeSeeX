@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -16,13 +17,14 @@ pub struct AppConfig {
     pub upstream: UpstreamConfig,
     pub model_override: UpstreamModelOverride,
     pub temperature: TemperaturePreset,
-    pub web_search_proxy: WebSearchProxyMode,
+    pub network_proxy: NetworkProxyMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     pub base_url: String,
     pub official_v1_compat: bool,
+    // Process environment fallback only. Manager/user TOML is not credential storage.
     pub api_key: Option<String>,
     pub timeout_ms: u64,
 }
@@ -33,6 +35,7 @@ pub struct UserConfig {
     pub upstream: Option<UserUpstreamConfig>,
     pub model: Option<UserModelConfig>,
     pub catalog: Option<UserCatalogConfig>,
+    pub network: Option<UserNetworkConfig>,
     pub ui: Option<UserUiConfig>,
     pub billing: Option<UserBillingConfig>,
     pub tools: Option<UserToolsConfig>,
@@ -48,6 +51,7 @@ pub struct UserProxyConfig {
 pub struct UserUpstreamConfig {
     pub base_url: Option<String>,
     pub official_v1_compat: Option<bool>,
+    // Kept to deserialize legacy TOML, but ignored when applying user config.
     pub api_key: Option<String>,
     pub timeout_ms: Option<u64>,
 }
@@ -63,6 +67,11 @@ pub struct UserModelConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserCatalogConfig {
     pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserNetworkConfig {
+    pub proxy: Option<NetworkProxyMode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -94,12 +103,12 @@ pub struct UserToolsConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserWebSearchToolConfig {
-    pub proxy: Option<WebSearchProxyMode>,
+    pub proxy: Option<NetworkProxyMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WebSearchProxyMode {
+pub enum NetworkProxyMode {
     System,
     None,
 }
@@ -116,7 +125,7 @@ impl Default for AppConfig {
             upstream: UpstreamConfig::default(),
             model_override: env_model_override("UPSTREAM_MODEL_OVERRIDE"),
             temperature: env_temperature("DEEPSEEK_TEMPERATURE_PRESET"),
-            web_search_proxy: env_web_search_proxy("WEB_SEARCH_PROXY_MODE"),
+            network_proxy: env_network_proxy(),
         }
     }
 }
@@ -141,6 +150,7 @@ impl Default for UpstreamConfig {
 
 impl AppConfig {
     pub fn load() -> Self {
+        load_dotenv_once();
         let mut config = Self::default();
         let path = config.config_path();
         let Ok(user_config) = UserConfig::read_from(&path) else {
@@ -195,11 +205,6 @@ impl AppConfig {
                     self.upstream.official_v1_compat = official_v1_compat;
                 }
             }
-            if env::var("DEEPSEEK_API_KEY").is_err() {
-                if let Some(api_key) = upstream.api_key.filter(|value| !value.trim().is_empty()) {
-                    self.upstream.api_key = Some(api_key);
-                }
-            }
             if env::var("UPSTREAM_REQUEST_TIMEOUT_MS").is_err() {
                 if let Some(timeout_ms) = upstream.timeout_ms {
                     self.upstream.timeout_ms = timeout_ms;
@@ -220,11 +225,20 @@ impl AppConfig {
             }
         }
 
-        if let Some(tools) = user_config.tools {
-            if env::var("WEB_SEARCH_PROXY_MODE").is_err() {
-                if let Some(proxy) = tools.web_search.and_then(|web_search| web_search.proxy) {
-                    self.web_search_proxy = proxy;
-                }
+        let user_network_proxy = user_config
+            .network
+            .as_ref()
+            .and_then(|network| network.proxy)
+            .or_else(|| {
+                user_config
+                    .tools
+                    .as_ref()
+                    .and_then(|tools| tools.web_search.as_ref())
+                    .and_then(|web_search| web_search.proxy)
+            });
+        if env::var("NETWORK_PROXY_MODE").is_err() && env::var("WEB_SEARCH_PROXY_MODE").is_err() {
+            if let Some(proxy) = user_network_proxy {
+                self.network_proxy = proxy;
             }
         }
     }
@@ -266,7 +280,64 @@ pub fn default_data_dir() -> PathBuf {
     }
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codeseex-next")
+        .join(".codeseex")
+}
+
+fn load_dotenv_once() {
+    static LOADED: OnceLock<()> = OnceLock::new();
+    LOADED.get_or_init(load_dotenv_candidates);
+}
+
+fn load_dotenv_candidates() {
+    let mut candidates = Vec::new();
+    if let Ok(current_dir) = env::current_dir() {
+        candidates.push(current_dir.join(".env"));
+    }
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join(".env"));
+        }
+    }
+    if let Some(home_dir) = dirs_next::home_dir() {
+        candidates.push(home_dir.join(".codeseex").join(".env"));
+        candidates.push(home_dir.join(".codeseex").join("secrets").join(".env"));
+    }
+
+    let mut seen = Vec::<PathBuf>::new();
+    for path in candidates {
+        if seen.iter().any(|existing| existing == &path) {
+            continue;
+        }
+        seen.push(path.clone());
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            apply_dotenv_line(line);
+        }
+    }
+}
+
+fn apply_dotenv_line(line: &str) {
+    let line = line.trim().strip_prefix('\u{feff}').unwrap_or(line.trim());
+    if line.is_empty() || line.starts_with('#') {
+        return;
+    }
+    let Some((name, value)) = line.split_once('=') else {
+        return;
+    };
+    let name = name.trim();
+    if name.is_empty() || env::var_os(name).is_some() {
+        return;
+    }
+    let mut value = value.trim().to_owned();
+    if ((value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\'')))
+        && value.len() >= 2
+    {
+        value = value[1..value.len() - 1].to_owned();
+    }
+    env::set_var(name, value);
 }
 
 fn env_bool(key: &str, fallback: bool) -> bool {
@@ -307,15 +378,19 @@ fn env_temperature(key: &str) -> TemperaturePreset {
     }
 }
 
-fn env_web_search_proxy(key: &str) -> WebSearchProxyMode {
-    match env::var(key)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "none" | "no_proxy" | "direct" => WebSearchProxyMode::None,
-        _ => WebSearchProxyMode::System,
+fn env_network_proxy() -> NetworkProxyMode {
+    env::var("NETWORK_PROXY_MODE")
+        .ok()
+        .or_else(|| env::var("WEB_SEARCH_PROXY_MODE").ok())
+        .and_then(|value| parse_network_proxy_mode(&value))
+        .unwrap_or(NetworkProxyMode::System)
+}
+
+pub fn parse_network_proxy_mode(value: &str) -> Option<NetworkProxyMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "no_proxy" | "direct" => Some(NetworkProxyMode::None),
+        "system" | "follow_system" | "default" | "" => Some(NetworkProxyMode::System),
+        _ => None,
     }
 }
 
@@ -330,7 +405,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time before epoch")
             .as_nanos();
-        let path = env::temp_dir().join(format!("codeseex-next-bom-config-{nanos}.toml"));
+        let path = env::temp_dir().join(format!("codeseex-bom-config-{nanos}.toml"));
         fs::write(
             &path,
             "\u{feff}[ui]\nclose_behavior = \"tray\"\nlanguage = \"system\"\n",
@@ -342,5 +417,70 @@ mod tests {
         assert_eq!(ui.close_behavior.as_deref(), Some("tray"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dotenv_line_accepts_utf8_bom() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let key = format!("CODESEEX_DOTENV_BOM_TEST_{nanos}");
+        apply_dotenv_line(&format!("\u{feff}{key}=ok"));
+
+        assert_eq!(env::var(&key).as_deref(), Ok("ok"));
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn legacy_user_config_api_key_is_not_applied() {
+        let mut config = AppConfig::default();
+        config.upstream.api_key = None;
+        config.apply_user_config(UserConfig {
+            upstream: Some(UserUpstreamConfig {
+                api_key: Some("legacy-manager-key".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        assert!(config.upstream.api_key.is_none());
+    }
+
+    #[test]
+    fn network_proxy_prefers_new_user_config_over_legacy_web_search_config() {
+        let mut config = AppConfig::default();
+        config.network_proxy = NetworkProxyMode::System;
+        config.apply_user_config(UserConfig {
+            network: Some(UserNetworkConfig {
+                proxy: Some(NetworkProxyMode::None),
+            }),
+            tools: Some(UserToolsConfig {
+                web_search: Some(UserWebSearchToolConfig {
+                    proxy: Some(NetworkProxyMode::System),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        assert_eq!(config.network_proxy, NetworkProxyMode::None);
+    }
+
+    #[test]
+    fn network_proxy_accepts_legacy_web_search_user_config() {
+        let mut config = AppConfig::default();
+        config.network_proxy = NetworkProxyMode::System;
+        config.apply_user_config(UserConfig {
+            tools: Some(UserToolsConfig {
+                web_search: Some(UserWebSearchToolConfig {
+                    proxy: Some(NetworkProxyMode::None),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        assert_eq!(config.network_proxy, NetworkProxyMode::None);
     }
 }

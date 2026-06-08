@@ -3,7 +3,7 @@
 Community tools are local CodeSeeX extensions installed under:
 
 ```text
-~/.codeseex-next/
+~/.codeseex/
   extension/
     tools/
       my-tool/

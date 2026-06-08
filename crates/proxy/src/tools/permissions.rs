@@ -62,7 +62,7 @@ impl ToolPermissionContext {
             .workspace_roots
             .first()
             .ok_or(ToolPermissionError::WorkspaceRootNotConfigured)?;
-        let absolute_input = is_absolute_host_path(raw);
+        let absolute_input = should_treat_as_host_absolute(raw, root);
         let joined = if absolute_input {
             PathBuf::from(raw)
         } else {
@@ -140,6 +140,21 @@ fn is_absolute_host_path(path: &str) -> bool {
     has_windows_drive_prefix(trimmed)
         || is_unc_path(trimmed)
         || (!cfg!(windows) && Path::new(trimmed).is_absolute())
+}
+
+fn should_treat_as_host_absolute(raw: &str, workspace_root: &Path) -> bool {
+    let trimmed = raw.trim();
+    if !is_absolute_host_path(trimmed) {
+        return false;
+    }
+    if has_windows_drive_prefix(trimmed) || is_unc_path(trimmed) || cfg!(windows) {
+        return true;
+    }
+    if trimmed == "/" {
+        return false;
+    }
+    let virtual_workspace_path = normalize_workspace_path(trimmed);
+    !workspace_root.join(virtual_workspace_path).exists()
 }
 
 fn find_containing_workspace_root<'a>(roots: &'a [PathBuf], path: &Path) -> Option<&'a Path> {
@@ -488,6 +503,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        env::temp_dir().join(format!("codeseex-next-{label}-{nanos}"))
+        env::temp_dir().join(format!("codeseex-{label}-{nanos}"))
     }
 }

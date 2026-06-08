@@ -423,7 +423,7 @@ fn parse_brave_results(query: &str, html: &str, max_results: usize) -> Vec<Value
         let snippet_end = matches
             .get(index + 1)
             .and_then(|next| next.get(0).map(|value| value.start()))
-            .unwrap_or_else(|| html.len())
+            .unwrap_or(html.len())
             .min(snippet_start.saturating_add(1800));
         let snippet = html
             .get(snippet_start..snippet_end)
@@ -480,7 +480,7 @@ fn parse_duckduckgo_lite_results(query: &str, html: &str, max_results: usize) ->
         let snippet_end = matches
             .get(index + 1)
             .and_then(|next| next.get(0).map(|value| value.start()))
-            .unwrap_or_else(|| html.len())
+            .unwrap_or(html.len())
             .min(snippet_start.saturating_add(1600));
         let snippet = html
             .get(snippet_start..snippet_end)

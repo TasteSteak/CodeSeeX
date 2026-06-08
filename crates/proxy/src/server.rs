@@ -34,7 +34,8 @@ use crate::tools::chat_protocol::chat_tool_calls_to_assistant_message;
 use crate::tools::coordinator::{complete_chat_with_tools, ToolLoopContext, ToolLoopResult};
 use crate::tools::diagnostics::{attach_tool_loop_warning, ToolLoopDiagnostics};
 use crate::tools::hosted::{
-    execute_code_tool, is_code_tool_executable, summarize_tool_result, tool_fact_line,
+    execute_code_tool, is_code_tool_executable, summarize_tool_result,
+    summarize_tool_result_for_log, tool_fact_line,
 };
 use crate::tools::ownership::ChatToolCall;
 use crate::tools::ownership::{
@@ -64,6 +65,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -123,7 +125,7 @@ where
     let timeout = std::time::Duration::from_millis(config.upstream.timeout_ms);
     let state = ProxyState {
         config: Arc::new(config.clone()),
-        client: reqwest::Client::builder().timeout(timeout).build()?,
+        client: crate::network::client(config.network_proxy, timeout)?,
         store,
     };
     let shutdown_store = state.store.clone();
@@ -145,15 +147,139 @@ where
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let listener = TcpListener::bind((config.host.as_str(), config.port)).await?;
-    tracing::info!("CodeSeeX proxy listening on {}", config.proxy_base_url());
+    let listener = match TcpListener::bind((config.host.as_str(), config.port)).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = shutdown_store
+                .record_event(
+                    "error",
+                    "proxy_start_failed",
+                    "CodeSeeX proxy failed to start.",
+                    Some(&json!({
+                        "host": config.host.clone(),
+                        "port": config.port,
+                        "error": error.to_string()
+                    })),
+                )
+                .await;
+            shutdown_store.close().await;
+            return Err(error.into());
+        }
+    };
+    let local_addr = listener.local_addr()?;
+    let listener_base_url = proxy_base_url_for_listener(&config, local_addr);
+    let listener_detail = json!({
+        "base_url": listener_base_url.clone(),
+        "host": config.host.clone(),
+        "port": local_addr.port()
+    });
+    tracing::info!("CodeSeeX proxy listening on {}", listener_base_url);
+    let _ = shutdown_store
+        .record_event(
+            "info",
+            "proxy_started",
+            "CodeSeeX proxy started.",
+            Some(&listener_detail),
+        )
+        .await;
     on_listening();
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await;
+    let _ = shutdown_store
+        .record_event(
+            "info",
+            "proxy_stopped",
+            "CodeSeeX proxy stopped.",
+            Some(&listener_detail),
+        )
+        .await;
     shutdown_store.close().await;
     result?;
     Ok(())
+}
+
+fn proxy_base_url_for_listener(config: &AppConfig, local_addr: SocketAddr) -> String {
+    let port = local_addr.port();
+    if port == config.port {
+        return config.proxy_base_url();
+    }
+    format!("http://{}:{port}/v1", config.host)
+}
+
+fn tool_exposure_diagnostic(
+    request_id: &str,
+    external_tool_context: &ToolContext,
+    upstream_tools: &[Value],
+) -> Value {
+    let upstream_names = upstream_tool_names(upstream_tools);
+    json!({
+        "id": request_id,
+        "incoming_tool_items": external_tool_context.request_tool_items(),
+        "external_callable_tools": limited_tool_names(external_tool_context.source_names()),
+        "external_upstream_tools": limited_tool_names(external_tool_context.upstream_names()),
+        "final_upstream_tools": limited_tool_names(upstream_names.clone()),
+        "interesting_tools": interesting_tool_names(&upstream_names)
+    })
+}
+
+fn upstream_tool_names(tools: &[Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            tool.pointer("/function/name")
+                .or_else(|| tool.get("name"))
+                .or_else(|| tool.get("type"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn limited_tool_names(names: Vec<String>) -> Value {
+    const MAX_TOOL_NAMES: usize = 120;
+    let total = names.len();
+    let shown = names.into_iter().take(MAX_TOOL_NAMES).collect::<Vec<_>>();
+    let shown_count = shown.len();
+    json!({
+        "count": total,
+        "names": shown,
+        "omitted": total.saturating_sub(shown_count)
+    })
+}
+
+fn interesting_tool_names(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("tool_search")
+                || lower.contains("spawn_agent")
+                || lower.contains("agent")
+                || lower.contains("thread")
+                || lower.contains("computer")
+                || lower.contains("automation")
+        })
+        .cloned()
+        .collect()
+}
+
+fn request_has_codex_native_tool_surface(external_tool_context: &ToolContext) -> bool {
+    external_tool_context.has_any_response_tool(&[
+        "apply_patch",
+        "shell_command",
+        "view_image",
+        "request_user_input",
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+        "js",
+        "js_reset",
+        "js_add_node_module_dir",
+        "load_workspace_dependencies",
+        "create_goal",
+        "update_goal",
+    ])
 }
 
 async fn models() -> impl IntoResponse {
@@ -216,6 +342,9 @@ async fn chat_completions(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    if let Some(auth) = auth.as_deref() {
+        codeseex_core::codex_auth::remember_authorization_header(auth);
+    }
     match crate::upstream::post_chat_completions(
         &state.client,
         &config.upstream,
@@ -532,6 +661,7 @@ async fn responses(
     }
     let built_context = build_response_context(&state, &input, previous_for_context).await;
     let tool_execution_context = crate::tools::ToolExecutionContext::from_request(&input);
+    let current_image_refs = built_context.current_image_refs.clone();
     let mut context_diagnostic = built_context.diagnostic.clone();
     if let Some(object) = context_diagnostic.as_object_mut() {
         object.insert(
@@ -573,12 +703,28 @@ async fn responses(
         &enabled_tools,
         &tool_settings,
     );
-    let external_tool_context =
+    let mut external_tool_context =
         crate::tool_passthrough::ToolContext::from_request_tools(input.get("tools"));
+    if request_has_codex_native_tool_surface(&external_tool_context) {
+        external_tool_context.ensure_codex_tool_search_bridge();
+    }
     let mut tools = crate::tools::upstream_tool_definitions(&enabled_tools);
     tools.extend(community_tools.definitions());
     tools.extend(external_tool_context.upstream_tools.clone());
     let tools = dedupe_tool_definitions(tools);
+    let _ = state
+        .store
+        .record_event(
+            "debug",
+            "tool_exposure_diagnostic",
+            "CodeSeeX tool exposure diagnostic.",
+            Some(&tool_exposure_diagnostic(
+                &id,
+                &external_tool_context,
+                &tools,
+            )),
+        )
+        .await;
     if !tools.is_empty() {
         let tool_choice = normalized_tool_choice(input.get("tool_choice"), &tools);
         payload["tools"] = Value::Array(tools);
@@ -639,6 +785,9 @@ async fn responses(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    if let Some(auth) = auth.as_deref() {
+        codeseex_core::codex_auth::remember_authorization_header(auth);
+    }
     match crate::upstream::post_chat_completions(
         &state.client,
         &config.upstream,
@@ -709,6 +858,7 @@ async fn responses(
                     tool_execution_context,
                     community_tools: Arc::new(community_tools),
                     external_tool_context,
+                    current_image_refs,
                     auto_compaction,
                 });
             }
@@ -724,6 +874,7 @@ async fn responses(
                         tool_context: &tool_execution_context,
                         community_tools: &community_tools,
                         external_tool_context: &external_tool_context,
+                        current_image_refs: &current_image_refs,
                     };
                     let tool_loop_result =
                         match complete_chat_with_tools(tool_loop_context, payload, chat).await {
@@ -1256,6 +1407,7 @@ struct StreamingResponseParams {
     tool_execution_context: crate::tools::ToolExecutionContext,
     community_tools: Arc<crate::community_tools::CommunityToolSet>,
     external_tool_context: crate::tool_passthrough::ToolContext,
+    current_image_refs: Vec<String>,
     auto_compaction: Option<Value>,
 }
 
@@ -1294,6 +1446,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
         tool_execution_context,
         community_tools,
         external_tool_context,
+        current_image_refs,
         auto_compaction,
     } = params;
     let guard = StreamingRequestGuard {
@@ -1994,6 +2147,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         &config,
                         &tool_execution_context,
                         &message_snapshot,
+                        &current_image_refs,
                         &community_tools,
                         call,
                     )
@@ -2039,7 +2193,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                                 "name": call.name,
                                 "iteration": iteration + 1,
                                 "ok": result.get("ok").and_then(Value::as_bool),
-                                "summary": summarize_tool_result(&result)
+                                "summary": summarize_tool_result_for_log(&result)
                             })),
                         )
                         .await;

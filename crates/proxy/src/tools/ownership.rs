@@ -99,10 +99,10 @@ pub(crate) fn is_web_search_tool(name: &str) -> bool {
 }
 
 pub(crate) fn canonical_tool_name(name: &str) -> &str {
-    if name == "web_search_preview" {
-        "web_search"
-    } else {
-        name
+    match name {
+        "web_search_preview" => "web_search",
+        "visual_search" => "vision_analyze",
+        _ => name,
     }
 }
 

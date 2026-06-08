@@ -164,6 +164,8 @@ pub fn compile_responses_input_with_tool_outputs(
                 );
             }
 
+            messages = sanitize_chat_tool_protocol(messages, valid_tool_call_ids);
+
             if messages.is_empty() {
                 let fallback = input.to_string();
                 diagnostic.message_items += 1;
@@ -224,6 +226,208 @@ fn flush_pending_assistant(messages: &mut Vec<ChatMessage>, pending: &mut Pendin
     }
 
     *pending = PendingAssistant::default();
+}
+
+fn sanitize_chat_tool_protocol(
+    messages: Vec<ChatMessage>,
+    valid_tool_call_ids: &HashSet<String>,
+) -> Vec<ChatMessage> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        let message = messages[index].clone();
+        if message.role == "assistant" {
+            if let Some(calls) = message
+                .tool_calls
+                .as_ref()
+                .filter(|calls| !calls.is_empty())
+                .cloned()
+            {
+                let expected_ids = calls
+                    .iter()
+                    .filter_map(tool_call_id)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if !expected_ids.is_empty() {
+                    let expected = expected_ids.iter().cloned().collect::<HashSet<_>>();
+                    let mut tool_messages = Vec::new();
+                    let mut seen = HashSet::new();
+                    let mut cursor = index + 1;
+                    while cursor < messages.len() && messages[cursor].role == "tool" {
+                        let Some(tool_call_id) = messages[cursor].tool_call_id.as_deref() else {
+                            break;
+                        };
+                        if !expected.contains(tool_call_id) {
+                            break;
+                        }
+                        if seen.insert(tool_call_id.to_owned()) {
+                            tool_messages.push(messages[cursor].clone());
+                        }
+                        cursor += 1;
+                    }
+
+                    if seen.len() == expected_ids.len() {
+                        output.push(message);
+                        output.extend(ordered_tool_messages(tool_messages, &expected_ids));
+                        index = cursor;
+                        continue;
+                    }
+
+                    if !tool_messages.is_empty() {
+                        let mut subset = message;
+                        subset.tool_calls = Some(
+                            calls
+                                .iter()
+                                .filter(|call| {
+                                    tool_call_id(call)
+                                        .map(|id| seen.contains(id))
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                                .collect(),
+                        );
+                        output.push(drop_empty_assistant_tool_payload(subset));
+                        output.extend(ordered_tool_messages(tool_messages, &expected_ids));
+                        index = cursor;
+                        continue;
+                    }
+
+                    if let Some(downgraded) = downgrade_incomplete_assistant(message) {
+                        output.push(downgraded);
+                    }
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        if message.role == "tool"
+            && tool_message_is_current_valid_output(&message, valid_tool_call_ids)
+        {
+            output.push(message);
+        } else if message.role == "tool" {
+            output.push(orphan_tool_result_fact(&message));
+        } else {
+            output.push(message);
+        }
+        index += 1;
+    }
+    output.into_iter().filter(message_is_useful).collect()
+}
+
+fn tool_message_is_current_valid_output(
+    message: &ChatMessage,
+    valid_tool_call_ids: &HashSet<String>,
+) -> bool {
+    message
+        .tool_call_id
+        .as_deref()
+        .map(|id| valid_tool_call_ids.contains(id))
+        .unwrap_or(false)
+}
+
+fn ordered_tool_messages(messages: Vec<ChatMessage>, expected_ids: &[String]) -> Vec<ChatMessage> {
+    let mut by_id = HashMap::new();
+    for message in messages {
+        if let Some(id) = message.tool_call_id.clone() {
+            by_id.entry(id).or_insert(message);
+        }
+    }
+    expected_ids
+        .iter()
+        .filter_map(|id| by_id.remove(id))
+        .collect()
+}
+
+fn tool_call_id(call: &Value) -> Option<&str> {
+    call.get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn drop_empty_assistant_tool_payload(mut message: ChatMessage) -> ChatMessage {
+    let has_calls = message
+        .tool_calls
+        .as_ref()
+        .map(|calls| !calls.is_empty())
+        .unwrap_or(false);
+    if !has_calls {
+        message.tool_calls = None;
+        if message
+            .reasoning_content
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            message.reasoning_content = None;
+        }
+    }
+    message
+}
+
+fn downgrade_incomplete_assistant(mut message: ChatMessage) -> Option<ChatMessage> {
+    message.tool_calls = None;
+    if message.content.trim().is_empty()
+        && message
+            .reasoning_content
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        None
+    } else {
+        if message
+            .reasoning_content
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            message.reasoning_content = None;
+        }
+        Some(message)
+    }
+}
+
+fn orphan_tool_result_fact(message: &ChatMessage) -> ChatMessage {
+    let call_id = message.tool_call_id.as_deref().unwrap_or_default();
+    ChatMessage::text(
+        "user",
+        format!(
+            "Verified prior tool result without replayable parent call. tool_call_id={} output={}",
+            truncate_text(call_id, 120),
+            truncate_text(
+                &redact_inline_data_urls(&message.content),
+                MAX_FACT_TEXT_CHARS
+            )
+        ),
+    )
+}
+
+fn message_is_useful(message: &ChatMessage) -> bool {
+    if message.role == "assistant" {
+        let has_reasoning = message
+            .reasoning_content
+            .as_deref()
+            .map(str::trim)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+        let has_tool_calls = message
+            .tool_calls
+            .as_ref()
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false);
+        return !message.content.trim().is_empty() || has_reasoning || has_tool_calls;
+    }
+    !message.content.trim().is_empty()
+        || message
+            .tool_calls
+            .as_ref()
+            .map(|calls| !calls.is_empty())
+            .unwrap_or(false)
+        || message.tool_call_id.is_some()
 }
 
 fn join_nonempty(left: &str, right: &str) -> String {
@@ -960,6 +1164,92 @@ mod tests {
     }
 
     #[test]
+    fn non_contiguous_tool_outputs_do_not_create_incomplete_chat_tool_group() {
+        let input = json!([
+            {
+                "type":"function_call",
+                "call_id":"call_resources",
+                "name":"list_mcp_resources",
+                "arguments":"{}"
+            },
+            {
+                "type":"function_call",
+                "call_id":"call_templates",
+                "name":"list_mcp_resource_templates",
+                "arguments":"{}"
+            },
+            {
+                "type":"function_call_output",
+                "call_id":"call_resources",
+                "output":"{\"resources\":[]}"
+            },
+            {
+                "type":"message",
+                "role":"user",
+                "content":[{"type":"input_text","text":"interleaved user context"}]
+            },
+            {
+                "type":"function_call_output",
+                "call_id":"call_templates",
+                "output":"{\"resourceTemplates\":[]}"
+            }
+        ]);
+
+        let compiled = compile_responses_input(&input);
+
+        assert_legal_chat_tool_protocol(&compiled.messages);
+        let first_assistant = compiled
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .expect("assistant tool replay");
+        let calls = first_assistant.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_resources");
+        assert!(compiled
+            .messages
+            .iter()
+            .any(|message| message.content.contains("call_templates")));
+    }
+
+    #[test]
+    fn tool_output_before_call_becomes_fact_instead_of_pending_assistant_call() {
+        let input = json!([
+            {
+                "type":"function_call_output",
+                "call_id":"call_mcp",
+                "output":"{\"resources\":[]}"
+            },
+            {
+                "type":"function_call",
+                "call_id":"call_mcp",
+                "name":"list_mcp_resources",
+                "arguments":"{}"
+            },
+            {
+                "type":"message",
+                "role":"user",
+                "content":[{"type":"input_text","text":"continue"}]
+            }
+        ]);
+
+        let compiled = compile_responses_input(&input);
+
+        assert_legal_chat_tool_protocol(&compiled.messages);
+        assert!(!compiled.messages.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .map(|calls| calls.iter().any(|call| call["id"] == "call_mcp"))
+                .unwrap_or(false)
+        }));
+        assert!(compiled
+            .messages
+            .iter()
+            .any(|message| message.content.contains("call_mcp")));
+    }
+
+    #[test]
     fn empty_mcp_resources_do_not_mean_empty_mcp_tools() {
         let input = json!([
             {
@@ -999,5 +1289,36 @@ mod tests {
             .content
             .contains("Recovered CodeSeeX compaction"));
         assert!(compiled.messages[0].content.contains("Cargo.toml existed"));
+    }
+
+    fn assert_legal_chat_tool_protocol(messages: &[ChatMessage]) {
+        let mut index = 0;
+        while index < messages.len() {
+            let message = &messages[index];
+            if message.role != "assistant" {
+                assert_ne!(
+                    message.role, "tool",
+                    "orphan tool message at index {index}: {message:?}"
+                );
+                index += 1;
+                continue;
+            }
+            let Some(calls) = message.tool_calls.as_ref() else {
+                index += 1;
+                continue;
+            };
+            let ids = calls
+                .iter()
+                .filter_map(|call| call.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            for (offset, id) in ids.iter().enumerate() {
+                let tool = messages
+                    .get(index + 1 + offset)
+                    .unwrap_or_else(|| panic!("missing tool result for {id}"));
+                assert_eq!(tool.role, "tool");
+                assert_eq!(tool.tool_call_id.as_deref(), Some(*id));
+            }
+            index += 1 + ids.len();
+        }
     }
 }

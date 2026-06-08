@@ -36,7 +36,7 @@ fn test_config_with_upstream(data_dir: PathBuf, fake_addr: SocketAddr) -> AppCon
 }
 
 fn temp_workspace(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("codeseex-next-{label}-{}", Uuid::new_v4().simple()))
+    std::env::temp_dir().join(format!("codeseex-{label}-{}", Uuid::new_v4().simple()))
 }
 
 #[tokio::test]
@@ -66,6 +66,19 @@ async fn serve_with_shutdown_exits_after_listening() {
         !database_path.exists(),
         "CodeSeeX should not create codeseex.db for runtime state"
     );
+    let store = Store::open(&data_dir)
+        .await
+        .expect("open store after shutdown");
+    let (events, _) = store
+        .recent_visible_events(10, None)
+        .await
+        .expect("recent events");
+    let event_types = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect::<Vec<_>>();
+    assert!(event_types.contains(&"proxy_started"), "{event_types:?}");
+    assert!(event_types.contains(&"proxy_stopped"), "{event_types:?}");
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -249,12 +262,32 @@ async fn fake_apply_patch_streaming_chat_completions(
         concat!(
                 "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"patch the file natively\"}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_patch\",\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"patch\\\":\\\"*** Begin Patch\\\\n\"}}]}}]}\n\n",
-                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"*** Add File: target/codeseex-next-apply-patch-streaming-test/hello.txt\\\\n+hello\\\\n\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"*** Add File: target/codeseex-apply-patch-streaming-test/hello.txt\\\\n+hello\\\\n\"}}]}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"*** End Patch\\\"}\"}}]}}]}\n\n",
                 "data: [DONE]\n\n"
             )
             .to_owned()
     };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body))
+        .expect("fake upstream response should build")
+}
+
+async fn fake_tool_search_bridge_streaming_chat_completions(
+    State(state): State<FakeUpstreamState>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    {
+        let mut requests = state.requests.lock().expect("fake upstream lock poisoned");
+        requests.push(payload);
+    }
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"need deferred tools\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_tool_search\",\"type\":\"function\",\"function\":{\"name\":\"tool_search_tool\",\"arguments\":\"{\\\"query\\\":\\\"sub-agent\\\",\\\"limit\\\":5}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
@@ -344,7 +377,7 @@ fn mapped_response_keeps_codex_completion_metadata() {
 #[test]
 fn chat_payload_forwards_codex_generation_parameters() {
     let config = test_config(std::env::temp_dir().join(format!(
-        "codeseex-next-payload-params-test-{}",
+        "codeseex-payload-params-test-{}",
         Uuid::new_v4().simple()
     )));
     let request = json!({
@@ -435,6 +468,28 @@ fn automatic_compaction_is_not_appended_to_client_tool_calls() {
 
     assert!(!append_auto_compaction_if_safe(&mut response, Some(&item)));
     assert_eq!(response["output"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn apply_patch_surface_gets_synthetic_tool_search_bridge() {
+    let mut context = ToolContext::from_request_tools(Some(&json!([{
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Apply a patch.",
+            "parameters": { "type": "object", "properties": {} }
+        }
+    }])));
+
+    assert!(request_has_codex_native_tool_surface(&context));
+    context.ensure_codex_tool_search_bridge();
+
+    let names = context.upstream_names();
+    assert!(names.iter().any(|name| name == "apply_patch"), "{names:?}");
+    assert!(
+        names.iter().any(|name| name == "tool_search_tool"),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -716,7 +771,7 @@ fn proxy_tool_call_sse_uses_in_progress_then_completed_lifecycle() {
 }
 
 #[test]
-fn proxy_visible_items_preserve_tool_order_while_grouping_proxy_usage() {
+fn proxy_visible_items_preserve_tool_order_without_text_messages() {
     let calls = vec![
         ChatToolCall {
             id: "call_ls_1".to_owned(),
@@ -743,17 +798,11 @@ fn proxy_visible_items_preserve_tool_order_while_grouping_proxy_usage() {
 
     assert_eq!(
         types,
-        vec![
-            "message",
-            "proxy_tool_call",
-            "web_search_call",
-            "message",
-            "proxy_tool_call"
-        ]
+        vec!["proxy_tool_call", "web_search_call", "proxy_tool_call"]
     );
-    assert_eq!(items[1]["call_id"], "call_ls_1");
-    assert_eq!(items[2]["call_id"], "call_web");
-    assert_eq!(items[4]["call_id"], "call_ls_2");
+    assert_eq!(items[0]["call_id"], "call_ls_1");
+    assert_eq!(items[1]["call_id"], "call_web");
+    assert_eq!(items[2]["call_id"], "call_ls_2");
 }
 
 #[tokio::test]
@@ -772,7 +821,7 @@ async fn streaming_closes_thinking_before_final_content() {
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-thinking-order-test-{}",
+        "codeseex-thinking-order-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir, fake_addr);
@@ -836,7 +885,7 @@ async fn streaming_internal_tools_execute_inside_proxy_without_client_function_c
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-streaming-test-{}",
+        "codeseex-streaming-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir, fake_addr);
@@ -889,7 +938,7 @@ async fn streaming_internal_tools_execute_inside_proxy_without_client_function_c
         "{body}"
     );
     assert!(body.contains("after tool"), "{body}");
-    assert!(body.contains("已使用工具 `list_directory`"), "{body}");
+    assert!(!body.contains("已使用工具 `list_directory`"), "{body}");
     assert!(body.contains("\"type\":\"proxy_tool_call\""), "{body}");
     assert!(body.contains("directory checked"), "{body}");
     assert!(
@@ -1083,7 +1132,7 @@ async fn current_input_tool_outputs_replay_as_chat_tool_protocol() {
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-current-tool-replay-test-{}",
+        "codeseex-current-tool-replay-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir, fake_addr);
@@ -1182,7 +1231,7 @@ async fn current_input_tool_outputs_replay_as_chat_tool_protocol() {
 #[tokio::test]
 async fn previous_response_history_pairs_tool_outputs_with_parent_calls() {
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-history-tool-pair-test-{}",
+        "codeseex-history-tool-pair-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config(data_dir);
@@ -1285,7 +1334,7 @@ async fn previous_response_history_pairs_tool_outputs_with_parent_calls() {
 #[tokio::test]
 async fn previous_response_history_prefers_persisted_turn_messages() {
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-turn-message-history-test-{}",
+        "codeseex-turn-message-history-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config(data_dir);
@@ -1371,7 +1420,7 @@ async fn streaming_mixed_internal_and_external_tools_runs_internal_first() {
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-mixed-streaming-test-{}",
+        "codeseex-mixed-streaming-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir, fake_addr);
@@ -1434,7 +1483,7 @@ async fn streaming_mixed_internal_and_external_tools_runs_internal_first() {
         "{body}"
     );
     assert!(body.contains("\"name\":\"js\""), "{body}");
-    assert!(body.contains("已使用工具 `list_directory`"), "{body}");
+    assert!(!body.contains("已使用工具 `list_directory`"), "{body}");
     assert!(body.contains("\"type\":\"proxy_tool_call\""), "{body}");
     assert!(
         !body.contains(
@@ -1465,7 +1514,7 @@ async fn non_streaming_web_search_emits_replayable_output_item() {
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-web-search-non-stream-output-test-{}",
+        "codeseex-web-search-non-stream-output-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir, fake_addr);
@@ -1556,7 +1605,7 @@ async fn streaming_web_search_emits_replayable_output_item() {
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-web-search-output-test-{}",
+        "codeseex-web-search-output-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir, fake_addr);
@@ -1648,7 +1697,7 @@ async fn responses_do_not_recover_global_web_search_facts_when_client_returns_ca
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-web-search-recovery-test-{}",
+        "codeseex-web-search-recovery-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir.clone(), fake_addr);
@@ -1767,7 +1816,7 @@ async fn responses_do_not_recover_global_empty_web_search_fact_when_prior_final_
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-web-search-empty-recovery-test-{}",
+        "codeseex-web-search-empty-recovery-test-{}",
         Uuid::new_v4().simple()
     ));
     let config = test_config_with_upstream(data_dir.clone(), fake_addr);
@@ -1894,10 +1943,10 @@ async fn streaming_apply_patch_returns_native_custom_tool_call() {
     });
 
     let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-next-apply-patch-streaming-test-{}",
+        "codeseex-apply-patch-streaming-test-{}",
         Uuid::new_v4().simple()
     ));
-    let patch_dir = PathBuf::from("target").join("codeseex-next-apply-patch-streaming-test");
+    let patch_dir = PathBuf::from("target").join("codeseex-apply-patch-streaming-test");
     std::fs::create_dir_all(&patch_dir).expect("create ignored apply_patch test directory");
     let patch_file = patch_dir.join("hello.txt");
     let _ = std::fs::remove_file(&patch_file);
@@ -1968,6 +2017,99 @@ async fn streaming_apply_patch_returns_native_custom_tool_call() {
         .expect("fake upstream lock poisoned")
         .clone();
     assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_synthetic_tool_search_bridge_returns_codex_function_call() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(fake_tool_search_bridge_streaming_chat_completions),
+        )
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = std::env::temp_dir().join(format!(
+        "codeseex-tool-search-bridge-streaming-test-{}",
+        Uuid::new_v4().simple()
+    ));
+    let config = test_config_with_upstream(data_dir, fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState {
+        config: Arc::new(config),
+        client: reqwest::Client::new(),
+        store,
+    };
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_stream_tool_search_bridge",
+            "model": "deepseek-v4-pro",
+            "stream": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "use a sub-agent if useful" }]
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "shell_command",
+                        "description": "Run a shell command.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        body.contains("response.function_call_arguments.delta"),
+        "{body}"
+    );
+    assert!(body.contains("\"name\":\"tool_search_tool\""), "{body}");
+    assert!(body.contains("sub-agent"), "{body}");
+    assert!(!body.contains("\"type\":\"proxy_tool_call\""), "{body}");
+    assert!(!body.contains("tool_loop_failed"), "{body}");
+
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 1);
+    let upstream_tool_names = requests[0]["tools"]
+        .as_array()
+        .expect("upstream request should include tools")
+        .iter()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        upstream_tool_names.contains(&"tool_search_tool"),
+        "{upstream_tool_names:?}"
+    );
 }
 
 #[test]

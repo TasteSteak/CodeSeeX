@@ -6,7 +6,7 @@ mod open;
 mod safety;
 mod search;
 
-use codeseex_core::WebSearchProxyMode;
+use codeseex_core::NetworkProxyMode;
 use futures_util::future::join_all;
 use serde_json::{json, Value};
 
@@ -18,7 +18,7 @@ const MAX_OPEN_TARGETS: usize = 6;
 
 pub(crate) async fn execute(
     _client: &reqwest::Client,
-    proxy_mode: WebSearchProxyMode,
+    proxy_mode: NetworkProxyMode,
     arguments: &Value,
     messages: &[Value],
 ) -> Value {

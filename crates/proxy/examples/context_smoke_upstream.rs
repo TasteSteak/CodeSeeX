@@ -223,7 +223,7 @@ async fn chat_completions(
     }
 
     if let Some(content) = tool_message_content(&messages, "call_workspace_search") {
-        let ok = content.contains("CodeSeeX Next");
+        let ok = content.contains("CodeSeeX");
         return assistant_response(
             &parsed,
             if ok {
@@ -315,7 +315,7 @@ async fn chat_completions(
             "call_workspace_search",
             "workspace_search",
             json!({
-                "query": "CodeSeeX Next",
+                "query": "CodeSeeX",
                 "path": "README.md",
                 "max_results": 5
             }),

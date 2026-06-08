@@ -12,11 +12,114 @@ fn definitions_follow_enabled_ids() {
 }
 
 #[test]
+fn vision_analyze_definition_is_enabled_by_tool_id() {
+    let definitions = upstream_tool_definitions(&["vision_analyze".to_owned()]);
+    let vision = definitions
+        .iter()
+        .find(|definition| {
+            definition.pointer("/function/name").and_then(Value::as_str) == Some("vision_analyze")
+        })
+        .expect("vision_analyze definition");
+
+    assert_eq!(
+        vision
+            .pointer("/function/parameters/properties/image/type")
+            .and_then(Value::as_str),
+        Some("string")
+    );
+    assert_eq!(
+        vision.pointer("/function/parameters/additionalProperties"),
+        Some(&Value::Bool(false))
+    );
+}
+
+#[test]
+fn vision_module_exposes_native_image_gen_definition() {
+    let definitions = upstream_tool_definitions(&["vision_analyze".to_owned()]);
+    assert!(!definitions.iter().any(|definition| {
+        definition.pointer("/function/name").and_then(Value::as_str) == Some("vision_generate")
+    }));
+    let image_gen = definitions
+        .iter()
+        .find(|definition| {
+            definition.pointer("/function/name").and_then(Value::as_str) == Some("image_gen")
+        })
+        .expect("image_gen definition");
+
+    assert_eq!(
+        image_gen
+            .pointer("/function/parameters/properties/prompt/type")
+            .and_then(Value::as_str),
+        Some("string")
+    );
+    assert!(image_gen
+        .pointer("/function/parameters/properties/description")
+        .is_none());
+    assert!(image_gen
+        .pointer("/function/parameters/properties/input")
+        .is_none());
+    assert!(image_gen
+        .pointer("/function/parameters/required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| required
+            .iter()
+            .any(|value| value.as_str() == Some("prompt"))));
+    assert_eq!(
+        image_gen.pointer("/function/parameters/additionalProperties"),
+        Some(&Value::Bool(false))
+    );
+}
+
+#[test]
+fn legacy_visual_search_enabled_id_exposes_vision_analyze() {
+    let definitions = upstream_tool_definitions(&["visual_search".to_owned()]);
+    assert!(definitions.iter().any(|definition| {
+        definition.pointer("/function/name").and_then(Value::as_str) == Some("vision_analyze")
+    }));
+}
+
+#[test]
+fn apply_patch_definition_requires_paths_in_operation_headers() {
+    let definitions = upstream_tool_definitions(&[]);
+    let apply_patch = definitions
+        .iter()
+        .find(|definition| {
+            definition.pointer("/function/name").and_then(Value::as_str) == Some("apply_patch")
+        })
+        .expect("apply_patch definition");
+    let description = apply_patch
+        .pointer("/function/parameters/properties/patch/description")
+        .and_then(Value::as_str)
+        .expect("patch parameter description");
+
+    assert!(description.contains("*** Add File: path"));
+    assert!(description.contains("*** Update File: path"));
+    assert!(description.contains("*** Delete File: path"));
+    assert!(description.contains("Bare headers"));
+}
+
+#[test]
 fn executable_tool_checks_enabled_allowlist() {
     let enabled = vec!["list_directory".to_owned()];
     assert!(!is_executable_tool_enabled("apply_patch", &[]));
     assert!(is_executable_tool_enabled("web_search", &[]));
     assert!(is_executable_tool_enabled("list_directory", &enabled));
+    assert!(is_executable_tool_enabled(
+        "vision_analyze",
+        &["vision_analyze".to_owned()]
+    ));
+    assert!(is_executable_tool_enabled(
+        "vision_generate",
+        &["vision_analyze".to_owned()]
+    ));
+    assert!(is_executable_tool_enabled(
+        "image_gen",
+        &["vision_analyze".to_owned()]
+    ));
+    assert!(is_executable_tool_enabled(
+        "visual_search",
+        &["visual_search".to_owned()]
+    ));
     assert!(!is_executable_tool_enabled("read_file_range", &enabled));
 }
 
@@ -32,6 +135,122 @@ fn malformed_tool_arguments_return_invalid_arguments() {
         result.get("error").and_then(Value::as_str),
         Some("invalid_arguments")
     );
+}
+
+#[tokio::test]
+async fn vision_analyze_missing_config_returns_unavailable() {
+    let data_dir = temp_workspace("vision-analyze-missing-config");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+    let mut config = codeseex_core::AppConfig::default();
+    config.data_dir = data_dir.clone();
+    let result = execute_tool_with_client(
+        &reqwest::Client::new(),
+        &config,
+        &ToolExecutionContext::default(),
+        &[],
+        &[],
+        "vision_analyze",
+        r#"{"image_url":"https://example.com/image.png"}"#,
+    )
+    .await;
+
+    assert_eq!(result.get("ok").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        result.get("tool").and_then(Value::as_str),
+        Some("vision_analyze")
+    );
+    assert_eq!(
+        result.get("error").and_then(Value::as_str),
+        Some("vision_unavailable")
+    );
+    let missing = result
+        .get("missing_or_invalid")
+        .and_then(Value::as_array)
+        .expect("missing config");
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str() == Some("VISION_ANALYZE_URL")));
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str() == Some("VISION_ANALYZE_MODEL")));
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str() == Some("VISION_API_KEY")));
+
+    let _ = fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn vision_generate_missing_config_returns_unavailable() {
+    let data_dir = temp_workspace("vision-generate-missing-config");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+    let mut config = codeseex_core::AppConfig::default();
+    config.data_dir = data_dir.clone();
+    let result = execute_tool_with_client(
+        &reqwest::Client::new(),
+        &config,
+        &ToolExecutionContext::default(),
+        &[],
+        &[],
+        "vision_generate",
+        r#"{"prompt":"A small product photo"}"#,
+    )
+    .await;
+
+    assert_eq!(result.get("ok").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        result.get("tool").and_then(Value::as_str),
+        Some("vision_generate")
+    );
+    assert_eq!(
+        result.get("error").and_then(Value::as_str),
+        Some("vision_unavailable")
+    );
+    let missing = result
+        .get("missing_or_invalid")
+        .and_then(Value::as_array)
+        .expect("missing config");
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str() == Some("VISION_GENERATE_URL")));
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str() == Some("VISION_GENERATE_MODEL")));
+    assert!(missing
+        .iter()
+        .any(|value| value.as_str() == Some("VISION_API_KEY")));
+
+    let _ = fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn image_gen_missing_config_reports_native_tool_name() {
+    let data_dir = temp_workspace("image-gen-missing-config");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+    let mut config = codeseex_core::AppConfig::default();
+    config.data_dir = data_dir.clone();
+    let result = execute_tool_with_client(
+        &reqwest::Client::new(),
+        &config,
+        &ToolExecutionContext::default(),
+        &[],
+        &[],
+        "image_gen",
+        r#"{"prompt":"A small product photo"}"#,
+    )
+    .await;
+
+    assert_eq!(result.get("ok").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        result.get("tool").and_then(Value::as_str),
+        Some("image_gen")
+    );
+    assert_eq!(
+        result.get("error").and_then(Value::as_str),
+        Some("vision_unavailable")
+    );
+
+    let _ = fs::remove_dir_all(data_dir);
 }
 
 #[test]
@@ -166,6 +385,42 @@ fn read_file_range_empty_file_is_not_marked_truncated() {
     assert_eq!(read.get("end").and_then(Value::as_u64), Some(0));
     assert_eq!(read.get("text").and_then(Value::as_str), Some(""));
     assert_eq!(read.get("truncated").and_then(Value::as_bool), Some(false));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn read_file_range_rejects_binary_images() {
+    let root = temp_workspace("read-range-binary-image");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::write(root.join("sample.png"), b"\x89PNG\r\n\x1a\nfake").expect("write png");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let read = execute_tool_in_context(&context, "read_file_range", r#"{"path":"sample.png"}"#);
+
+    assert_eq!(read.get("ok").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        read.get("error").and_then(Value::as_str),
+        Some("binary_file_not_supported")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn read_file_range_rejects_binary_markers_without_extension_hint() {
+    let root = temp_workspace("read-range-binary-marker");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::write(root.join("blob.dat"), b"abc\0def").expect("write binary-ish file");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let read = execute_tool_in_context(&context, "read_file_range", r#"{"path":"blob.dat"}"#);
+
+    assert_eq!(read.get("ok").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        read.get("error").and_then(Value::as_str),
+        Some("binary_file_not_supported")
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -421,5 +676,5 @@ fn temp_workspace(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_nanos();
-    std::env::temp_dir().join(format!("codeseex-next-{label}-{nanos}"))
+    std::env::temp_dir().join(format!("codeseex-{label}-{nanos}"))
 }

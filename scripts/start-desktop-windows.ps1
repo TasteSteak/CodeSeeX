@@ -1,7 +1,7 @@
 param(
   [string]$VsDevCmd = $env:CODESEEX_VSDEVCMD,
-  [string]$DevRoot = "D:\DevTools\CodeSeeXNext",
-  [string]$DataDir = "D:\DevTools\CodeSeeXNext\Data",
+  [string]$DevRoot = "",
+  [string]$DataDir = "",
   [switch]$NoBuild,
   [switch]$BuildOnly,
   [switch]$KeepExisting
@@ -10,6 +10,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+
+if (-not $DevRoot) {
+  $DevRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "CodeSeeX\Dev"
+}
+if (-not $DataDir) {
+  $DataDir = Join-Path $DevRoot "Data"
+}
+
 $LogDir = Join-Path $DevRoot "Logs"
 
 function Import-CodeSeeXDotEnv {

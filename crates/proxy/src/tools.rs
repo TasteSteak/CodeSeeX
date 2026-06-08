@@ -13,6 +13,7 @@ pub(crate) mod ownership;
 pub(crate) mod permissions;
 pub(crate) mod registry;
 pub(crate) mod response_items;
+pub(crate) mod vision;
 pub(crate) mod web;
 
 pub use definitions::{
@@ -60,6 +61,7 @@ pub async fn execute_tool_with_client(
     config: &codeseex_core::AppConfig,
     context: &ToolExecutionContext,
     messages: &[Value],
+    current_image_refs: &[String],
     name: &str,
     arguments: &str,
 ) -> Value {
@@ -68,7 +70,26 @@ pub async fn execute_tool_with_client(
             Ok(value) => value,
             Err(error) => return error,
         };
-        return web::execute(client, config.web_search_proxy, &args, messages).await;
+        return web::execute(client, config.network_proxy, &args, messages).await;
+    }
+    if name == vision::ANALYZE_TOOL_NAME || name == vision::LEGACY_ANALYZE_TOOL_NAME {
+        let args = match parse_arguments(arguments) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        return vision::execute(client, config, context, messages, current_image_refs, &args).await;
+    }
+    if name == vision::GENERATE_TOOL_NAME || name == vision::GENERATE_ALIAS_TOOL_NAME {
+        let args = match parse_arguments(arguments) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let tool_name = if name == vision::GENERATE_ALIAS_TOOL_NAME {
+            vision::GENERATE_ALIAS_TOOL_NAME
+        } else {
+            vision::GENERATE_TOOL_NAME
+        };
+        return vision::execute_generate(client, config, tool_name, &args).await;
     }
     execute_tool_in_context(context, name, arguments)
 }
@@ -173,11 +194,30 @@ fn read_file_range(context: &ToolExecutionContext, args: &Value) -> Value {
     if !metadata.is_file() {
         return json!({ "ok": false, "error": "not_file", "path": relative });
     }
+    if is_known_binary_file(&path) {
+        return json!({
+            "ok": false,
+            "error": "binary_file_not_supported",
+            "message": "read_file_range only reads UTF-8 text files. Use the appropriate image, media, archive, or document tool for this file.",
+            "path": relative
+        });
+    }
     if metadata.len() > MAX_FILE_BYTES {
         return json!({ "ok": false, "error": "file_too_large", "path": relative, "bytes": metadata.len() });
     }
-    let Ok(text) = fs::read_to_string(&path) else {
-        return json!({ "ok": false, "error": "not_text", "path": relative });
+    let Ok(bytes) = fs::read(&path) else {
+        return json!({ "ok": false, "error": "read_failed", "path": relative });
+    };
+    if bytes_have_binary_markers(&bytes) {
+        return json!({
+            "ok": false,
+            "error": "binary_file_not_supported",
+            "message": "read_file_range only reads UTF-8 text files. Binary-looking content was detected.",
+            "path": relative
+        });
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return json!({ "ok": false, "error": "not_utf8_text", "path": relative });
     };
     let (text, has_bom) = strip_utf8_bom(&text);
     let lines = text.lines().collect::<Vec<_>>();
@@ -221,6 +261,66 @@ fn read_file_range(context: &ToolExecutionContext, args: &Value) -> Value {
         "lines": selected,
         "truncated": requested_end > end
     })
+}
+
+fn is_known_binary_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "bmp"
+            | "ico"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "mp3"
+            | "wav"
+            | "ogg"
+            | "flac"
+            | "mp4"
+            | "mov"
+            | "avi"
+            | "mkv"
+            | "webm"
+            | "pdf"
+            | "zip"
+            | "7z"
+            | "rar"
+            | "gz"
+            | "tar"
+            | "exe"
+            | "dll"
+            | "dmg"
+            | "appimage"
+            | "msi"
+    )
+}
+
+fn bytes_have_binary_markers(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"\xff\xd8\xff")
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || bytes.starts_with(b"RIFF")
+        || bytes.starts_with(b"%PDF-")
+        || bytes.starts_with(b"PK\x03\x04")
+    {
+        return true;
+    }
+    let sample_len = bytes.len().min(4096);
+    let sample = &bytes[..sample_len];
+    let nul_count = sample.iter().filter(|byte| **byte == 0).count();
+    nul_count > 0
 }
 
 fn read_line_window(args: &Value, total_lines: usize) -> (usize, usize) {

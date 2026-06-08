@@ -1,10 +1,14 @@
-use crate::models::{available_models, ModelInfo};
+use crate::models::{MODEL_FLASH, MODEL_PRO};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+
+const CODEX_BRIDGED_IDENTITY: &str = "You are Codex, a coding agent based on DeepSeek-V4 and running through the local CodeSeeX proxy inside the Codex environment.";
+const LEGACY_APPLY_PATCH_LINE: &str = "- For local text edits, call apply_patch with a single raw Codex patch string. The patch must start with *** Begin Patch and end with *** End Patch.";
+const STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch must start with *** Begin Patch and end with *** End Patch.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Catalog {
@@ -18,21 +22,43 @@ pub struct CatalogModel {
     pub description: String,
     pub context_window: u64,
     pub effective_context_window_percent: u8,
-    pub max_output_tokens: u64,
     pub priority: u32,
-    pub available_plans: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CatalogSeed {
+    #[serde(default)]
+    common_model_fields: BTreeMap<String, Value>,
+    models: Vec<CatalogModel>,
+}
+
 pub fn build_codeseex_catalog() -> Catalog {
-    Catalog {
-        models: available_models()
-            .into_iter()
-            .enumerate()
-            .map(|(index, model)| catalog_model(model, index))
-            .collect(),
+    let mut catalog = catalog_from_seed(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/model-catalog.seed.json"
+    )))
+    .expect("embedded CodeSeeX model catalog seed must be valid JSON");
+    normalize_catalog_prompt_text(&mut catalog);
+    catalog
+}
+
+fn catalog_from_seed(text: &str) -> serde_json::Result<Catalog> {
+    let mut seed: CatalogSeed = serde_json::from_str(text)?;
+    if !seed.common_model_fields.is_empty() {
+        for model in &mut seed.models {
+            for (key, value) in &seed.common_model_fields {
+                model
+                    .extra
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
     }
+    Ok(Catalog {
+        models: seed.models,
+    })
 }
 
 pub fn write_catalog_atomic(path: &Path, catalog: &Catalog) -> Result<()> {
@@ -47,6 +73,16 @@ pub fn write_catalog_atomic(path: &Path, catalog: &Catalog) -> Result<()> {
     Ok(())
 }
 
+pub fn catalog_file_is_compatible(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    catalog_value_is_compatible(&value)
+}
+
 pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
     [
         "model_provider = \"custom\"".to_owned(),
@@ -55,7 +91,7 @@ pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
         "model_reasoning_effort = \"xhigh\"".to_owned(),
         format!(
             "model_catalog_json = {}",
-            toml_string(catalog_path.to_string_lossy().as_ref())
+            toml_path_string(catalog_path.to_string_lossy().as_ref())
         ),
         "".to_owned(),
         "[model_providers.custom]".to_owned(),
@@ -67,100 +103,111 @@ pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
     .join("\n")
 }
 
-fn catalog_model(model: ModelInfo, index: usize) -> CatalogModel {
-    let mut extra = BTreeMap::new();
-    let auto_compact_token_limit =
-        model.context_window * u64::from(model.effective_context_window_percent) / 100;
-    let is_default = model.slug == "deepseek-v4-pro";
-    extra.insert("id".to_owned(), json!(model.slug));
-    extra.insert("model".to_owned(), json!(model.slug));
-    extra.insert("displayName".to_owned(), json!(model.display_name));
-    extra.insert("visibility".to_owned(), json!("list"));
-    extra.insert("hidden".to_owned(), json!(false));
-    extra.insert("isDefault".to_owned(), json!(is_default));
-    extra.insert("supported_in_api".to_owned(), json!(true));
-    extra.insert("shell_type".to_owned(), json!("shell_command"));
-    extra.insert("base_model".to_owned(), json!("gpt-5.5"));
-    extra.insert("supports_reasoning".to_owned(), json!(true));
-    extra.insert("supports_streaming".to_owned(), json!(true));
-    extra.insert("default_reasoning_level".to_owned(), json!("medium"));
-    extra.insert(
-        "supported_reasoning_levels".to_owned(),
-        json!(default_reasoning_levels()),
-    );
-    extra.insert("defaultReasoningEffort".to_owned(), json!("medium"));
-    extra.insert(
-        "supportedReasoningEfforts".to_owned(),
-        json!(["low", "medium", "high", "xhigh"]),
-    );
-    extra.insert("supports_reasoning_summaries".to_owned(), json!(true));
-    extra.insert("default_reasoning_summary".to_owned(), json!("none"));
-    extra.insert("support_verbosity".to_owned(), json!(true));
-    extra.insert("default_verbosity".to_owned(), json!("low"));
-    extra.insert("apply_patch_tool_type".to_owned(), json!("freeform"));
-    extra.insert("web_search_tool_type".to_owned(), json!("text_and_image"));
-    extra.insert(
-        "truncation_policy".to_owned(),
-        json!({ "mode": "tokens", "limit": 10000 }),
-    );
-    extra.insert("supports_parallel_tool_calls".to_owned(), json!(true));
-    extra.insert("supports_image_detail_original".to_owned(), json!(true));
-    extra.insert("max_context_window".to_owned(), json!(model.context_window));
-    extra.insert(
-        "auto_compact_token_limit".to_owned(),
-        json!(auto_compact_token_limit),
-    );
-    extra.insert("experimental_supported_tools".to_owned(), json!([]));
-    extra.insert("input_modalities".to_owned(), json!(["text", "image"]));
-    extra.insert("supports_search_tool".to_owned(), json!(true));
-    extra.insert("supportsPersonality".to_owned(), json!(true));
-    extra.insert("additional_speed_tiers".to_owned(), json!(["fast"]));
-    extra.insert("additionalSpeedTiers".to_owned(), json!(["fast"]));
-    extra.insert("service_tiers".to_owned(), json!([]));
-    extra.insert("serviceTiers".to_owned(), json!([]));
-    extra.insert("available_in_plans".to_owned(), json!(default_plans()));
-    extra.insert("minimal_client_version".to_owned(), json!("0.98.0"));
-    extra.insert("codeseex_next".to_owned(), json!(true));
+fn catalog_value_is_compatible(value: &Value) -> bool {
+    let Some(models) = value.get("models").and_then(Value::as_array) else {
+        return false;
+    };
+    models.len() == 2
+        && [MODEL_FLASH, MODEL_PRO].into_iter().all(|slug| {
+            models
+                .iter()
+                .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
+                .is_some_and(model_is_compatible)
+        })
+}
 
-    CatalogModel {
-        slug: model.slug,
-        display_name: model.display_name,
-        description: model.description,
-        context_window: model.context_window,
-        effective_context_window_percent: model.effective_context_window_percent,
-        max_output_tokens: 64_000,
-        priority: 10 + index as u32,
-        available_plans: default_plans(),
-        extra,
+fn model_is_compatible(model: &Value) -> bool {
+    prompt_fields_are_safe(model)
+        && model
+            .get("service_tiers")
+            .and_then(Value::as_array)
+            .is_some()
+        && model.get("context_window").and_then(Value::as_u64) == Some(1_000_000)
+        && model.get("max_context_window").and_then(Value::as_u64) == Some(1_000_000)
+        && model
+            .get("effective_context_window_percent")
+            .and_then(Value::as_u64)
+            == Some(95)
+        && model.get("auto_compact_token_limit").is_none()
+        && model.get("apply_patch_tool_type").and_then(Value::as_str) == Some("freeform")
+        && model.get("web_search_tool_type").and_then(Value::as_str) == Some("text_and_image")
+}
+
+fn prompt_fields_are_safe(model: &Value) -> bool {
+    let base_instructions = model.get("base_instructions").and_then(Value::as_str);
+    let model_messages = model.get("model_messages");
+    match (base_instructions, model_messages) {
+        (Some(instructions), Some(messages)) => {
+            let messages_text = messages.to_string();
+            instructions.len() > 10_000
+                && messages_text.len() > 10_000
+                && instructions.contains(CODEX_BRIDGED_IDENTITY)
+                && !instructions.contains(legacy_codeseex_identity().as_str())
+                && messages_text.contains(CODEX_BRIDGED_IDENTITY)
+                && !messages_text.contains(legacy_codeseex_identity().as_str())
+                && instructions.contains("CodeSeeX Proxy Compatibility")
+                && instructions.contains("*** Add File: path")
+                && instructions.contains("Bare headers")
+                && instructions.contains("Do not answer with file contents as prose")
+                && messages_text.contains("CodeSeeX Proxy Compatibility")
+                && messages_text.contains("*** Add File: path")
+                && messages_text.contains("Bare headers")
+                && messages_text.contains("Do not answer with file contents as prose")
+        }
+        _ => false,
     }
 }
 
-fn default_reasoning_levels() -> Vec<Value> {
-    vec![
-        json!({ "effort": "low", "description": "Fast responses with lighter reasoning" }),
-        json!({ "effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks" }),
-        json!({ "effort": "high", "description": "Greater reasoning depth for complex problems" }),
-        json!({ "effort": "xhigh", "description": "Extra high reasoning depth for complex problems" }),
-    ]
+fn normalize_catalog_prompt_text(catalog: &mut Catalog) {
+    for model in &mut catalog.models {
+        for value in model.extra.values_mut() {
+            normalize_prompt_value(value);
+        }
+    }
 }
 
-fn default_plans() -> Vec<String> {
+fn normalize_prompt_value(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            *text = normalize_prompt_text(text);
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_prompt_value(item);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values_mut() {
+                normalize_prompt_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_prompt_text(text: &str) -> String {
+    text.replace(legacy_codeseex_identity().as_str(), CODEX_BRIDGED_IDENTITY)
+        .replace(LEGACY_APPLY_PATCH_LINE, STRICT_APPLY_PATCH_LINE)
+}
+
+fn legacy_codeseex_identity() -> String {
     [
-        "free",
-        "plus",
-        "pro",
-        "team",
-        "business",
-        "enterprise",
-        "edu",
+        "You are",
+        "CodeSeeX, a coding agent powered by DeepSeek-V4 through the local CodeSeeX proxy inside Codex.",
     ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+    .join(" ")
 }
 
 fn toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+fn toml_path_string(value: &str) -> String {
+    if value.contains(['\'', '\r', '\n']) {
+        toml_string(value)
+    } else {
+        format!("'{value}'")
+    }
 }
 
 #[cfg(test)]
@@ -180,9 +227,69 @@ mod tests {
     }
 
     #[test]
+    fn compact_seed_expands_common_model_fields() {
+        let catalog = catalog_from_seed(
+            r#"{
+              "common_model_fields": {
+                "base_instructions": "shared prompt",
+                "model_messages": [{"role": "system", "content": "shared"}]
+              },
+              "models": [
+                {
+                  "slug": "deepseek-v4-flash",
+                  "display_name": "Flash",
+                  "description": "Flash model",
+                  "context_window": 1000000,
+                  "effective_context_window_percent": 95,
+                  "priority": 1
+                },
+                {
+                  "slug": "deepseek-v4-pro",
+                  "display_name": "Pro",
+                  "description": "Pro model",
+                  "context_window": 1000000,
+                  "effective_context_window_percent": 95,
+                  "priority": 2
+                }
+              ]
+            }"#,
+        )
+        .expect("compact seed");
+
+        for model in catalog.models {
+            assert_eq!(
+                model.extra.get("base_instructions").and_then(Value::as_str),
+                Some("shared prompt")
+            );
+            assert!(model.extra.get("model_messages").is_some());
+        }
+    }
+
+    #[test]
     fn catalog_preserves_codex_desktop_capability_fields() {
         let catalog = build_codeseex_catalog();
         for model in catalog.models {
+            assert!(!model.extra.contains_key("base_model"));
+            assert!(model
+                .extra
+                .get("base_instructions")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.len() > 10_000
+                    && value.contains("CodeSeeX Proxy Compatibility")
+                    && value.contains(CODEX_BRIDGED_IDENTITY)
+                    && !value.contains(legacy_codeseex_identity().as_str())));
+            assert!(model
+                .extra
+                .get("model_messages")
+                .is_some_and(|value| value.to_string().len() > 10_000
+                    && value.to_string().contains("CodeSeeX Proxy Compatibility")
+                    && value.to_string().contains(CODEX_BRIDGED_IDENTITY)
+                    && !value
+                        .to_string()
+                        .contains(legacy_codeseex_identity().as_str())));
+            assert!(!model.extra.contains_key("id"));
+            assert!(!model.extra.contains_key("model"));
+            assert!(!model.extra.contains_key("displayName"));
             assert_eq!(
                 model
                     .extra
@@ -211,20 +318,65 @@ mod tests {
                     .and_then(Value::as_bool),
                 Some(true)
             );
-            assert_eq!(
-                model
-                    .extra
-                    .get("auto_compact_token_limit")
-                    .and_then(Value::as_u64),
-                Some(900_000)
-            );
+            assert!(model
+                .extra
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty));
+            assert_eq!(model.extra.get("auto_compact_token_limit"), None);
         }
+    }
+
+    #[test]
+    fn catalog_prompts_keep_codex_identity_and_strict_apply_patch_guidance() {
+        let catalog = build_codeseex_catalog();
+        for model in catalog.models {
+            let base = model
+                .extra
+                .get("base_instructions")
+                .and_then(Value::as_str)
+                .expect("base instructions");
+            let messages = model
+                .extra
+                .get("model_messages")
+                .expect("model messages")
+                .to_string();
+
+            assert!(base.starts_with(CODEX_BRIDGED_IDENTITY), "{base}");
+            assert!(!base.contains(legacy_codeseex_identity().as_str()));
+            assert!(!messages.contains(legacy_codeseex_identity().as_str()));
+            assert!(base.contains(
+                "When creating, editing, deleting, or renaming local text files, call apply_patch"
+            ));
+            assert!(messages.contains("Do not answer with file contents as prose"));
+        }
+    }
+
+    #[test]
+    fn generated_catalog_is_self_compatible() {
+        let catalog = build_codeseex_catalog();
+        let value = serde_json::to_value(catalog).expect("catalog to json");
+        assert!(catalog_value_is_compatible(&value));
     }
 
     #[test]
     fn toml_snippet_contains_catalog_and_proxy() {
         let snippet = codex_toml_snippet(
-            Path::new("C:/Users/test/.codeseex-next/model-catalog.json"),
+            Path::new(r"C:\Users\test\.codeseex\model-catalog.json"),
+            "http://127.0.0.1:8787/v1",
+        );
+        assert!(
+            snippet.contains(r"model_catalog_json = 'C:\Users\test\.codeseex\model-catalog.json'")
+        );
+        assert!(!snippet.contains("model_context_window"));
+        assert!(!snippet.contains("model_auto_compact_token_limit"));
+        assert!(snippet.contains(r#"base_url = "http://127.0.0.1:8787/v1""#));
+    }
+
+    #[test]
+    fn toml_snippet_accepts_release_data_dir() {
+        let snippet = codex_toml_snippet(
+            Path::new("C:/Users/test/.codeseex/model-catalog.json"),
             "http://127.0.0.1:8787/v1",
         );
         assert!(snippet.contains("model_catalog_json"));

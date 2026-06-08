@@ -243,7 +243,7 @@ fn compaction_key(config: &AppConfig) -> Result<[u8; 32]> {
                 value
             }
             _ => {
-                let value = format!("codeseex-next-{}", Uuid::new_v4().simple());
+                let value = format!("codeseex-{}", Uuid::new_v4().simple());
                 match fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -460,10 +460,8 @@ mod tests {
 
     #[test]
     fn encrypted_compaction_payload_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "codeseex-next-compact-test-{}",
-            Uuid::new_v4().simple()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("codeseex-compact-test-{}", Uuid::new_v4().simple()));
         let config = AppConfig {
             data_dir: dir.clone(),
             ..Default::default()
@@ -485,11 +483,11 @@ mod tests {
     #[test]
     fn encrypted_compaction_decode_failure_is_visible() {
         let dir_a = std::env::temp_dir().join(format!(
-            "codeseex-next-compact-test-a-{}",
+            "codeseex-compact-test-a-{}",
             Uuid::new_v4().simple()
         ));
         let dir_b = std::env::temp_dir().join(format!(
-            "codeseex-next-compact-test-b-{}",
+            "codeseex-compact-test-b-{}",
             Uuid::new_v4().simple()
         ));
         let config_a = AppConfig {

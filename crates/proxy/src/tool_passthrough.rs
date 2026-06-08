@@ -8,6 +8,8 @@ use crate::tools::ownership::ChatToolCall;
 pub struct ToolContext {
     entries: BTreeMap<String, ToolEntry>,
     pub upstream_tools: Vec<Value>,
+    request_tool_items: usize,
+    source_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,29 +24,14 @@ impl ToolContext {
         let Some(Value::Array(items)) = tools else {
             return context;
         };
+        context.request_tool_items = items.len();
 
         for (index, tool) in items.iter().enumerate() {
             for declaration in normalize_tool_declarations(tool, index) {
-                let upstream_name = unique_tool_name(
-                    &declaration.response_name,
-                    declaration.namespace.as_deref(),
-                    &context.entries,
-                );
-                context.upstream_tools.push(json!({
-                    "type": "function",
-                    "function": {
-                        "name": upstream_name,
-                        "description": declaration.description,
-                        "parameters": declaration.parameters
-                    }
-                }));
-                context.entries.insert(
-                    upstream_name,
-                    ToolEntry {
-                        response_name: declaration.response_name,
-                        namespace: declaration.namespace,
-                    },
-                );
+                if is_conflicting_visual_tool(&declaration.response_name) {
+                    continue;
+                }
+                context.push_declaration(declaration);
             }
         }
 
@@ -53,6 +40,79 @@ impl ToolContext {
 
     pub fn has_external_tool(&self, name: &str) -> bool {
         self.entries.contains_key(name)
+    }
+
+    pub fn has_response_tool(&self, name: &str) -> bool {
+        self.entries
+            .values()
+            .any(|entry| entry.response_name == name)
+            || self.entries.contains_key(name)
+    }
+
+    pub fn has_any_response_tool(&self, names: &[&str]) -> bool {
+        names.iter().any(|name| self.has_response_tool(name))
+    }
+
+    pub fn request_tool_items(&self) -> usize {
+        self.request_tool_items
+    }
+
+    pub fn source_names(&self) -> Vec<String> {
+        self.source_names.clone()
+    }
+
+    pub fn upstream_names(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+
+    pub fn ensure_codex_tool_search_bridge(&mut self) {
+        if self.has_response_tool("tool_search_tool") || self.has_response_tool("tool_search") {
+            return;
+        }
+        self.push_declaration(ToolDeclaration {
+            response_name: "tool_search_tool".to_owned(),
+            description: "Search deferred Codex native tool metadata, such as sub-agents, computer-use, thread, automation, or plugin runtime tools, and expose matching tools for the next model turn.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for deferred Codex tools, such as sub-agent, computer-use, thread, automation, or plugin runtime tools."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tool matches to return."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            namespace: None,
+        });
+    }
+
+    fn push_declaration(&mut self, declaration: ToolDeclaration) {
+        let upstream_name = unique_tool_name(
+            &declaration.response_name,
+            declaration.namespace.as_deref(),
+            &self.entries,
+        );
+        self.upstream_tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": upstream_name,
+                "description": declaration.description,
+                "parameters": declaration.parameters
+            }
+        }));
+        self.source_names.push(declaration.response_name.clone());
+        self.entries.insert(
+            upstream_name,
+            ToolEntry {
+                response_name: declaration.response_name,
+                namespace: declaration.namespace,
+            },
+        );
     }
 
     pub fn response_item_from_chat_call(&self, call: &ChatToolCall) -> Value {
@@ -99,15 +159,13 @@ fn normalize_tool_declarations(tool: &Value, index: usize) -> Vec<ToolDeclaratio
         return Vec::new();
     }
     if let Some(nested_tools) = tool.get("tools").and_then(Value::as_array) {
-        if namespace.is_some() {
-            return nested_tools
-                .iter()
-                .enumerate()
-                .filter_map(|(nested_index, nested)| {
-                    normalize_single_tool(nested, nested_index, namespace.clone())
-                })
-                .collect();
-        }
+        return nested_tools
+            .iter()
+            .enumerate()
+            .filter_map(|(nested_index, nested)| {
+                normalize_single_tool(nested, nested_index, namespace.clone())
+            })
+            .collect();
     }
 
     normalize_single_tool(tool, index, namespace)
@@ -318,6 +376,22 @@ fn sanitize_tool_name(name: &str) -> String {
     }
 }
 
+fn is_conflicting_visual_tool(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "imagegen"
+            | "imagegenext"
+            | "image_gen"
+            | "image_generation"
+            | "generate_image"
+            | "image_generate"
+            | "create_image"
+            | "vision_analyze"
+            | "vision_generate"
+            | "visual_search"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +447,179 @@ mod tests {
 
         assert!(context.upstream_tools.is_empty());
         assert!(!context.has_external_tool("node_repl"));
+    }
+
+    #[test]
+    fn flat_function_tool_search_passes_through() {
+        let context = ToolContext::from_request_tools(Some(&json!([
+            {
+                "type": "function",
+                "name": "tool_search_tool",
+                "description": "Search deferred tool metadata",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" },
+                        "limit": { "type": "number" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        ])));
+
+        assert_eq!(context.request_tool_items(), 1);
+        assert_eq!(context.source_names(), vec!["tool_search_tool"]);
+        assert_eq!(context.upstream_names(), vec!["tool_search_tool"]);
+        assert_eq!(
+            context.upstream_tools[0]
+                .pointer("/function/name")
+                .and_then(Value::as_str),
+            Some("tool_search_tool")
+        );
+        assert!(context.has_external_tool("tool_search_tool"));
+    }
+
+    #[test]
+    fn synthetic_tool_search_bridge_can_be_added_for_codex_native_tools() {
+        let mut context = ToolContext::from_request_tools(Some(&json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "shell_command",
+                    "description": "Run a shell command",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }
+        ])));
+
+        context.ensure_codex_tool_search_bridge();
+
+        assert!(context.has_external_tool("shell_command"));
+        assert!(context.has_external_tool("tool_search_tool"));
+        assert_eq!(context.upstream_tools.len(), 2);
+        assert!(context
+            .upstream_names()
+            .iter()
+            .any(|name| name == "tool_search_tool"));
+    }
+
+    #[test]
+    fn synthetic_tool_search_bridge_does_not_duplicate_native_declaration() {
+        let mut context = ToolContext::from_request_tools(Some(&json!([
+            {
+                "type": "function",
+                "name": "tool_search_tool",
+                "description": "Search deferred tools",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        ])));
+
+        context.ensure_codex_tool_search_bridge();
+
+        assert_eq!(context.upstream_tools.len(), 1);
+        assert_eq!(context.upstream_names(), vec!["tool_search_tool"]);
+    }
+
+    #[test]
+    fn custom_tool_declaration_passes_through_as_callable_function() {
+        let context = ToolContext::from_request_tools(Some(&json!([{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "patch": { "type": "string" }
+                },
+                "required": ["patch"],
+                "additionalProperties": false
+            }
+        }])));
+
+        assert_eq!(context.request_tool_items(), 1);
+        assert_eq!(context.upstream_names(), vec!["apply_patch"]);
+        assert_eq!(
+            context.upstream_tools[0]
+                .pointer("/function/name")
+                .and_then(Value::as_str),
+            Some("apply_patch")
+        );
+        assert_eq!(
+            context.upstream_tools[0]
+                .pointer("/function/parameters/required/0")
+                .and_then(Value::as_str),
+            Some("patch")
+        );
+    }
+
+    #[test]
+    fn nested_tools_without_namespace_still_pass_through() {
+        let context = ToolContext::from_request_tools(Some(&json!([
+            {
+                "type": "namespace",
+                "tools": [
+                    {
+                        "name": "spawn_agent",
+                        "description": "Spawn a sub-agent",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "message": { "type": "string" }
+                            }
+                        }
+                    }
+                ]
+            }
+        ])));
+
+        assert_eq!(context.request_tool_items(), 1);
+        assert_eq!(context.source_names(), vec!["spawn_agent"]);
+        assert_eq!(context.upstream_names(), vec!["spawn_agent"]);
+        assert!(context.has_external_tool("spawn_agent"));
+    }
+
+    #[test]
+    fn filters_conflicting_native_visual_tools() {
+        let context = ToolContext::from_request_tools(Some(&json!([
+            {
+                "type": "function",
+                "name": "imagegen",
+                "description": "Generate images",
+                "parameters": { "type": "object", "properties": {} }
+            },
+            {
+                "type": "function",
+                "name": "image_gen",
+                "description": "Native-compatible image generation",
+                "parameters": { "type": "object", "properties": {} }
+            },
+            {
+                "type": "function",
+                "name": "vision_generate",
+                "description": "Legacy image generation",
+                "parameters": { "type": "object", "properties": {} }
+            },
+            {
+                "type": "function",
+                "name": "view_image",
+                "description": "View a local image",
+                "parameters": { "type": "object", "properties": {} }
+            },
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "description": "Spawn a sub-agent",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        ])));
+
+        assert_eq!(context.request_tool_items(), 5);
+        assert_eq!(context.upstream_names(), vec!["spawn_agent", "view_image"]);
+        assert!(!context.has_external_tool("imagegen"));
+        assert!(!context.has_external_tool("image_gen"));
+        assert!(!context.has_external_tool("vision_generate"));
+        assert!(context.has_external_tool("view_image"));
+        assert!(context.has_external_tool("spawn_agent"));
     }
 
     #[test]

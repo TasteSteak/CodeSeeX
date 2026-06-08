@@ -27,18 +27,30 @@ const RESERVED_CONFIG_KEYS: &[&str] = &[
     "BILLING_PRO_CACHE_MISS_INPUT_CNY",
     "BILLING_PRO_OUTPUT_CNY",
     "CATALOG_MODE",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_API_KEY_CONFIGURED",
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_OFFICIAL_V1_COMPAT",
     "DEEPSEEK_TEMPERATURE_PRESET",
     "DEEPSEEK_THINKING",
     "ENABLED_TOOLS",
     "LOG_RETENTION_DAYS",
+    "NETWORK_PROXY_MODE",
     "PROXY_PORT",
     "SHOW_THINKING",
     "UI_CLOSE_BEHAVIOR",
     "UI_LANGUAGE",
     "UI_THEME",
     "UPSTREAM_MODEL_OVERRIDE",
+    "WEB_SEARCH_PROXY_MODE",
+    "VISION_ANALYZE_MODEL",
+    "VISION_ANALYZE_URL",
+    "VISION_GENERATE_MODEL",
+    "VISION_GENERATE_URL",
+    "VISION_API_KEY",
+    "VISUAL_SEARCH_API_KEY",
+    "VISUAL_SEARCH_MODEL",
+    "VISUAL_SEARCH_URL",
 ];
 
 #[derive(Debug, Clone)]
@@ -852,7 +864,12 @@ mod tests {
                 "description": "A community tool.",
                 "config": [
                     { "key": "FANCY_MODE", "type": "select", "defaultValue": "safe", "options": [{ "value": "safe", "label": "Safe" }] },
-                    { "key": "PROXY_PORT", "type": "text" }
+                    { "key": "PROXY_PORT", "type": "text" },
+                    { "key": "CATALOG_MODE", "type": "text" },
+                    { "key": "DEEPSEEK_API_KEY", "type": "password" },
+                    { "key": "VISION_API_KEY", "type": "password" },
+                    { "key": "VISION_GENERATE_URL", "type": "text" },
+                    { "key": "VISUAL_SEARCH_API_KEY", "type": "password" }
                 ]
             }))
             .expect("manifest json"),
@@ -1000,6 +1017,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        std::env::temp_dir().join(format!("codeseex-next-{label}-{nanos}"))
+        std::env::temp_dir().join(format!("codeseex-{label}-{nanos}"))
     }
 }

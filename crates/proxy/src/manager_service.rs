@@ -1,10 +1,10 @@
 use crate::app_state::ProxyState;
-use crate::config_payload::{
-    model_override_to_ui, normalize_catalog_mode, temperature_to_ui, user_config_from_payload,
-};
+use crate::config_payload::{model_override_to_ui, temperature_to_ui, user_config_from_payload};
 use crate::http_utils::{config_version, is_newer_version, normalize_version_label, now_seconds};
 use crate::tools::registry::{enabled_tool_ids, tool_registry, tool_settings};
-use codeseex_core::catalog::{build_codeseex_catalog, codex_toml_snippet, write_catalog_atomic};
+use codeseex_core::catalog::{
+    build_codeseex_catalog, catalog_file_is_compatible, codex_toml_snippet, write_catalog_atomic,
+};
 use codeseex_core::models::available_models;
 use codeseex_core::urls::balance_url;
 use codeseex_core::{AppConfig, UserConfig};
@@ -32,7 +32,7 @@ impl ManagerRuntime {
         let timeout = std::time::Duration::from_millis(config.upstream.timeout_ms);
         Ok(Self {
             store: Store::open(&config.data_dir).await?,
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: crate::network::client(config.network_proxy, timeout)?,
             config: Arc::new(config),
         })
     }
@@ -155,7 +155,6 @@ impl ManagerRuntime {
         let proxy = user_config.proxy.as_ref();
         let upstream = user_config.upstream.as_ref();
         let model = user_config.model.as_ref();
-        let catalog = user_config.catalog.as_ref();
         let ui = user_config.ui.as_ref();
         let billing = user_config.billing.as_ref();
         let tools = user_config.tools.as_ref();
@@ -180,9 +179,8 @@ impl ManagerRuntime {
             "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(model_override),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
             "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
-            "CATALOG_MODE": catalog.and_then(|value| value.mode.as_deref()).map(normalize_catalog_mode).unwrap_or("default").to_string(),
             "SHOW_THINKING": ui.and_then(|value| value.show_thinking).unwrap_or(true).to_string(),
-            "WEB_SEARCH_PROXY_MODE": web_search_proxy_to_ui(config.web_search_proxy),
+            "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
             "AUTO_START": ui.and_then(|value| value.auto_start).unwrap_or(false).to_string(),
             "UI_THEME": ui.and_then(|value| value.theme.as_deref()).unwrap_or("system"),
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
@@ -194,7 +192,7 @@ impl ManagerRuntime {
             "BILLING_PRO_CACHED_INPUT_CNY": billing.and_then(|value| value.pro_cached_input_cny).unwrap_or(0.025).to_string(),
             "BILLING_PRO_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.pro_cache_miss_input_cny).unwrap_or(3.0).to_string(),
             "BILLING_PRO_OUTPUT_CNY": billing.and_then(|value| value.pro_output_cny).unwrap_or(6.0).to_string(),
-            "ENABLED_TOOLS": tools.and_then(|value| value.enabled.clone()).map(Value::from).unwrap_or(Value::Null)
+            "ENABLED_TOOLS": tools.and_then(|value| value.enabled.as_deref()).map(canonical_enabled_tool_ids).map(Value::from).unwrap_or(Value::Null)
         });
         if let Some(settings) = user_config
             .tools
@@ -202,11 +200,33 @@ impl ManagerRuntime {
             .and_then(|tools| tools.settings.as_ref())
         {
             if let Some(object) = payload.as_object_mut() {
-                for key in crate::community_tools::community_tool_config_keys(&config.data_dir) {
+                let mut tool_config_keys = crate::tools::registry::builtin_tool_config_keys();
+                tool_config_keys.extend(crate::community_tools::community_tool_config_keys(
+                    &config.data_dir,
+                ));
+                for key in tool_config_keys {
                     if let Some(value) = settings.get(&key) {
                         object.insert(key, Value::String(value.clone()));
                     }
                 }
+                insert_tool_setting_alias(
+                    object,
+                    settings,
+                    "VISION_ANALYZE_URL",
+                    "VISUAL_SEARCH_URL",
+                );
+                insert_tool_setting_alias(
+                    object,
+                    settings,
+                    "VISION_ANALYZE_MODEL",
+                    "VISUAL_SEARCH_MODEL",
+                );
+                insert_tool_setting_alias(
+                    object,
+                    settings,
+                    "VISION_API_KEY",
+                    "VISUAL_SEARCH_API_KEY",
+                );
             }
         }
         payload
@@ -357,13 +377,7 @@ impl ManagerRuntime {
 
     pub async fn balance(&self) -> ManagerJsonResponse {
         let config = self.active_config();
-        let Some(api_key) = config
-            .upstream
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
+        let Some(api_key) = codeseex_core::codex_auth::read_codex_auth_api_key(true) else {
             return ok(json!({
                 "ok": false,
                 "code": "missing_api_key",
@@ -488,21 +502,15 @@ impl ManagerRuntime {
 
     pub fn generate_adapter(&self) -> ManagerJsonResponse {
         let config = self.active_config();
-        let user_config = UserConfig::read_from(&config.config_path()).unwrap_or_default();
-        let catalog_mode = user_config
-            .catalog
-            .and_then(|value| value.mode)
-            .map(|value| normalize_catalog_mode(&value).to_owned())
-            .unwrap_or_else(|| "default".to_owned());
         match ensure_catalog(&config) {
             Ok(()) => ok(json!({
                 "ok": true,
                 "ready": true,
-                "catalog_mode": catalog_mode,
+                "catalog_mode": "builtin",
                 "catalog_path": config.catalog_path().to_string_lossy(),
                 "models": available_models().into_iter().map(|m| m.slug).collect::<Vec<_>>(),
                 "context_window": 1_000_000,
-                "effective_context_window_percent": 90,
+                "effective_context_window_percent": 95,
                 "toml_snippet": codex_toml_snippet(&config.catalog_path(), &config.proxy_base_url())
             })),
             Err(error) => status(500, json!({ "ok": false, "error": error.to_string() })),
@@ -511,6 +519,9 @@ impl ManagerRuntime {
 }
 
 pub fn ensure_catalog(config: &AppConfig) -> anyhow::Result<()> {
+    if catalog_file_is_compatible(&config.catalog_path()) {
+        return Ok(());
+    }
     let catalog = build_codeseex_catalog();
     write_catalog_atomic(&config.catalog_path(), &catalog)
 }
@@ -533,11 +544,40 @@ fn proxy_port_source(configured_port: Option<u16>) -> &'static str {
     }
 }
 
-fn web_search_proxy_to_ui(value: codeseex_core::WebSearchProxyMode) -> &'static str {
+fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     match value {
-        codeseex_core::WebSearchProxyMode::System => "system",
-        codeseex_core::WebSearchProxyMode::None => "none",
+        codeseex_core::NetworkProxyMode::System => "system",
+        codeseex_core::NetworkProxyMode::None => "none",
     }
+}
+
+fn insert_tool_setting_alias(
+    object: &mut serde_json::Map<String, Value>,
+    settings: &std::collections::BTreeMap<String, String>,
+    key: &str,
+    legacy_key: &str,
+) {
+    if object.contains_key(key) {
+        return;
+    }
+    if let Some(value) = settings.get(legacy_key) {
+        object.insert(key.to_owned(), Value::String(value.clone()));
+    }
+}
+
+fn canonical_enabled_tool_ids(ids: &[String]) -> Vec<String> {
+    let mut output = Vec::new();
+    for id in ids {
+        let canonical = match id.as_str() {
+            "visual_search" | "vision_generate" | "image_gen" | "imagegen" | "image_generation"
+            | "generate_image" | "image_generate" | "create_image" => "vision_analyze",
+            _ => id.as_str(),
+        };
+        if !output.iter().any(|value| value == canonical) {
+            output.push(canonical.to_owned());
+        }
+    }
+    output
 }
 
 fn languages() -> Value {
@@ -626,10 +666,47 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_config(label: &str) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.data_dir =
-            std::env::temp_dir().join(format!("codeseex-manager-{label}-{}", Uuid::new_v4()));
-        config
+        AppConfig {
+            data_dir: std::env::temp_dir()
+                .join(format!("codeseex-manager-{label}-{}", Uuid::new_v4())),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ensure_catalog_generates_embedded_catalog_without_native_codex() {
+        let config = temp_config("embedded-catalog");
+
+        ensure_catalog(&config).expect("ensure embedded catalog");
+
+        assert!(catalog_file_is_compatible(&config.catalog_path()));
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn adapter_reports_builtin_catalog_for_legacy_modes() {
+        let config = temp_config("builtin-catalog-mode");
+        let user_config = UserConfig {
+            catalog: Some(codeseex_core::UserCatalogConfig {
+                mode: Some("auto".to_owned()),
+            }),
+            ..UserConfig::default()
+        };
+        user_config
+            .write_atomic(&config.config_path())
+            .expect("write legacy catalog mode");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+
+        let response = runtime.generate_adapter();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body.get("catalog_mode").and_then(Value::as_str),
+            Some("builtin")
+        );
+        let _ = std::fs::remove_dir_all(config.data_dir);
     }
 
     #[tokio::test]
@@ -679,6 +756,56 @@ mod tests {
         assert_eq!(
             status.pointer("/runtime/status").and_then(Value::as_str),
             Some("running")
+        );
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn config_payload_maps_legacy_visual_search_settings_to_vision_fields() {
+        let config = temp_config("legacy-vision-config");
+        let mut settings = std::collections::BTreeMap::new();
+        settings.insert(
+            "VISUAL_SEARCH_URL".to_owned(),
+            "https://vision.example.com/v1".to_owned(),
+        );
+        settings.insert("VISUAL_SEARCH_MODEL".to_owned(), "vision-model".to_owned());
+        settings.insert("VISUAL_SEARCH_API_KEY".to_owned(), "secret-key".to_owned());
+        let user_config = UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                enabled: Some(vec!["visual_search".to_owned()]),
+                settings: Some(settings),
+                ..Default::default()
+            }),
+            ..UserConfig::default()
+        };
+        user_config
+            .write_atomic(&config.config_path())
+            .expect("write legacy vision config");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+
+        let payload = runtime.config_payload();
+
+        assert_eq!(
+            payload
+                .get("ENABLED_TOOLS")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("vision_analyze")
+        );
+        assert_eq!(
+            payload.get("VISION_ANALYZE_URL").and_then(Value::as_str),
+            Some("https://vision.example.com/v1")
+        );
+        assert_eq!(
+            payload.get("VISION_ANALYZE_MODEL").and_then(Value::as_str),
+            Some("vision-model")
+        );
+        assert_eq!(
+            payload.get("VISION_API_KEY").and_then(Value::as_str),
+            Some("secret-key")
         );
         let _ = std::fs::remove_dir_all(config.data_dir);
     }

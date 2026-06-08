@@ -102,7 +102,6 @@ fn flush_proxy_tool_group(output: &mut Vec<Value>, proxy_group: &mut Vec<Value>)
     if proxy_group.is_empty() {
         return;
     }
-    output.push(tool_usage_message_item(proxy_group));
     output.append(proxy_group);
 }
 
@@ -268,59 +267,6 @@ fn web_search_direct_url(value: &str) -> Option<String> {
     None
 }
 
-fn tool_usage_message_item(items: &[Value]) -> Value {
-    let names = items
-        .iter()
-        .filter_map(|item| item.get("name").and_then(Value::as_str))
-        .filter(|name| !name.trim().is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let text = tool_usage_display_text(&names);
-    json!({
-        "id": format!("msg_{}", Uuid::new_v4().simple()),
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "phase": "commentary",
-        "content": [{ "type": "output_text", "text": text, "annotations": [] }],
-        "codeseex_display_only": "tool_usage",
-        "metadata": { "codeseex_display_only": true, "kind": "tool_usage", "tools": names }
-    })
-}
-
-fn tool_usage_display_text(names: &[String]) -> String {
-    if names.len() == 1 {
-        return format!("\u{5df2}\u{4f7f}\u{7528}\u{5de5}\u{5177} `{}`", names[0]);
-    }
-    tool_usage_batch_display_text(names)
-}
-
-fn tool_usage_batch_display_text(names: &[String]) -> String {
-    let mut unique_names = Vec::new();
-    for name in names {
-        if !unique_names.contains(name) {
-            unique_names.push(name.clone());
-        }
-    }
-    let visible_names = unique_names.iter().take(3).cloned().collect::<Vec<_>>();
-    let hidden_count = unique_names.len().saturating_sub(visible_names.len());
-    let suffix = if hidden_count > 0 {
-        format!(" +{hidden_count}")
-    } else {
-        String::new()
-    };
-    format!(
-        "\u{5df2}\u{4f7f}\u{7528} {} \u{4e2a}\u{5de5}\u{5177}\n{}{}",
-        names.len(),
-        visible_names
-            .iter()
-            .map(|name| format!("`{name}`"))
-            .collect::<Vec<_>>()
-            .join(" \u{00b7} "),
-        suffix
-    )
-}
-
 pub(crate) fn normalize_apply_patch_response_input(arguments: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(arguments) else {
         return normalize_patch_newlines(arguments);
@@ -427,14 +373,12 @@ mod tests {
     }
 
     #[test]
-    fn regular_codeseex_tools_use_display_message_plus_proxy_item() {
+    fn regular_codeseex_tools_use_proxy_item_without_text_message() {
         let items =
             proxy_visible_response_items(&[call("call_ls", "list_directory", r#"{"path":"."}"#)]);
 
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["type"], "message");
-        assert_eq!(items[0]["codeseex_display_only"], "tool_usage");
-        assert_eq!(items[1]["type"], "proxy_tool_call");
-        assert_eq!(items[1]["name"], "list_directory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "proxy_tool_call");
+        assert_eq!(items[0]["name"], "list_directory");
     }
 }

@@ -1,6 +1,6 @@
 # M1 API Surface
 
-CodeSeeX Next starts with a deliberately small local API.
+CodeSeeX starts with a deliberately small local API.
 
 ## Management
 

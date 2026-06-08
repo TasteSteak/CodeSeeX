@@ -1,9 +1,6 @@
 const LOG_INITIAL_PAGE_SIZE = 30;
 const LOG_OLDER_PAGE_SIZE = 15;
 const LOG_MAX_ITEMS = 1000;
-const LOG_RENDER_WINDOW = 120;
-const LOG_RENDER_BUFFER = 30;
-const LOG_ESTIMATED_ROW_HEIGHT = 58;
 const LOG_BOTTOM_LOAD_THRESHOLD = 80;
 const CONFIG_AUTOSAVE_DELAY_MS = 450;
 const DEBUG_MANAGER_BASE_URL = "http://127.0.0.1:8787";
@@ -23,6 +20,7 @@ const DEFAULT_BILLING_RATES_CNY = Object.freeze({
   pro: Object.freeze({ cached: 0.025, cacheMiss: 3, output: 6 }),
 });
 const RESTART_REQUIRED_KEYS = new Set([
+  "NETWORK_PROXY_MODE",
   "PROXY_PORT",
 ]);
 const SYSTEM_LANGUAGE = "system";
@@ -119,7 +117,9 @@ let logDividers = [];
 let logEvents = [];
 let logHasMore = false;
 let logLoadingOlder = false;
-let logRenderState = { signature: "", start: 0, end: 0, scrollTop: 0 };
+let logRenderPending = false;
+let latestLogsLoadedOnce = false;
+let latestLogsRefreshInFlight = false;
 let lastBalanceData = null;
 let lastStatusSignature = "";
 let lastUsageSignature = "";
@@ -225,10 +225,10 @@ function bind() {
   });
 
   onRadioChange("CONFIG_TAB", setConfigTab);
-  onRadioChange("CATALOG_MODE", handleConfigInput);
   onRadioChange("UPSTREAM_MODEL_OVERRIDE", handleConfigInput);
   onRadioChange("DEEPSEEK_TEMPERATURE_PRESET", handleConfigInput);
   onRadioChange("DEEPSEEK_THINKING", handleConfigInput);
+  onRadioChange("NETWORK_PROXY_MODE", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
   onRadioChange("UI_THEME", (value) => {
@@ -433,7 +433,12 @@ async function refresh(options = {}) {
     await syncConfigIfChanged(data.config_version);
     renderStatus(data);
     if (Array.isArray(data.events)) {
-      updateLatestLogs(data.events, { force: Boolean(options.forceLogs) });
+      updateLatestLogs(data.events, {
+        force: Boolean(options.forceLogs),
+        hasMore: data.has_more,
+      });
+    } else if (options.forceLogs || currentView === "logs" || !latestLogsLoadedOnce) {
+      await refreshLatestLogs({ force: Boolean(options.forceLogs) });
     }
     maybeRefreshUsage(data.runtime || {}, options);
   } catch (error) {
@@ -498,6 +503,29 @@ async function refreshUsage(options = {}) {
       usageRefreshQueued = false;
       refreshUsage({ force: true }).catch(() => {});
     }
+  }
+}
+
+async function refreshLatestLogs(options = {}) {
+  if (latestLogsRefreshInFlight) return;
+  latestLogsRefreshInFlight = true;
+  try {
+    const data = await apiJson("/api/events?limit=" + LOG_INITIAL_PAGE_SIZE, { cache: "no-store" });
+    latestLogsLoadedOnce = true;
+    updateLatestLogs(Array.isArray(data.events) ? data.events : [], {
+      force: Boolean(options.force),
+      hasMore: data.has_more,
+    });
+  } catch (error) {
+    updateLatestLogs([{
+      ts: new Date().toISOString(),
+      type: "client_error",
+      level: "error",
+      message: error.message || String(error),
+      detail: clientErrorDetail("/api/events", error),
+    }], { force: true });
+  } finally {
+    latestLogsRefreshInFlight = false;
   }
 }
 
@@ -901,9 +929,9 @@ function renderConfig(config) {
   currentConfigSignature = configSignature;
 
   setRadioValue("DEEPSEEK_THINKING", config.DEEPSEEK_THINKING || "auto");
-  setRadioValue("CATALOG_MODE", normalizeCatalogMode(config.CATALOG_MODE));
   setRadioValue("UPSTREAM_MODEL_OVERRIDE", normalizeUpstreamModelOverride(config.UPSTREAM_MODEL_OVERRIDE));
   setRadioValue("DEEPSEEK_TEMPERATURE_PRESET", normalizeTemperaturePreset(config.DEEPSEEK_TEMPERATURE_PRESET));
+  setRadioValue("NETWORK_PROXY_MODE", normalizeNetworkProxyMode(config.NETWORK_PROXY_MODE || config.WEB_SEARCH_PROXY_MODE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
   const nextTheme = config.UI_THEME || "system";
@@ -919,7 +947,7 @@ function renderConfig(config) {
   currentAdapterSignature = "";
   applyTheme(nextTheme);
   if (resolveLanguageId(nextLanguage) !== uiLanguage || nextLanguage !== configuredLanguage) applyLanguage(nextLanguage);
-  lastSavedConfig = normalizeConfigPayload(buildConfigPayload());
+  lastSavedConfig = normalizeConfigPayload(config);
   lastUsageSignature = "";
   lastTurnSignature = "";
   if (!restartRequired) renderConfigSaveState("clean");
@@ -931,7 +959,6 @@ function renderCodexAdapter(adapter) {
   const signature = stableStringify({
     adapter: latestAdapter,
     model: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE") || (lastSavedConfig && lastSavedConfig.UPSTREAM_MODEL_OVERRIDE)),
-    catalogMode: normalizeCatalogMode(getRadioValue("CATALOG_MODE") || (lastSavedConfig && lastSavedConfig.CATALOG_MODE)),
   });
   if (signature === currentAdapterSignature) return;
   currentAdapterSignature = signature;
@@ -941,20 +968,13 @@ function renderCodexAdapter(adapter) {
     if (latestAdapter.ready) {
       els.configTomlStatus.textContent = [
         t("codexAdapterReady"),
-        latestAdapter.catalog_mode ? t("catalogMode") + ": " + catalogModeLabel(latestAdapter.catalog_mode) : "",
+        latestAdapter.catalog_mode ? t("catalogMode") + ": " + t("catalogModeBuiltin") : "",
         latestAdapter.catalog_path ? latestAdapter.catalog_path : "",
       ].filter(Boolean).join(" · ");
     } else {
       els.configTomlStatus.textContent = latestAdapter.error || t("codexAdapterMissing");
     }
   }
-}
-
-function catalogModeLabel(value) {
-  const mode = normalizeCatalogMode(value);
-  if (mode === "auto") return t("catalogModeAuto");
-  if (mode === "builtin") return t("catalogModeBuiltin");
-  return t("catalogModeDefault");
 }
 
 async function copyConfigToml() {
@@ -1038,7 +1058,9 @@ function renderTools(tools, config) {
   const signature = JSON.stringify(nextTools.map((tool) => ({
     id: tool.id,
     name: tool.name,
+    nameKey: tool.nameKey,
     description: tool.description,
+    descriptionKey: tool.descriptionKey,
     icon: tool.icon,
     iconPath: tool.iconPath,
     system: Boolean(tool.system),
@@ -1097,12 +1119,12 @@ function renderToolCard(tool) {
   titleRow.className = "tool-card-title-row";
   const title = document.createElement("div");
   title.className = "tool-card-title";
-  title.textContent = tool.name || tool.id || "Tool";
+  title.textContent = translateToolText(tool.nameKey, tool.name || tool.id || "Tool");
   titleRow.appendChild(title);
   for (const label of normalizeToolLabels(tool.labels)) titleRow.appendChild(renderToolLabel(label));
   const description = document.createElement("div");
   description.className = "tool-card-description";
-  description.textContent = tool.description || "";
+  description.textContent = translateToolText(tool.descriptionKey, tool.description || "");
   titleWrap.appendChild(titleRow);
   if (description.textContent) titleWrap.appendChild(description);
 
@@ -1175,6 +1197,13 @@ function renderToolField(field) {
   const label = document.createElement("span");
   label.textContent = translateToolText(field.labelKey, field.label || field.key);
   labelWrap.appendChild(label);
+  const description = translateToolText(field.descriptionKey || inferredToolTextKey(field, "Hint"), field.description || "");
+  if (description) {
+    const hint = document.createElement("small");
+    hint.className = "muted";
+    hint.textContent = description;
+    labelWrap.appendChild(hint);
+  }
   item.appendChild(labelWrap);
 
   if (field.type === "segmented") {
@@ -1493,22 +1522,30 @@ function usageModelLabel(turn) {
 
 function updateLatestLogs(events, options = {}) {
   const next = Array.isArray(events) ? events : [];
+  const hasMore = options.hasMore === undefined ? null : Boolean(options.hasMore);
   const shouldFollow = options.force || logEvents.length === 0 || isAtLogTop();
   const nextEvents = logEvents.length === 0 ? next.slice(-LOG_INITIAL_PAGE_SIZE) : eventsAfterNewestLog(next);
   if (!options.force && nextEvents.length === 0) {
-    logHasMore = next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore;
+    logHasMore = hasMore === null ? (next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore) : hasMore;
+    if (logRenderPending && shouldFollow) {
+      logRenderPending = false;
+      renderLogs();
+      els.logStream.scrollTop = 0;
+    }
     return;
   }
   if (shouldFollow) {
     logEvents = mergeEvents(logEvents.concat(nextEvents)).slice(-LOG_MAX_ITEMS);
-    logHasMore = next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore;
+    logHasMore = hasMore === null ? (next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore) : hasMore;
     pruneLogDividers();
+    logRenderPending = false;
     renderLogs();
     els.logStream.scrollTop = 0;
   } else {
     logEvents = mergeEvents(logEvents.concat(nextEvents)).slice(-LOG_MAX_ITEMS);
-    logHasMore = next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore;
+    logHasMore = hasMore === null ? (next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore) : hasMore;
     pruneLogDividers();
+    logRenderPending = true;
   }
 }
 
@@ -1516,12 +1553,10 @@ function renderLogs() {
   const started = performance.now();
   const shouldFollow = isAtLogTop();
   const previousScrollTop = els.logStream ? els.logStream.scrollTop : 0;
-  const windowRange = logWindowRange();
   const signature = stableStringify({
     locale: uiLanguage,
     events: logEvents.map(logEventKey),
     dividers: logDividers,
-    range: windowRange,
   });
   if (signature === lastLogRenderSignature) return;
   lastLogRenderSignature = signature;
@@ -1536,9 +1571,7 @@ function renderLogs() {
     }));
     return;
   }
-  const rendered = logRenderItems().slice(windowRange.start, windowRange.end);
-  els.logStream.appendChild(logSpacer(windowRange.topSpacer));
-  for (const item of rendered) {
+  for (const item of logRenderItems()) {
     if (item.kind === "divider") {
       els.logStream.appendChild(logDivider(item.count));
       continue;
@@ -1546,21 +1579,16 @@ function renderLogs() {
     const event = item.event;
     els.logStream.appendChild(logEntry(normalizeLogEvent(event)));
   }
-  els.logStream.appendChild(logSpacer(windowRange.bottomSpacer));
-  logRenderState = {
-    signature,
-    start: windowRange.start,
-    end: windowRange.end,
-    scrollTop: els.logStream.scrollTop,
-  };
   els.logStream.scrollTop = shouldFollow ? 0 : previousScrollTop;
-  logRenderState.scrollTop = els.logStream.scrollTop;
   noteSlow("renderLogs", performance.now() - started);
 }
 
 function handleLogScroll() {
-  const nextRange = logWindowRange();
-  if (nextRange.start !== logRenderState.start || nextRange.end !== logRenderState.end) renderLogs();
+  if (isAtLogTop() && logRenderPending) {
+    logRenderPending = false;
+    renderLogs();
+    els.logStream.scrollTop = 0;
+  }
   if (isAtLogBottom()) loadOlderLogs();
 }
 
@@ -1573,28 +1601,6 @@ function logRenderItems() {
     items.push({ kind: "event", key: logEventKey(event), event });
   }
   return items;
-}
-
-function logWindowRange() {
-  const total = logRenderItems().length;
-  const visibleCount = Math.max(LOG_RENDER_WINDOW, Math.ceil((els.logStream ? els.logStream.clientHeight : 0) / LOG_ESTIMATED_ROW_HEIGHT) + LOG_RENDER_BUFFER * 2);
-  const firstVisible = Math.max(0, Math.floor((els.logStream ? els.logStream.scrollTop : 0) / LOG_ESTIMATED_ROW_HEIGHT) - LOG_RENDER_BUFFER);
-  const start = Math.min(Math.max(0, firstVisible), Math.max(0, total - visibleCount));
-  const end = Math.min(total, start + visibleCount);
-  return {
-    start,
-    end,
-    topSpacer: start * LOG_ESTIMATED_ROW_HEIGHT,
-    bottomSpacer: Math.max(0, total - end) * LOG_ESTIMATED_ROW_HEIGHT,
-  };
-}
-
-function logSpacer(height) {
-  const spacer = document.createElement("div");
-  spacer.className = "log-spacer";
-  spacer.style.height = Math.max(0, Number(height) || 0) + "px";
-  spacer.setAttribute("aria-hidden", "true");
-  return spacer;
 }
 
 function normalizeLogEvent(event) {
@@ -1636,6 +1642,7 @@ function userLogMessage(type, fallback) {
     model_alias_applied: "modelAliasApplied",
     process_stderr: "processError",
     process_stdout: "processOutput",
+    proxy_start_failed: "proxyStartFailed",
     proxy_started: "proxyStarted",
     proxy_stopped: "proxyStopped",
     request_completed: "requestCompleted",
@@ -1644,7 +1651,10 @@ function userLogMessage(type, fallback) {
     tool_call: "toolCall",
     tool_result: "toolResult",
   }[type];
-  if (key) return t(key);
+  if (key) {
+    const translated = t(key);
+    if (translated !== key) return translated;
+  }
   const message = String(fallback || "").trim();
   return message || t("runtimeEvent");
 }
@@ -1719,6 +1729,7 @@ function setView(viewName) {
   els.pageTitle.textContent = t("view" + name + "Title");
   els.pageSubtitle.textContent = t("view" + name + "Subtitle");
   if (view === "usage") refreshUsage({ force: true }).catch(() => {});
+  if (view === "logs") refreshLatestLogs({ force: true }).catch(() => {});
 }
 
 function handleAboutAction(action) {
@@ -1745,10 +1756,19 @@ async function handleWindowAction(action) {
   } catch {}
 }
 
-function openOrExplain(url, fallback) {
+async function openOrExplain(url, fallback) {
   if (!url) return setAboutStatus(fallback, true);
-  window.open(url, "_blank", "noopener");
-  setAboutStatus(t("openExternal"), false);
+  try {
+    if (isTauriRuntime()) {
+      await desktopInvoke("desktop_open_external", { url });
+    } else {
+      window.open(url, "_blank", "noopener");
+    }
+    setAboutStatus(t("openExternal"), false);
+  } catch (error) {
+    window.open(url, "_blank", "noopener");
+    setAboutStatus(error && error.message ? error.message : String(error), true);
+  }
 }
 
 function setAboutStatus(message, warning, options = {}) {
@@ -1759,14 +1779,15 @@ function setAboutStatus(message, warning, options = {}) {
 
 function handleConfigInput() {
   if (!lastSavedConfig) return;
-  const next = normalizeConfigPayload(buildConfigPayload());
+  const nextPayload = buildConfigPayload();
+  const next = normalizeConfigPayload(nextPayload);
   if (sameConfigPayload(next, lastSavedConfig)) {
     pendingConfig = null;
     clearAutosaveTimer();
     renderConfigSaveState(restartRequired ? "savedRestart" : "clean");
     return;
   }
-  pendingConfig = next;
+  pendingConfig = nextPayload;
   renderConfigSaveState("pending");
   clearAutosaveTimer();
   autosaveTimer = setTimeout(() => {
@@ -1779,9 +1800,9 @@ function buildConfigPayload() {
   return {
     ...collectToolConfigPayload(),
     DEEPSEEK_THINKING: getRadioValue("DEEPSEEK_THINKING") || "auto",
-    CATALOG_MODE: normalizeCatalogMode(getRadioValue("CATALOG_MODE")),
     UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE")),
     DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(getRadioValue("DEEPSEEK_TEMPERATURE_PRESET")),
+    NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     DEEPSEEK_OFFICIAL_V1_COMPAT: els.deepseekOfficialV1Compat && els.deepseekOfficialV1Compat.checked ? "true" : "false",
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
@@ -1804,7 +1825,13 @@ function buildConfigPayload() {
 function normalizeConfigPayload(payload) {
   const output = {};
   for (const [key, value] of Object.entries(payload || {})) {
-    output[key] = String(value);
+    if (Array.isArray(value)) {
+      output[key] = key === ENABLED_TOOLS_KEY
+        ? stringifyEnabledTools(value)
+        : JSON.stringify(value.map((item) => String(item)));
+    } else {
+      output[key] = String(value);
+    }
   }
   return output;
 }
@@ -2095,13 +2122,6 @@ function normalizeRetentionDays(value) {
   return raw === "1" || raw === "3" || raw === "7" || raw === "30" ? raw : "7";
 }
 
-function normalizeCatalogMode(value) {
-  const normalized = String(value || "default").trim().toLowerCase();
-  if (normalized === "auto" || normalized === "dynamic") return "auto";
-  if (normalized === "builtin") return "builtin";
-  return "default";
-}
-
 function normalizeUpstreamModelOverride(value) {
   const normalized = String(value || "default").trim().toLowerCase();
   if (normalized === "flash" || normalized === "deepseek-v4-flash") return "deepseek-v4-flash";
@@ -2116,6 +2136,11 @@ function normalizeTemperaturePreset(value) {
   if (normalized === "general" || normalized === "chat" || normalized === "translation") return "general";
   if (normalized === "creative" || normalized === "creation") return "creative";
   return DEFAULT_TEMPERATURE_PRESET;
+}
+
+function normalizeNetworkProxyMode(value) {
+  const normalized = String(value || "system").trim().toLowerCase();
+  return normalized === "none" || normalized === "no_proxy" || normalized === "direct" ? "none" : "system";
 }
 
 function normalizeCloseBehavior(value) {
@@ -2161,39 +2186,111 @@ function formatDetail(detail) {
 
 function formatLogDetail(type, detail) {
   if (!detail || typeof detail !== "object") return String(detail || "");
+  if (type === "request_started") {
+    return [
+      detail.endpoint ? t("logApi") + ": " + formatEndpointLabel(detail.endpoint) : "",
+      modelDetailLine(detail),
+      detail.previous_response_id ? t("logPreviousResponseId") + ": " + compactLogValue(detail.previous_response_id, 80) : "",
+    ].filter(Boolean).join("\n");
+  }
   if (type === "request_completed") {
     return [
+      detail.status !== undefined ? t("logHttp") + ": " + detail.status : "",
+      modelDetailLine(detail),
       detail.duration_ms !== undefined ? t("elapsed") + ": " + formatDuration(detail.duration_ms) : "",
       detail.cost_cny !== undefined ? t("cost") + ": " + formatCost(detail.cost_cny) : "",
     ].filter(Boolean).join("\n");
   }
-  if (type === "tool_call" || type === "tool_result") {
+  if (type === "request_failed") {
     return [
-      detail.name ? t("toolName") + ": " + detail.name : "",
-      detail.scope ? t("toolScope") + ": " + detail.scope : "",
-      detail.call_id ? "call_id: " + detail.call_id : "",
-      detail.bytes !== undefined ? "bytes: " + detail.bytes : "",
+      detail.status !== undefined ? t("logHttp") + ": " + detail.status : "",
+      modelDetailLine(detail),
+      errorDetailLine(detail),
     ].filter(Boolean).join("\n");
+  }
+  if (type === "tool_call") return toolDetailLines(detail).join("\n");
+  if (type === "tool_result") {
+    return toolDetailLines(detail).concat([
+      detail.ok !== undefined ? t("logStatus") + ": " + (detail.ok ? t("logStatusOk") : t("logStatusFailed")) : "",
+      detail.summary ? t("logSummary") + ": " + compactLogValue(detail.summary, 180) : "",
+    ]).filter(Boolean).join("\n");
   }
   if (type === "model_alias_applied") {
     return [
-      detail.requested_model ? "requested_model: " + detail.requested_model : "",
-      detail.model ? t("model") + ": " + detail.model : "",
-      detail.source ? "source: " + detail.source : "",
+      modelDetailLine(detail),
+      detail.source ? t("logSource") + ": " + detail.source : "",
     ].filter(Boolean).join("\n");
   }
   if (type === "context_compacted") {
     return [
       detail.mode ? t("mode") + ": " + detail.mode : "",
-      detail.message_count !== undefined ? "messages: " + detail.message_count : "",
-      detail.retained_message_count !== undefined ? "retained: " + detail.retained_message_count : "",
-      detail.tool_fact_count !== undefined ? "tool_facts: " + detail.tool_fact_count : "",
-      detail.input_item_count !== undefined ? "input_items: " + detail.input_item_count : "",
-      detail.estimated_tokens !== undefined ? "estimated_tokens: " + detail.estimated_tokens : "",
-      detail.threshold_tokens !== undefined ? "threshold_tokens: " + detail.threshold_tokens : "",
+      detail.estimated_tokens !== undefined ? t("logEstimatedTokens") + ": " + detail.estimated_tokens : "",
+      detail.threshold_tokens !== undefined ? t("logThresholdTokens") + ": " + detail.threshold_tokens : "",
     ].filter(Boolean).join("\n");
   }
-  return formatDetail(detail);
+  return formatUserLevelDetail(detail);
+}
+
+function formatEndpointLabel(value) {
+  const endpoint = String(value || "").trim();
+  if (endpoint === "/v1/responses") return "Responses";
+  if (endpoint === "/v1/chat/completions") return "Chat completions";
+  return compactLogValue(endpoint, 100);
+}
+
+function modelDetailLine(detail) {
+  const requested = String(detail && detail.requested_model || "").trim();
+  const model = String(detail && detail.model || "").trim();
+  if (requested && model && requested !== model) return t("model") + ": " + requested + " -> " + model;
+  const value = model || requested;
+  return value ? t("model") + ": " + value : "";
+}
+
+function toolDetailLines(detail) {
+  return [
+    detail.name ? t("toolName") + ": " + compactLogValue(detail.name, 80) : "",
+    detail.scope ? t("toolScope") + ": " + compactLogValue(detail.scope, 80) : "",
+  ].filter(Boolean);
+}
+
+function errorDetailLine(detail) {
+  const upstream = detail.upstream_error;
+  const message = detail.message || detail.error
+    || (upstream && (upstream.message || upstream.error || upstream.code || upstream.type));
+  return message ? t("logError") + ": " + compactLogValue(message, 220) : "";
+}
+
+function formatUserLevelDetail(detail) {
+  const allowed = ["endpoint", "status", "model", "requested_model", "action", "mode", "path", "base_url", "host", "port", "error", "message"];
+  return allowed
+    .map((key) => detail[key] !== undefined && detail[key] !== null && detail[key] !== "" ? logDetailLabel(key) + ": " + compactLogValue(detail[key], 180) : "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function logDetailLabel(key) {
+  const labelKey = {
+    endpoint: "logEndpoint",
+    status: "logStatus",
+    model: "model",
+    requested_model: "logRequestedModel",
+    action: "logAction",
+    mode: "mode",
+    path: "logPath",
+    base_url: "logBaseUrl",
+    host: "logHost",
+    port: "logPort",
+    error: "logError",
+    message: "logMessage",
+  }[key];
+  return labelKey ? t(labelKey) : key;
+}
+
+function compactLogValue(value, limit) {
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value || "");
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  const max = Math.max(20, Number(limit) || 160);
+  return cleaned.length > max ? cleaned.slice(0, max - 1) + "..." : cleaned;
 }
 
 function mergeEvents(events) {

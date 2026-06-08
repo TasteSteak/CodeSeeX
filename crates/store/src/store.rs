@@ -14,7 +14,9 @@ const MAX_RUNTIME_REQUESTS: usize = 2_048;
 const MAX_RUNTIME_TURNS: usize = 500;
 const MAX_TURN_MESSAGES_PER_REQUEST: usize = 256;
 const MAX_TOOL_FACTS_PER_REQUEST: usize = 100;
-const MAX_LOG_STRING_CHARS: usize = 4_096;
+const MAX_LOG_STRING_CHARS: usize = 1_024;
+const MAX_LOG_SUMMARY_CHARS: usize = 360;
+const MAX_LOG_ARRAY_ITEMS: usize = 16;
 const MAX_MEMORY_STRING_CHARS: usize = 64 * 1024;
 const MAX_MEMORY_ARRAY_ITEMS: usize = 256;
 const IN_PROGRESS_TTL_SECONDS: i64 = 6 * 60 * 60;
@@ -58,6 +60,8 @@ pub struct EventRecord {
     pub level: String,
     #[serde(rename = "type")]
     pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
     pub message: String,
     pub detail: Option<Value>,
     pub ts: String,
@@ -433,6 +437,12 @@ impl Store {
         message: &str,
         detail: Option<&Value>,
     ) -> Result<()> {
+        let level = level.trim().to_ascii_lowercase();
+        let event_type = event_type.trim().to_owned();
+        let audience = event_audience_for_type(&event_type).to_owned();
+        if audience == "diagnostic" && !diagnostic_logs_enabled() {
+            return Ok(());
+        }
         let id = {
             let mut inner = self.lock_inner()?;
             inner.next_event_id = inner.next_event_id.saturating_add(1);
@@ -440,10 +450,11 @@ impl Store {
         };
         let event = EventRecord {
             id,
-            level: level.trim().to_ascii_lowercase(),
-            event_type: event_type.trim().to_owned(),
+            level,
+            event_type: event_type.clone(),
+            audience: Some(audience),
             message: message.trim().to_owned(),
-            detail: detail.map(redact_log_value),
+            detail: detail.and_then(|value| compact_event_detail(&event_type, value)),
             ts: Utc::now().to_rfc3339(),
         };
         append_log_event(&self.logs_dir, &event).await
@@ -636,7 +647,7 @@ fn collect_recent_events_from_file(
             let Ok(event) = serde_json::from_slice::<EventRecord>(line) else {
                 continue;
             };
-            if visible_only && event.level == "debug" {
+            if visible_only && !event_is_user_visible(&event) {
                 continue;
             }
             if let Some(before) = before {
@@ -651,6 +662,220 @@ fn collect_recent_events_from_file(
         }
     }
     Ok(())
+}
+
+fn event_is_user_visible(event: &EventRecord) -> bool {
+    event.level != "debug" && event_audience(event) == "user"
+}
+
+fn event_audience(event: &EventRecord) -> &'static str {
+    match event.audience.as_deref() {
+        Some("diagnostic") => "diagnostic",
+        Some("user") => "user",
+        _ => event_audience_for_type(&event.event_type),
+    }
+}
+
+fn event_audience_for_type(event_type: &str) -> &'static str {
+    if is_diagnostic_event_type(event_type.trim()) {
+        "diagnostic"
+    } else {
+        "user"
+    }
+}
+
+fn is_diagnostic_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "chat_stream_started"
+            | "context_diagnostic"
+            | "context_response_diagnostic"
+            | "log_maintenance_completed"
+            | "manager_action"
+            | "mixed_tool_turn_split"
+            | "models_requested"
+            | "process_stderr"
+            | "process_stdout"
+            | "tool_lifecycle"
+            | "tool_exposure_diagnostic"
+            | "tool_loop_iteration"
+    )
+}
+
+fn diagnostic_logs_enabled() -> bool {
+    std::env::var("CODESEEX_DIAGNOSTIC_LOGS")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
+    let Some(object) = detail.as_object() else {
+        return Some(redact_log_value(&compact_log_value(
+            detail,
+            MAX_LOG_STRING_CHARS,
+        )));
+    };
+    let mut output = Map::new();
+    match event_type {
+        "request_started" => copy_log_fields(
+            object,
+            &mut output,
+            &[
+                "id",
+                "endpoint",
+                "requested_model",
+                "model",
+                "previous_response_id",
+                "resolved_previous_response_id",
+                "history_messages",
+            ],
+        ),
+        "request_completed" => copy_log_fields(
+            object,
+            &mut output,
+            &[
+                "id",
+                "status",
+                "requested_model",
+                "model",
+                "duration_ms",
+                "cost_cny",
+            ],
+        ),
+        "request_failed" => copy_log_fields(
+            object,
+            &mut output,
+            &[
+                "id",
+                "status",
+                "requested_model",
+                "model",
+                "error",
+                "message",
+                "upstream_error",
+            ],
+        ),
+        "tool_call" => copy_log_fields(object, &mut output, &["id", "name", "scope", "iteration"]),
+        "tool_result" => {
+            copy_log_fields(
+                object,
+                &mut output,
+                &["id", "name", "scope", "iteration", "ok"],
+            );
+            if let Some(summary) = object.get("summary") {
+                output.insert(
+                    "summary".to_owned(),
+                    compact_log_value(summary, MAX_LOG_SUMMARY_CHARS),
+                );
+            }
+        }
+        "context_compaction_completed" | "context_compacted" => copy_log_fields(
+            object,
+            &mut output,
+            &[
+                "id",
+                "compaction_id",
+                "message_count",
+                "tool_fact_count",
+                "summary_chars",
+                "mode",
+                "estimated_tokens",
+                "threshold_tokens",
+            ],
+        ),
+        _ => copy_log_fields(
+            object,
+            &mut output,
+            &[
+                "id",
+                "endpoint",
+                "status",
+                "model",
+                "requested_model",
+                "action",
+                "mode",
+                "path",
+                "base_url",
+                "host",
+                "port",
+                "error",
+                "message",
+            ],
+        ),
+    }
+    if output.is_empty() {
+        None
+    } else {
+        Some(redact_log_value(&Value::Object(output)))
+    }
+}
+
+fn copy_log_fields(object: &Map<String, Value>, output: &mut Map<String, Value>, keys: &[&str]) {
+    for key in keys {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        output.insert((*key).to_owned(), compact_log_field_value(key, value));
+    }
+}
+
+fn compact_log_field_value(key: &str, value: &Value) -> Value {
+    match key {
+        "summary" => compact_log_value(value, MAX_LOG_SUMMARY_CHARS),
+        "upstream_error" => compact_upstream_error(value),
+        _ => compact_log_value(value, MAX_LOG_STRING_CHARS),
+    }
+}
+
+fn compact_upstream_error(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return compact_log_value(value, MAX_LOG_SUMMARY_CHARS);
+    };
+    let mut output = Map::new();
+    copy_log_fields(
+        object,
+        &mut output,
+        &["status", "code", "type", "error", "message"],
+    );
+    if output.is_empty() {
+        compact_log_value(value, MAX_LOG_SUMMARY_CHARS)
+    } else {
+        Value::Object(output)
+    }
+}
+
+fn compact_log_value(value: &Value, max_string_chars: usize) -> Value {
+    match value {
+        Value::String(value) => Value::String(truncate_chars_with_hash(value, max_string_chars)),
+        Value::Array(values) => {
+            let mut output = values
+                .iter()
+                .take(MAX_LOG_ARRAY_ITEMS)
+                .map(|value| compact_log_value(value, max_string_chars))
+                .collect::<Vec<_>>();
+            if values.len() > MAX_LOG_ARRAY_ITEMS {
+                output.push(json!({
+                    "_codeseex_log_notice": "array tail omitted from user log detail",
+                    "omitted_items": values.len().saturating_sub(MAX_LOG_ARRAY_ITEMS)
+                }));
+            }
+            Value::Array(output)
+        }
+        Value::Object(object) => Value::String(truncate_chars_with_hash(
+            &serde_json::to_string(object).unwrap_or_default(),
+            max_string_chars,
+        )),
+        _ => value.clone(),
+    }
 }
 
 fn push_request_order(order: &mut VecDeque<String>, id: &str) {
@@ -1009,7 +1234,7 @@ fn redact_secret_text(value: &str) -> String {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
         [
-            r#"(?i)(authorization\s*[:=]\s*)(bearer\s+)?[A-Za-z0-9._~+/=-]{8,}"#,
+            r#"(?i)(authorization\s*[:=]\s*)(bearer\s+)?[A-Za-z0-9._~+/=-]{4,}"#,
             r#"(?i)((api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|secret|password|cookie)\s*["']?\s*[:=]\s*["']?)[^"',\s}]{4,}"#,
         ]
         .iter()
@@ -1163,12 +1388,13 @@ mod tests {
         let store = Store::open(&dir).await.expect("open store");
         store
             .record_event(
-                "info",
-                "request_started",
-                "Request started.",
+                "error",
+                "request_failed",
+                "Request failed.",
                 Some(&json!({
-                    "Authorization": "Bearer secret",
-                    "payload": "data:image/png;base64,abcdef"
+                    "status": 400,
+                    "error": "Authorization: Bearer secret",
+                    "message": "data:image/png;base64,abcdef"
                 })),
             )
             .await
@@ -1177,6 +1403,7 @@ mod tests {
         let (events, has_more) = store.recent_visible_events(10, None).await.expect("events");
         assert!(!has_more);
         assert_eq!(events.len(), 1);
+        assert_eq!(events[0].audience.as_deref(), Some("user"));
         let detail = serde_json::to_string(&events[0].detail).expect("detail json");
         assert!(!detail.contains("Bearer secret"));
         assert!(!detail.contains("abcdef"));
@@ -1187,6 +1414,86 @@ mod tests {
             .expect("read logs")
             .next()
             .is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_events_are_not_persisted_by_default() {
+        let dir = temp_dir("visible-events");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .record_event(
+                "info",
+                "mixed_tool_turn_split",
+                "Internal tool routing detail.",
+                Some(&json!({ "id": "resp_1", "native_tools": ["apply_patch"] })),
+            )
+            .await
+            .expect("record diagnostic event");
+        store
+            .record_event(
+                "info",
+                "request_started",
+                "Responses request started.",
+                Some(&json!({ "id": "resp_1", "model": "deepseek-v4-pro" })),
+            )
+            .await
+            .expect("record user event");
+
+        let (visible, _) = store
+            .recent_visible_events(10, None)
+            .await
+            .expect("visible events");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].event_type, "request_started");
+        assert_eq!(visible[0].audience.as_deref(), Some("user"));
+
+        let (all, _) = store.recent_events(10, None).await.expect("all events");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].audience.as_deref(), Some("user"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn tool_result_log_detail_is_compact() {
+        let dir = temp_dir("compact-tool-result-log");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .record_event(
+                "info",
+                "tool_result",
+                "Tool result returned.",
+                Some(&json!({
+                    "id": "resp_1",
+                    "call_id": "call_should_not_be_written",
+                    "name": "workspace_search",
+                    "iteration": 2,
+                    "ok": true,
+                    "summary": "x".repeat(5_000)
+                })),
+            )
+            .await
+            .expect("record event");
+
+        let (events, _) = store.recent_events(10, None).await.expect("events");
+        assert_eq!(events.len(), 1);
+        let detail = events[0].detail.as_ref().expect("detail");
+        assert!(detail.get("call_id").is_none());
+        let summary = detail
+            .get("summary")
+            .and_then(Value::as_str)
+            .expect("summary");
+        assert!(summary.chars().count() < 520);
+        let log_file = dir
+            .join("logs")
+            .read_dir()
+            .expect("read logs")
+            .next()
+            .expect("log file")
+            .expect("log entry")
+            .path();
+        let bytes = std::fs::metadata(log_file).expect("log metadata").len();
+        assert!(bytes < 1_000);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1279,6 +1586,51 @@ mod tests {
             chain[0].input["_codeseex_runtime"]["mode"],
             "codex_full_context_not_stored"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn input_image_data_urls_are_redacted_in_runtime_context() {
+        let dir = temp_dir("input-image-redaction");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .checkpoint_request(
+                "resp_image",
+                None,
+                Some("deepseek-v4-pro"),
+                &json!({
+                    "model": "deepseek-v4-pro",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            { "type": "input_text", "text": "Describe this image." },
+                            { "type": "input_image", "image_url": "data:image/png;base64,AAAASECRETBBBB" }
+                        ]
+                    }]
+                }),
+            )
+            .await
+            .expect("checkpoint");
+        store
+            .finish_request(
+                "resp_image",
+                RequestStatus::Completed,
+                Some(&json!({ "model": "deepseek-v4-pro" })),
+                None,
+            )
+            .await
+            .expect("finish");
+
+        let chain = store
+            .response_context_chain("resp_image", 1)
+            .await
+            .expect("chain");
+        let serialized = serde_json::to_string(&chain[0].input).expect("runtime input json");
+        assert!(!serialized.contains("AAAASECRETBBBB"));
+        assert!(!serialized.contains("data:image/png;base64"));
+        assert!(serialized.contains("redacted inline data url"));
+        assert!(serialized.contains("Describe this image."));
         let _ = std::fs::remove_dir_all(dir);
     }
 
