@@ -163,11 +163,11 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          awk -v version="$VERSION" '
-            $0 ~ "^## " version "([[:space:]]|$)" { in_section = 1; print; next }
-            in_section && /^## / { exit }
-            in_section { print }
-          ' CHANGELOG.md > release-notes.md
+          git fetch --force --tags
+          TAG_TYPE="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(objecttype)')"
+          if [ "$TAG_TYPE" = "tag" ]; then
+            git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)' > release-notes.md
+          fi
           if [ ! -s release-notes.md ]; then
             printf 'CodeSeeX %s\n' "$VERSION" > release-notes.md
           fi

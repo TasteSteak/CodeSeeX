@@ -60,7 +60,7 @@ model_provider = "custom"
 model = "deepseek-v4-pro"
 disable_response_storage = true
 model_reasoning_effort = "xhigh"
-model_catalog_json = "C:\\Users\\you\\.codeseex\\model-catalog.json"
+# CodeSeeX adds a machine-specific model_catalog_json path in the generated TOML.
 
 [model_providers.custom]
 name = "DeepSeek"
@@ -165,8 +165,7 @@ The desktop UI is served from `apps/ui/public` through Tauri's custom protocol; 
 
 ## Documentation
 
-- [CHANGELOG.md](CHANGELOG.md) for release notes.
-- [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md) for Chinese release notes.
+- Release notes are published on the [GitHub Releases](https://github.com/TasteSteak/CodeSeeX/releases) page.
 - [docs/installer-migration.md](docs/installer-migration.md) for installer and legacy migration behavior.
 - [docs/state-contract.md](docs/state-contract.md) for runtime/log state boundaries.
 - [docs/community-tools.md](docs/community-tools.md) for community tool manifests and execution rules.
