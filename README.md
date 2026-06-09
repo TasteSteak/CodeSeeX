@@ -166,6 +166,7 @@ The desktop UI is served from `apps/ui/public` through Tauri's custom protocol; 
 ## Documentation
 
 - Release notes are published on the [GitHub Releases](https://github.com/TasteSteak/CodeSeeX/releases) page.
+- [docs/screenshots.md](docs/screenshots.md) for additional product screenshots.
 - [docs/installer-migration.md](docs/installer-migration.md) for installer and legacy migration behavior.
 - [docs/state-contract.md](docs/state-contract.md) for runtime/log state boundaries.
 - [docs/community-tools.md](docs/community-tools.md) for community tool manifests and execution rules.
