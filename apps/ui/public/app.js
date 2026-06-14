@@ -6,6 +6,9 @@ const CONFIG_AUTOSAVE_DELAY_MS = 450;
 const CONFIG_TEXT_AUTOSAVE_DELAY_MS = 2500;
 const CONFIG_AUTOSAVE_RETRY_MS = 700;
 const DEBUG_MANAGER_BASE_URL = "http://127.0.0.1:8787";
+const DEEPSEEK_RECHARGE_URL = "https://platform.deepseek.com/top_up";
+const CODEX_CONFIG_PATH_UNIX = "~/.codex/config.toml";
+const CODEX_CONFIG_PATH_WINDOWS = "%USERPROFILE%\\.codex\\config.toml";
 const REFRESH_RUNNING_MS = 2000;
 const REFRESH_IDLE_MS = 5000;
 const REFRESH_HIDDEN_MS = 10000;
@@ -39,7 +42,6 @@ const els = {
   appProductName: byId("appProductName"),
   appVersion: byId("appVersion"),
   aboutVersion: byId("aboutVersion"),
-  balanceAvailability: byId("balanceAvailability"),
   balanceGranted: byId("balanceGranted"),
   balanceStatus: byId("balanceStatus"),
   balanceToppedUp: byId("balanceToppedUp"),
@@ -57,8 +59,6 @@ const els = {
   configTomlStatus: byId("configTomlStatus"),
   copyTomlButton: byId("copyTomlButton"),
   failedTurns: byId("failedTurns"),
-  lastCompletedAt: byId("lastCompletedAt"),
-  lastTurnCard: byId("lastTurnCard"),
   loadingDetail: byId("loadingDetail"),
   loadingOverlay: byId("loadingOverlay"),
   loadingTitle: byId("loadingTitle"),
@@ -71,6 +71,7 @@ const els = {
   deepseekOfficialV1Compat: byId("DEEPSEEK_OFFICIAL_V1_COMPAT"),
   deepseekBaseUrl: byId("DEEPSEEK_BASE_URL"),
   proxyPort: byId("PROXY_PORT"),
+  rechargeBalanceButton: byId("rechargeBalanceButton"),
   refreshBalanceButton: byId("refreshBalanceButton"),
   restartButton: byId("restartButton"),
   restartRequiredBadge: byId("restartRequiredBadge"),
@@ -79,6 +80,11 @@ const els = {
   startButton: byId("startButton"),
   statusPill: byId("statusPill"),
   stopButton: byId("stopButton"),
+  stagePortCheck: byId("stagePortCheck"),
+  stagePortState: byId("stagePortState"),
+  stageBalanceCheck: byId("stageBalanceCheck"),
+  stageProxyHealth: byId("stageProxyHealth"),
+  stageProxyState: byId("stageProxyState"),
   toolConfigList: byId("toolConfigList"),
   uiLanguage: byId("UI_LANGUAGE"),
   usageAverageMs: byId("usageAverageMs"),
@@ -130,7 +136,6 @@ let usageRefreshInFlight = false;
 let usageRefreshQueued = false;
 let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
-let lastTurnSignature = "";
 let latestAdapter = null;
 let latestUpdateCheck = null;
 let latestConfigVersion = "";
@@ -153,6 +158,7 @@ async function init() {
   bind();
   runSoon(bindDesktopConfigEvents);
   applyLanguage(configuredLanguage);
+  if (els.configTomlStatus) els.configTomlStatus.textContent = codexConfigPathHint();
   renderConfig(config || {});
   setView("console");
   await Promise.allSettled([loadAppInfo(), refresh()]);
@@ -205,6 +211,7 @@ function bind() {
   els.restartButton.addEventListener("click", () => actionPost("/api/restart", t("restartingTitle"), t("restartingDetail")));
   els.stopButton.addEventListener("click", () => actionPost("/api/stop", t("stoppingTitle"), t("stoppingDetail")));
   if (els.refreshBalanceButton) els.refreshBalanceButton.addEventListener("click", refreshBalance);
+  if (els.rechargeBalanceButton) els.rechargeBalanceButton.addEventListener("click", openRechargePage);
   if (els.copyTomlButton) els.copyTomlButton.addEventListener("click", copyConfigToml);
   if (els.logStream) els.logStream.addEventListener("scroll", handleLogScroll);
   document.addEventListener("contextmenu", handleContextMenu);
@@ -850,7 +857,7 @@ async function loadAppInfo() {
 
 async function refreshBalance() {
   if (els.refreshBalanceButton) els.refreshBalanceButton.disabled = true;
-  if (els.balanceStatus) els.balanceStatus.textContent = t("balanceLoading");
+  setBalanceStage(t("balanceLoading"), "active");
   try {
     const response = await apiFetch("/api/deepseek/balance", { cache: "no-store" });
     renderBalance(await response.json());
@@ -917,9 +924,39 @@ function renderStatus(data) {
   els.activeRequests.textContent = formatNumber(runtime.active_requests || 0);
   els.completedTurns.textContent = formatNumber(runtime.request_count || 0);
   els.failedTurns.textContent = formatNumber(runtime.failed_request_count || 0);
-  els.lastCompletedAt.textContent = formatDateTime(runtime.last_request_at);
-  renderLastTurn(runtime.last_turn || null);
+  renderDashboardReadiness(data, runtime, { isStarting, isStopping });
   renderButtons();
+}
+
+function renderDashboardReadiness(data, runtime, state) {
+  const isRunning = Boolean(data.running);
+  const isStarting = Boolean(state && state.isStarting);
+  const isStopping = Boolean(state && state.isStopping);
+  const port = runtime.port || latestRuntimePort || (lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787";
+  setStageState(els.stagePortCheck, els.stagePortState, {
+    done: isRunning,
+    active: isStarting,
+    error: !isRunning && !isStarting && !isStopping,
+    text: isRunning
+      ? t("dashboardStatusReady")
+      : (isStarting ? t("dashboardStatusChecking") : t("dashboardPortPending").replace("{port}", port)),
+  });
+  setStageState(els.stageProxyHealth, els.stageProxyState, {
+    done: isRunning,
+    active: isStarting || isStopping,
+    error: !isRunning && !isStarting && !isStopping,
+    text: isRunning
+      ? t("dashboardStatusRunning")
+      : (isStopping ? t("stopping") : (isStarting ? t("starting") : t("dashboardStatusStopped"))),
+  });
+}
+
+function setStageState(row, label, options) {
+  if (!row || !label) return;
+  row.classList.toggle("is-done", Boolean(options.done));
+  row.classList.toggle("is-active", Boolean(options.active));
+  row.classList.toggle("is-error", Boolean(options.error));
+  label.textContent = options.text || "-";
 }
 
 function renderButtons() {
@@ -961,7 +998,6 @@ function renderConfig(config) {
   if (resolveLanguageId(nextLanguage) !== uiLanguage || nextLanguage !== configuredLanguage) applyLanguage(nextLanguage);
   lastSavedConfig = normalizeConfigPayload(config);
   lastUsageSignature = "";
-  lastTurnSignature = "";
   if (!restartRequired) renderConfigSaveState("clean");
   renderCodexAdapter(latestAdapter || {});
 }
@@ -976,17 +1012,7 @@ function renderCodexAdapter(adapter) {
   currentAdapterSignature = signature;
   const toml = String(latestAdapter.toml_snippet || "");
   if (els.configTomlCode) els.configTomlCode.textContent = toml || "-";
-  if (els.configTomlStatus) {
-    if (latestAdapter.ready) {
-      els.configTomlStatus.textContent = [
-        t("codexAdapterReady"),
-        latestAdapter.catalog_mode ? t("catalogMode") + ": " + t("catalogModeBuiltin") : "",
-        latestAdapter.catalog_path ? latestAdapter.catalog_path : "",
-      ].filter(Boolean).join(" · ");
-    } else {
-      els.configTomlStatus.textContent = latestAdapter.error || t("codexAdapterMissing");
-    }
-  }
+  if (els.configTomlStatus) els.configTomlStatus.textContent = codexConfigPathHint();
 }
 
 async function copyConfigToml() {
@@ -1480,50 +1506,86 @@ function renderUsage(runtime) {
   noteSlow("renderUsage", performance.now() - started);
 }
 
-function renderLastTurn(turn) {
-  const signature = stableStringify({ locale: uiLanguage, turn: turn || null });
-  if (signature === lastTurnSignature) return;
-  lastTurnSignature = signature;
-  els.lastTurnCard.replaceChildren();
-  if (!turn) {
-    els.lastTurnCard.appendChild(infoRow(t("noTurn"), "-"));
-    return;
-  }
-  els.lastTurnCard.appendChild(infoRow(t("completedAt"), formatDateTime(turn.completed_at)));
-  els.lastTurnCard.appendChild(infoRow(t("cacheHit"), formatNumber(turn.cached_input_tokens)));
-  els.lastTurnCard.appendChild(infoRow(t("cacheMiss"), formatNumber(turn.cache_miss_input_tokens)));
-  els.lastTurnCard.appendChild(infoRow(t("output"), formatNumber(turn.output_tokens)));
-  els.lastTurnCard.appendChild(infoRow(t("total"), formatNumber(turn.total_tokens)));
-  els.lastTurnCard.appendChild(infoRow(t("elapsed"), formatDuration(turn.request_ms)));
-  els.lastTurnCard.appendChild(infoRow(t("cost"), formatCost(costForTokens(turn))));
-}
-
 function renderUsageRows(turns) {
   els.usageRows.replaceChildren();
-  for (const turn of turns.slice().reverse()) {
-    const row = document.createElement("tr");
-    [
-      formatDateTime(turn.completed_at),
-      usageModelLabel(turn),
-      formatNumber(turn.cached_input_tokens),
-      formatNumber(turn.cache_miss_input_tokens),
-      formatNumber(turn.output_tokens),
-      formatNumber(turn.total_tokens),
-      formatDuration(turn.request_ms),
-      formatCost(costForTokens(turn)),
-    ].forEach((value, index) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      if (index === 1) cell.title = value;
-      row.appendChild(cell);
-    });
-    els.usageRows.appendChild(row);
-  }
   if (turns.length === 0) {
-    const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="8" style="text-align: center; color: var(--text-muted)">${escapeHtml(t("noRows"))}</td>`;
-    els.usageRows.appendChild(row);
+    const empty = document.createElement("div");
+    empty.className = "usage-empty";
+    empty.textContent = t("noRows");
+    els.usageRows.appendChild(empty);
+    return;
   }
+  for (const turn of turns.slice().reverse()) {
+    els.usageRows.appendChild(usageRecord(turn));
+  }
+}
+
+function usageRecord(turn) {
+  const details = document.createElement("details");
+  details.className = "usage-record";
+  const summary = document.createElement("summary");
+  const modelLabel = usageModelLabel(turn);
+  const totalCost = formatCost(costForTokens(turn));
+  summary.appendChild(usageTitle(t("usageConversationRecord"), [
+    formatDateTime(turn.completed_at),
+    modelLabel,
+    turn.requested_model && turn.requested_model !== turn.model ? t("usageRequestedModel").replace("{model}", turn.requested_model) : "",
+  ].filter(Boolean).join(" · ")));
+  [
+    [t("cacheHit"), formatNumber(turn.cached_input_tokens)],
+    [t("cacheMiss"), formatNumber(turn.cache_miss_input_tokens)],
+    [t("output"), formatNumber(turn.output_tokens)],
+    [t("elapsed"), formatDuration(turn.request_ms)],
+    [t("cost"), totalCost],
+  ].forEach(([label, value]) => summary.appendChild(usageMetric(label, value)));
+  details.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "usage-record-body";
+  const stages = document.createElement("div");
+  stages.className = "usage-stage-grid";
+  stages.appendChild(usageStage(t("usageStageRequest"), modelLabel, t("usageStageRequestHint")));
+  stages.appendChild(usageStage(t("usageStageInput"), formatNumber((turn.cached_input_tokens || 0) + (turn.cache_miss_input_tokens || 0)), t("usageStageInputHint")));
+  stages.appendChild(usageStage(t("usageStageOutput"), formatNumber(turn.output_tokens), t("usageStageOutputHint")));
+  stages.appendChild(usageStage(t("usageStageTotal"), formatNumber(turn.total_tokens), t("usageStageTotalHint").replace("{cost}", totalCost)));
+  body.appendChild(stages);
+  details.appendChild(body);
+  return details;
+}
+
+function usageTitle(title, subtitle) {
+  const wrap = document.createElement("div");
+  wrap.className = "usage-record-title";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const span = document.createElement("span");
+  span.textContent = subtitle || "-";
+  wrap.append(strong, span);
+  return wrap;
+}
+
+function usageMetric(label, value) {
+  const wrap = document.createElement("div");
+  wrap.className = "usage-metric";
+  const span = document.createElement("span");
+  span.textContent = label;
+  const strong = document.createElement("strong");
+  strong.textContent = value || "-";
+  wrap.append(span, strong);
+  return wrap;
+}
+
+function usageStage(label, value, hint) {
+  const wrap = document.createElement("div");
+  wrap.className = "usage-stage";
+  const span = document.createElement("span");
+  span.textContent = label;
+  const strong = document.createElement("strong");
+  strong.textContent = value || "-";
+  const p = document.createElement("p");
+  p.textContent = hint || "";
+  wrap.append(span, strong, p);
+  return wrap;
 }
 
 function usageModelLabel(turn) {
@@ -1715,21 +1777,28 @@ function renderBalance(data) {
   if (!data || !data.ok) {
     const code = data && data.code;
     const message = code === "missing_api_key" ? t("balanceNoApiKey") : t("balanceFailed");
-    els.balanceAvailability.textContent = code === "missing_api_key" ? t("balanceNoApiKey") : t("balanceUnavailable");
     els.balanceTotal.textContent = "-";
     els.balanceGranted.textContent = "-";
     els.balanceToppedUp.textContent = "-";
-    els.balanceStatus.textContent = message;
+    setBalanceStage(message, "error");
     return;
   }
 
   const totals = sumBalances(data.balance_infos || []);
   const totalStr = formatCurrencyMap(totals.total);
-  els.balanceAvailability.textContent = data.is_available ? t("balanceAvailable") : t("balanceUnavailable");
   els.balanceTotal.textContent = totalStr;
   els.balanceGranted.textContent = formatCurrencyMap(totals.granted);
   els.balanceToppedUp.textContent = formatCurrencyMap(totals.toppedUp);
-  els.balanceStatus.textContent = t("balanceUpdated");
+  setBalanceStage(data.is_available ? t("balanceAvailable") : t("balanceUnavailable"), data.is_available ? "done" : "active");
+}
+
+function setBalanceStage(text, state) {
+  setStageState(els.stageBalanceCheck, els.balanceStatus, {
+    done: state === "done",
+    active: state === "active",
+    error: state === "error",
+    text,
+  });
 }
 
 function setView(viewName) {
@@ -1771,11 +1840,7 @@ async function handleWindowAction(action) {
 async function openOrExplain(url, fallback) {
   if (!url) return setAboutStatus(fallback, true);
   try {
-    if (isTauriRuntime()) {
-      await desktopInvoke("desktop_open_external", { url });
-    } else {
-      window.open(url, "_blank", "noopener");
-    }
+    await openExternalUrl(url);
     setAboutStatus(t("openExternal"), false);
   } catch (error) {
     window.open(url, "_blank", "noopener");
@@ -1783,10 +1848,36 @@ async function openOrExplain(url, fallback) {
   }
 }
 
+async function openRechargePage() {
+  try {
+    await openExternalUrl(DEEPSEEK_RECHARGE_URL);
+  } catch (error) {
+    window.open(DEEPSEEK_RECHARGE_URL, "_blank", "noopener");
+    setBalanceStage(error && error.message ? error.message : String(error), "error");
+  }
+}
+
+async function openExternalUrl(url) {
+  if (isTauriRuntime()) {
+    await desktopInvoke("desktop_open_external", { url });
+  } else {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
 function setAboutStatus(message, warning, options = {}) {
   if (options.html) els.aboutStatus.innerHTML = message;
   else els.aboutStatus.textContent = message;
   els.aboutStatus.classList.toggle("warning", Boolean(warning));
+}
+
+function codexConfigPathHint() {
+  const platform = [
+    navigator.userAgentData && navigator.userAgentData.platform,
+    navigator.platform,
+    navigator.userAgent,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return platform.includes("win") ? CODEX_CONFIG_PATH_WINDOWS : CODEX_CONFIG_PATH_UNIX;
 }
 
 function handleConfigInput(event) {
@@ -1951,7 +2042,6 @@ function applyLanguage(value) {
   lastStatusSignature = "";
   lastUsageSignature = "";
   lastLogRenderSignature = "";
-  lastTurnSignature = "";
   currentAdapterSignature = "";
   if (latestUsageRuntime) renderUsage(latestUsageRuntime);
   renderCodexAdapter(latestAdapter || {});
@@ -2063,18 +2153,6 @@ function systemLanguageLabel() {
 
 function t(key) {
   return (i18n[uiLanguage] && i18n[uiLanguage][key]) || key;
-}
-
-function infoRow(label, value) {
-  const row = document.createElement("div");
-  row.className = "info-row";
-  const left = document.createElement("span");
-  const right = document.createElement("strong");
-  left.textContent = label;
-  right.textContent = value;
-  row.appendChild(left);
-  row.appendChild(right);
-  return row;
 }
 
 function billingInputs() {

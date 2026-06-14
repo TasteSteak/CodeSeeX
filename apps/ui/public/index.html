@@ -27,11 +27,11 @@
       </div>
 
       <nav class="nav-menu">
-        <a href="#" class="nav-item active" data-view="console" data-i18n="navConsole">Dashboard</a>
-        <a href="#" class="nav-item" data-view="usage" data-i18n="navUsage">Usage</a>
-        <a href="#" class="nav-item" data-view="logs" data-i18n="navLogs">Logs</a>
-        <a href="#" class="nav-item" data-view="config" data-i18n="navConfig">Settings</a>
-        <a href="#" class="nav-item" data-view="about"><span data-i18n="navAbout">About</span><span class="update-dot" id="aboutUpdateDot" hidden></span></a>
+        <a href="#" class="nav-item active" data-view="console"><span class="nav-icon nav-icon-console" aria-hidden="true"></span><span class="nav-label" data-i18n="navConsole">Dashboard</span></a>
+        <a href="#" class="nav-item" data-view="usage"><span class="nav-icon nav-icon-usage" aria-hidden="true"></span><span class="nav-label" data-i18n="navUsage">Usage</span></a>
+        <a href="#" class="nav-item" data-view="logs"><span class="nav-icon nav-icon-logs" aria-hidden="true"></span><span class="nav-label" data-i18n="navLogs">Logs</span></a>
+        <a href="#" class="nav-item" data-view="config"><span class="nav-icon nav-icon-config" aria-hidden="true"></span><span class="nav-label" data-i18n="navConfig">Settings</span></a>
+        <a href="#" class="nav-item" data-view="about"><span class="nav-icon nav-icon-about" aria-hidden="true"></span><span class="nav-label" data-i18n="navAbout">About</span><span class="update-dot" id="aboutUpdateDot" hidden></span></a>
       </nav>
 
       <div class="sidebar-footer" data-i18n="sidebarFooter">
@@ -44,7 +44,7 @@
       <header class="page-header">
         <div class="header-titles">
           <h1 id="pageTitle">Dashboard</h1>
-          <p id="pageSubtitle">Monitor proxy status, latest completed turn, and core runtime metrics.</p>
+          <p id="pageSubtitle">Monitor proxy status, core gateway routing, and performance metrics.</p>
         </div>
         <div class="header-actions">
           <button class="btn btn-primary" id="startButton" type="button" data-i18n="start">Start</button>
@@ -53,54 +53,100 @@
         </div>
       </header>
 
-      <section class="metrics-grid dashboard-metrics">
-        <div class="metric-card">
-          <span class="metric-label" id="pidLabel" data-i18n="proxyPid">Proxy process PID</span>
-          <span class="metric-value" id="pid">-</span>
-        </div>
-        <div class="metric-card">
-          <span class="metric-label" data-i18n="activeRequests">Active requests</span>
-          <span class="metric-value" id="activeRequests">0</span>
-        </div>
-      </section>
-
       <section class="panels-grid">
-        <div class="dashboard-panel dashboard-layout">
-          <div class="dashboard-left">
-            <div class="panel">
-              <div class="panel-header">
-                <h2 data-i18n="recentTurn">Latest completed turn</h2>
-              </div>
-              <div class="panel-body info-list selectable" id="lastTurnCard">
-                <div class="info-row"><span data-i18n="noTurn">No completed turn</span><strong>-</strong></div>
+        <div class="dashboard-panel">
+          <div class="dashboard-metrics-row">
+            <div class="metric-card">
+              <span class="metric-label" id="pidLabel" data-i18n="proxyPid">Proxy PID</span>
+              <strong class="metric-value tabular-nums" id="pid">-</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label" data-i18n="activeRequests">Active Requests</span>
+              <strong class="metric-value tabular-nums" id="activeRequests">0</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label" data-i18n="completedTurns">Completed Turns</span>
+              <strong class="metric-value tabular-nums" id="completedTurns">0</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label" data-i18n="failedTurns">Failed Requests</span>
+              <strong class="metric-value tabular-nums" id="failedTurns">0</strong>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header dashboard-card-header">
+              <div>
+                <h2 class="icon-heading"><span class="heading-icon heading-icon-coin" aria-hidden="true"></span><span data-i18n="balanceTitle">Proxy Console</span></h2>
+                <p data-i18n="dashboardBalanceSubtitle">Balance, local proxy state, and Codex connection config.</p>
               </div>
             </div>
 
-            <div class="panel">
-              <div class="panel-header">
-                <h2 data-i18n="runtimeStats">Runtime stats</h2>
-              </div>
-              <div class="panel-body info-list selectable">
-                <div class="info-row"><span data-i18n="completedTurns">Completed turns</span><strong id="completedTurns">0</strong></div>
-                <div class="info-row"><span data-i18n="failedTurns">Failed requests</span><strong id="failedTurns">0</strong></div>
-                <div class="info-row"><span data-i18n="lastCompletedAt">Last completed at</span><strong id="lastCompletedAt">-</strong></div>
+            <div class="panel-body">
+              <div class="unified-split">
+                <div class="left-wing">
+                  <div class="balance-total-block">
+                    <div class="balance-heading-row">
+                      <span class="metric-label" data-i18n="balanceTotal">Total balance</span>
+                    </div>
+                    <strong class="balance-total-value" id="balanceTotal">-</strong>
+                  </div>
+                  <div class="info-row compact-row"><span data-i18n="balanceGranted">Granted balance</span><strong id="balanceGranted">-</strong></div>
+                  <div class="info-row"><span data-i18n="balanceToppedUp">Topped-up balance</span><strong id="balanceToppedUp">-</strong></div>
+                  <div class="form-actions balance-actions">
+                    <button class="btn btn-secondary" type="button" id="rechargeBalanceButton" data-i18n="balanceRecharge">Recharge</button>
+                    <button class="btn btn-primary" type="button" id="refreshBalanceButton" data-i18n="balanceRefresh">Refresh balance</button>
+                  </div>
+                </div>
+
+                <div class="right-wing">
+                  <div class="readiness-block">
+                    <span class="metric-label section-kicker" data-i18n="dashboardReadinessTitle">Proxy state</span>
+                    <div class="readiness-chain">
+                      <div class="compact-stage" id="stagePortCheck">
+                        <div class="compact-stage-info">
+                          <span class="stage-dot"></span>
+                          <span class="stage-name" data-i18n="dashboardPortCheck">Port</span>
+                        </div>
+                        <strong id="stagePortState" class="stage-state">-</strong>
+                      </div>
+                      <div class="compact-stage" id="stageProxyHealth">
+                        <div class="compact-stage-info">
+                          <span class="stage-dot"></span>
+                          <span class="stage-name" data-i18n="dashboardProxyHealth">Service</span>
+                        </div>
+                        <strong id="stageProxyState" class="stage-state">-</strong>
+                      </div>
+                      <div class="compact-stage" id="stageBalanceCheck">
+                        <div class="compact-stage-info">
+                          <span class="stage-dot"></span>
+                          <span class="stage-name" data-i18n="balanceAvailability">Balance</span>
+                        </div>
+                        <strong id="balanceStatus" class="stage-state" data-i18n="balanceUnchecked">Not checked</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+
               </div>
             </div>
           </div>
 
-          <div class="panel balance-panel dashboard-balance-panel">
-            <div class="panel-header"><h2 class="icon-heading" id="balanceTitle"><span class="heading-icon heading-icon-coin" aria-hidden="true"></span><span data-i18n="balanceTitle">Balance</span></h2></div>
-            <div class="panel-body info-list selectable">
-              <div class="info-row"><span id="balanceAvailabilityLabel" data-i18n="balanceAvailability">Availability</span><strong id="balanceAvailability">-</strong></div>
-              <div class="info-row"><span id="balanceTotalLabel" data-i18n="balanceTotal">Total balance</span><strong id="balanceTotal">-</strong></div>
-              <div class="info-row"><span id="balanceGrantedLabel" data-i18n="balanceGranted">Granted balance</span><strong id="balanceGranted">-</strong></div>
-              <div class="info-row"><span id="balanceToppedUpLabel" data-i18n="balanceToppedUp">Topped-up balance</span><strong id="balanceToppedUp">-</strong></div>
-              <div class="form-actions">
-                <button class="btn btn-secondary" type="button" id="refreshBalanceButton" data-i18n="balanceRefresh">Refresh balance</button>
-                <span class="muted" id="balanceStatus" data-i18n="balanceUnchecked">Not checked</span>
+          <section class="config-toml-card dashboard-toml-card">
+            <div class="config-toml-header">
+              <div class="config-toml-title">
+                <h3 data-i18n="configTomlTitle">config.toml configuration</h3>
+                <p id="configTomlStatus">~/.codex/config.toml</p>
               </div>
+              <span class="copy-status" id="configTomlCopyStatus" aria-live="polite"></span>
+              <button class="btn btn-secondary icon-only-btn" type="button" id="copyTomlButton" title="Copy">
+                <span aria-hidden="true"></span>
+              </button>
             </div>
-          </div>
+            <pre class="toml-snippet config-toml-code selectable" id="configTomlCode">-</pre>
+          </section>
+
         </div>
 
         <div class="usage-page page-stack">
@@ -113,24 +159,13 @@
 
           <section class="panel usage-detail-panel">
             <div class="panel-header">
-              <h2 data-i18n="detailRows">Conversation details</h2>
+              <div>
+                <h2 data-i18n="usageConversationRecords">Conversation records</h2>
+                <p data-i18n="usageFoldedHint">Current data is shown as folded records; backend conversation grouping can refine this later.</p>
+              </div>
             </div>
-            <div class="panel-body usage-table-wrap">
-              <table class="usage-table selectable">
-                <thead>
-                  <tr>
-                    <th data-i18n="time">Time</th>
-                    <th data-i18n="model">Model</th>
-                    <th data-i18n="cacheHit">Cache hit</th>
-                    <th data-i18n="cacheMiss">Cache miss</th>
-                    <th data-i18n="output">Output</th>
-                    <th data-i18n="total">Total</th>
-                    <th data-i18n="elapsed">Latency</th>
-                    <th data-i18n="cost">Cost</th>
-                  </tr>
-                </thead>
-                <tbody id="usageRows"></tbody>
-              </table>
+            <div class="panel-body usage-record-wrap">
+              <div class="usage-record-list selectable" id="usageRows"></div>
             </div>
           </section>
         </div>
@@ -138,7 +173,10 @@
         <div class="log-page page-stack">
           <section class="panel log-panel">
             <div class="panel-header">
-              <h2 data-i18n="eventTrace">Event trace</h2>
+              <div>
+                <h2 data-i18n="eventTrace">Event trace</h2>
+                <p data-i18n="logCleanHint">Only key user-level runtime events are expanded here; usage detail belongs in Usage.</p>
+              </div>
             </div>
             <div class="panel-body">
               <div class="log-list selectable" id="logStream"></div>
@@ -374,18 +412,6 @@
                 </div>
                 <div class="setting-divider"></div>
 
-                <h3 class="config-section-title" data-i18n="codexAdapter">Codex adapter</h3>
-                <section class="config-toml-card">
-                  <div class="config-toml-header">
-                    <h3 data-i18n="configTomlTitle">config.toml configuration</h3>
-                    <span class="copy-status" id="configTomlCopyStatus" aria-live="polite"></span>
-                    <button class="btn btn-secondary icon-only-btn" type="button" id="copyTomlButton" title="Copy">
-                      <span aria-hidden="true"></span>
-                    </button>
-                  </div>
-                  <pre class="toml-snippet config-toml-code selectable" id="configTomlCode">-</pre>
-                  <p class="muted" id="configTomlStatus" data-i18n="codexAdapterMissing">Codex adapter catalog is not ready.</p>
-                </section>
               </div>
 
               <div class="config-tab-panel" data-config-panel="tools">
