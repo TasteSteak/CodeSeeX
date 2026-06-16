@@ -66,12 +66,31 @@ where
         .or(configured_auth)
 }
 
-fn payload_looks_like_codex_app_request(payload: &Value) -> bool {
-    payload.get("client_metadata").is_some()
-        || payload.get("prompt_cache_key").is_some()
-        || payload
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexRequestMarkers {
+    pub client_metadata: bool,
+    pub prompt_cache_key: bool,
+    pub metadata_installation_id: bool,
+}
+
+impl CodexRequestMarkers {
+    pub(crate) fn has_any(self) -> bool {
+        self.client_metadata || self.prompt_cache_key || self.metadata_installation_id
+    }
+}
+
+pub(crate) fn codex_request_markers(payload: &Value) -> CodexRequestMarkers {
+    CodexRequestMarkers {
+        client_metadata: payload.get("client_metadata").is_some(),
+        prompt_cache_key: payload.get("prompt_cache_key").is_some(),
+        metadata_installation_id: payload
             .pointer("/metadata/x-codex-installation-id")
-            .is_some()
+            .is_some(),
+    }
+}
+
+pub(crate) fn payload_looks_like_codex_app_request(payload: &Value) -> bool {
+    codex_request_markers(payload).has_any()
 }
 
 fn format_bearer_header(value: &str) -> Option<String> {
@@ -204,5 +223,21 @@ mod tests {
             .as_deref(),
             Some("Bearer inbound-key")
         );
+    }
+
+    #[test]
+    fn codex_request_markers_are_detected_from_native_fields() {
+        let markers = codex_request_markers(&serde_json::json!({
+            "client_metadata": {},
+            "prompt_cache_key": "thread-full-context",
+            "metadata": {
+                "x-codex-installation-id": "codex-install"
+            }
+        }));
+
+        assert!(markers.client_metadata);
+        assert!(markers.prompt_cache_key);
+        assert!(markers.metadata_installation_id);
+        assert!(markers.has_any());
     }
 }

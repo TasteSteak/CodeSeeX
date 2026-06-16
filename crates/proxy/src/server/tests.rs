@@ -827,6 +827,114 @@ fn apply_patch_surface_gets_synthetic_tool_search_bridge() {
 }
 
 #[test]
+fn codex_request_marker_gets_synthetic_tool_search_bridge() {
+    let mut context = ToolContext::from_request_tools(Some(&json!([{
+        "type": "function",
+        "function": {
+            "name": "plain_external_tool",
+            "description": "External client tool.",
+            "parameters": { "type": "object", "properties": {} }
+        }
+    }])));
+    let request = json!({
+        "client_metadata": {
+            "x-codex-installation-id": "codex-install"
+        },
+        "tools": []
+    });
+    let decision = codex_tool_search_bridge_decision(&request, false, &context);
+
+    assert!(decision.injected);
+    assert_eq!(decision.reason, "codex_request_marker");
+    context.ensure_codex_tool_search_bridge();
+
+    let names = context.upstream_names();
+    assert!(
+        names.iter().any(|name| name == "tool_search_tool"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn plain_external_client_tool_does_not_get_synthetic_tool_search_bridge() {
+    let context = ToolContext::from_request_tools(Some(&json!([{
+        "type": "function",
+        "function": {
+            "name": "plain_external_tool",
+            "description": "External client tool.",
+            "parameters": { "type": "object", "properties": {} }
+        }
+    }])));
+    let request = json!({ "tools": [] });
+    let decision = codex_tool_search_bridge_decision(&request, false, &context);
+
+    assert!(!decision.injected);
+    assert_eq!(decision.reason, "not_codex_request");
+    assert!(!context
+        .upstream_names()
+        .iter()
+        .any(|name| name == "tool_search_tool"));
+}
+
+#[test]
+fn synthetic_tool_search_bridge_diagnostic_records_decision() {
+    let mut context = ToolContext::from_request_tools(Some(&json!([{
+        "type": "function",
+        "function": {
+            "name": "plain_external_tool",
+            "description": "External client tool.",
+            "parameters": { "type": "object", "properties": {} }
+        }
+    }])));
+    let request = json!({ "prompt_cache_key": "thread-full-context" });
+    let decision = codex_tool_search_bridge_decision(&request, false, &context);
+    assert!(decision.injected);
+    context.ensure_codex_tool_search_bridge();
+
+    let upstream_tools = context.upstream_tools.clone();
+    let diagnostic = tool_exposure_diagnostic(
+        "resp_bridge_diagnostic",
+        &context,
+        &upstream_tools,
+        &decision,
+    );
+
+    assert_eq!(
+        diagnostic["tool_search_bridge"]["reason"],
+        "codex_request_marker"
+    );
+    assert_eq!(diagnostic["tool_search_bridge"]["injected"], true);
+    assert_eq!(
+        diagnostic["tool_search_bridge"]["has_tool_search_tool"],
+        true
+    );
+    assert_eq!(
+        diagnostic["codex_request_markers"]["prompt_cache_key"],
+        true
+    );
+}
+
+#[test]
+fn lightweight_auxiliary_suppresses_synthetic_tool_search_bridge() {
+    let context = ToolContext::from_request_tools(Some(&json!([{
+        "type": "function",
+        "function": {
+            "name": "shell_command",
+            "description": "Run a shell command.",
+            "parameters": { "type": "object", "properties": {} }
+        }
+    }])));
+    let request = json!({
+        "client_metadata": {},
+        "tools": []
+    });
+    let decision = codex_tool_search_bridge_decision(&request, true, &context);
+
+    assert!(!decision.injected);
+    assert_eq!(decision.reason, "suppressed_lightweight_auxiliary");
+}
+
+#[test]
 fn streaming_tool_loop_preserves_deepseek_reasoning_content() {
     let tool_calls = vec![ChatToolCall {
         id: "call_abc".to_owned(),
@@ -1854,6 +1962,165 @@ async fn lightweight_auxiliary_responses_request_suppresses_proxy_tools() {
         requests[0].get("tools").is_none(),
         "auxiliary requests should not receive proxy tools: {}",
         requests[0]
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn codex_marker_responses_request_injects_synthetic_tool_search_upstream() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("codex-marker-tool-search");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState {
+        config: Arc::new(config),
+        client: reqwest::Client::new(),
+        store,
+    };
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_codex_marker_tool_search",
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "client_metadata": {
+                "x-codex-installation-id": "codex-install"
+            },
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Find deferred agent tools if needed." }]
+            }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "plain_external_tool",
+                    "description": "External client tool.",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 1);
+    let upstream_tool_names = requests[0]["tools"]
+        .as_array()
+        .expect("upstream request should include tools")
+        .iter()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        upstream_tool_names.contains(&"plain_external_tool"),
+        "{upstream_tool_names:?}"
+    );
+    assert!(
+        upstream_tool_names.contains(&"tool_search_tool"),
+        "{upstream_tool_names:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn plain_external_responses_request_does_not_inject_synthetic_tool_search_upstream() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("plain-external-no-tool-search");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState {
+        config: Arc::new(config),
+        client: reqwest::Client::new(),
+        store,
+    };
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_plain_external_no_tool_search",
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Use the external tool if needed." }]
+            }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "plain_external_tool",
+                    "description": "External client tool.",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 1);
+    let upstream_tool_names = requests[0]["tools"]
+        .as_array()
+        .expect("upstream request should include tools")
+        .iter()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        upstream_tool_names.contains(&"plain_external_tool"),
+        "{upstream_tool_names:?}"
+    );
+    assert!(
+        !upstream_tool_names.contains(&"tool_search_tool"),
+        "{upstream_tool_names:?}"
     );
 
     let _ = std::fs::remove_dir_all(data_dir);

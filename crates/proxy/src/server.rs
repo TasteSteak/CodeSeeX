@@ -52,6 +52,7 @@ use crate::upstream::payload::{
     normalize_chat_payload, request_is_lightweight_auxiliary, request_shape_diagnostic,
     resolve_upstream_model,
 };
+use crate::upstream::{codex_request_markers, CodexRequestMarkers};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, Response, StatusCode};
@@ -220,6 +221,7 @@ fn tool_exposure_diagnostic(
     request_id: &str,
     external_tool_context: &ToolContext,
     upstream_tools: &[Value],
+    bridge_decision: &CodexToolSearchBridgeDecision,
 ) -> Value {
     let upstream_names = upstream_tool_names(upstream_tools);
     json!({
@@ -228,6 +230,19 @@ fn tool_exposure_diagnostic(
         "external_callable_tools": limited_tool_names(external_tool_context.source_names()),
         "external_upstream_tools": limited_tool_names(external_tool_context.upstream_names()),
         "final_upstream_tools": limited_tool_names(upstream_names.clone()),
+        "codex_request_markers": {
+            "client_metadata": bridge_decision.markers.client_metadata,
+            "prompt_cache_key": bridge_decision.markers.prompt_cache_key,
+            "metadata_installation_id": bridge_decision.markers.metadata_installation_id
+        },
+        "tool_search_bridge": {
+            "injected": bridge_decision.injected,
+            "reason": bridge_decision.reason,
+            "has_tool_search_tool": upstream_names.iter().any(|name| name == "tool_search_tool"),
+            "has_tool_search": upstream_names.iter().any(|name| name == "tool_search"),
+            "upstream_had_tool_search": bridge_decision.upstream_had_tool_search,
+            "codex_native_tool_surface": bridge_decision.codex_native_tool_surface
+        },
         "interesting_tools": interesting_tool_names(&upstream_names)
     })
 }
@@ -289,6 +304,46 @@ fn request_has_codex_native_tool_surface(external_tool_context: &ToolContext) ->
         "create_goal",
         "update_goal",
     ])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexToolSearchBridgeDecision {
+    injected: bool,
+    reason: &'static str,
+    markers: CodexRequestMarkers,
+    upstream_had_tool_search: bool,
+    codex_native_tool_surface: bool,
+}
+
+fn codex_tool_search_bridge_decision(
+    request: &Value,
+    suppress_proxy_tools: bool,
+    external_tool_context: &ToolContext,
+) -> CodexToolSearchBridgeDecision {
+    let markers = codex_request_markers(request);
+    let upstream_had_tool_search = external_tool_context.has_response_tool("tool_search_tool")
+        || external_tool_context.has_response_tool("tool_search");
+    let codex_native_tool_surface = request_has_codex_native_tool_surface(external_tool_context);
+
+    let (injected, reason) = if suppress_proxy_tools {
+        (false, "suppressed_lightweight_auxiliary")
+    } else if upstream_had_tool_search {
+        (false, "already_present")
+    } else if markers.has_any() {
+        (true, "codex_request_marker")
+    } else if codex_native_tool_surface {
+        (true, "codex_native_tool_surface")
+    } else {
+        (false, "not_codex_request")
+    };
+
+    CodexToolSearchBridgeDecision {
+        injected,
+        reason,
+        markers,
+        upstream_had_tool_search,
+        codex_native_tool_surface,
+    }
 }
 
 async fn models() -> impl IntoResponse {
@@ -770,7 +825,9 @@ async fn responses(
     );
     let mut external_tool_context =
         crate::tool_passthrough::ToolContext::from_request_tools(input.get("tools"));
-    if !suppress_proxy_tools && request_has_codex_native_tool_surface(&external_tool_context) {
+    let tool_search_bridge_decision =
+        codex_tool_search_bridge_decision(&input, suppress_proxy_tools, &external_tool_context);
+    if tool_search_bridge_decision.injected {
         external_tool_context.ensure_codex_tool_search_bridge();
     }
     let mut tools = if suppress_proxy_tools {
@@ -793,6 +850,7 @@ async fn responses(
                 &id,
                 &external_tool_context,
                 &tools,
+                &tool_search_bridge_decision,
             )),
         )
         .await;
