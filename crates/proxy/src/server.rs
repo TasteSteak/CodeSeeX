@@ -521,13 +521,25 @@ async fn chat_completions(
                                 } else {
                                     "Chat completion request failed."
                                 },
-                                Some(&json!({
-                                    "id": id,
-                                    "status": status.as_u16(),
-                                    "requested_model": requested_model.as_deref(),
-                                    "model": model.as_deref(),
-                                    "upstream_error": if status.is_success() { Value::Null } else { upstream_error }
-                                })),
+                                Some(&if status.is_success() {
+                                    let mut detail = request_completed_detail(
+                                        &id,
+                                        requested_model.as_deref(),
+                                        model.as_deref(),
+                                        None,
+                                        body_json.as_ref(),
+                                    );
+                                    detail["status"] = json!(status.as_u16());
+                                    detail
+                                } else {
+                                    json!({
+                                        "id": id,
+                                        "status": status.as_u16(),
+                                        "requested_model": requested_model.as_deref(),
+                                        "model": model.as_deref(),
+                                        "upstream_error": upstream_error
+                                    })
+                                }),
                             )
                             .await;
                         response_from_bytes(status, content_type, bytes.to_vec())
@@ -1185,17 +1197,25 @@ async fn responses(
                             error.to_string(),
                         );
                     }
-                    if !client_tool_handoff {
-                        let _ = state
-                            .store
-                            .record_event(
-                                "info",
-                                "request_completed",
-                                "Responses request completed.",
-                                Some(&json!({ "id": id })),
-                            )
-                            .await;
-                    }
+                    let lifecycle = client_tool_handoff.then_some("client_tool_handoff");
+                    let _ = state
+                        .store
+                        .record_event(
+                            "info",
+                            "request_completed",
+                            "Responses request completed.",
+                            Some(&request_completed_detail(
+                                &id,
+                                Some(model.as_str()),
+                                mapped
+                                    .get("model")
+                                    .and_then(Value::as_str)
+                                    .or(Some(model.as_str())),
+                                lifecycle,
+                                Some(&mapped),
+                            )),
+                        )
+                        .await;
                     json_response(mapped)
                 }
                 Err(error) => {
@@ -1275,6 +1295,94 @@ fn upstream_error_detail(body_json: Option<&Value>, bytes: &[u8]) -> Value {
             "note": "Raw upstream error bodies are not logged to avoid leaking secrets or prompt content."
         }
     })
+}
+
+fn request_completed_detail(
+    id: &str,
+    requested_model: Option<&str>,
+    model: Option<&str>,
+    lifecycle: Option<&str>,
+    response: Option<&Value>,
+) -> Value {
+    let mut detail = json!({
+        "id": id,
+        "requested_model": requested_model,
+        "model": model,
+    });
+    if let Some(lifecycle) = lifecycle {
+        detail["lifecycle"] = json!(lifecycle);
+    }
+    if let Some(usage) = response.and_then(response_usage_for_log) {
+        let input_tokens = usage_u64(usage, &["input_tokens", "prompt_tokens"]).unwrap_or(0);
+        let cached_input_tokens = usage_u64(
+            usage,
+            &[
+                "cached_input_tokens",
+                "input_cached_tokens",
+                "prompt_cache_hit_tokens",
+                "cache_hit_input_tokens",
+                "cached_tokens",
+            ],
+        )
+        .or_else(|| {
+            usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .and_then(value_to_u64_for_log)
+        })
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(value_to_u64_for_log)
+        })
+        .unwrap_or(0);
+        let cache_miss_input_tokens = usage_u64(
+            usage,
+            &[
+                "cache_miss_input_tokens",
+                "input_cache_miss_tokens",
+                "prompt_cache_miss_tokens",
+                "cache_miss_tokens",
+            ],
+        )
+        .unwrap_or_else(|| input_tokens.saturating_sub(cached_input_tokens));
+        let output_tokens = usage_u64(usage, &["output_tokens", "completion_tokens"]).unwrap_or(0);
+        let total_tokens = usage_u64(usage, &["total_tokens"]).unwrap_or_else(|| {
+            cached_input_tokens
+                .saturating_add(cache_miss_input_tokens)
+                .saturating_add(output_tokens)
+        });
+        detail["input_tokens"] = json!(input_tokens);
+        detail["cached_input_tokens"] = json!(cached_input_tokens);
+        detail["cache_miss_input_tokens"] = json!(cache_miss_input_tokens);
+        detail["output_tokens"] = json!(output_tokens);
+        detail["total_tokens"] = json!(total_tokens);
+    }
+    detail
+}
+
+fn response_usage_for_log(response: &Value) -> Option<&Value> {
+    response
+        .get("usage")
+        .or_else(|| response.pointer("/response/usage"))
+        .or_else(|| response.pointer("/choices/0/usage"))
+}
+
+fn usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .filter_map(|key| usage.get(*key))
+        .find_map(value_to_u64_for_log)
+}
+
+fn value_to_u64_for_log(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite() && *number >= 0.0)
+                .map(|number| number as u64)
+        })
 }
 
 fn response_id_from_input(input: &Value) -> String {
@@ -2417,7 +2525,16 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                             "info",
                             "request_completed",
                             "Streaming response completed.",
-                            Some(&json!({ "id": response_id })),
+                            Some(&request_completed_detail(
+                                &response_id,
+                                Some(model.as_str()),
+                                final_response
+                                    .get("model")
+                                    .and_then(Value::as_str)
+                                    .or(Some(model.as_str())),
+                                None,
+                                Some(&final_response),
+                            )),
                         )
                         .await;
                     yield sse_bytes("response.completed", json!({
@@ -2538,6 +2655,24 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                     });
                     let diagnostic = json!({ "codeseex_lifecycle": "client_tool_handoff" });
                     let _ = state.store.finish_request(&response_id, RequestStatus::Completed, Some(&final_response), Some(&diagnostic)).await;
+                    let _ = state
+                        .store
+                        .record_event(
+                            "info",
+                            "request_completed",
+                            "Streaming response completed.",
+                            Some(&request_completed_detail(
+                                &response_id,
+                                Some(model.as_str()),
+                                final_response
+                                    .get("model")
+                                    .and_then(Value::as_str)
+                                    .or(Some(model.as_str())),
+                                Some("client_tool_handoff"),
+                                Some(&final_response),
+                            )),
+                        )
+                        .await;
                     yield sse_bytes("response.completed", json!({
                         "type": "response.completed",
                         "response": final_response,
@@ -2799,6 +2934,24 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                     });
                     let diagnostic = json!({ "codeseex_lifecycle": "client_tool_handoff" });
                     let _ = state.store.finish_request(&response_id, RequestStatus::Completed, Some(&final_response), Some(&diagnostic)).await;
+                    let _ = state
+                        .store
+                        .record_event(
+                            "info",
+                            "request_completed",
+                            "Streaming response completed.",
+                            Some(&request_completed_detail(
+                                &response_id,
+                                Some(model.as_str()),
+                                final_response
+                                    .get("model")
+                                    .and_then(Value::as_str)
+                                    .or(Some(model.as_str())),
+                                Some("client_tool_handoff"),
+                                Some(&final_response),
+                            )),
+                        )
+                        .await;
                     yield sse_bytes("response.completed", json!({
                         "type": "response.completed",
                         "response": final_response,

@@ -212,12 +212,14 @@ async fn fake_mixed_streaming_chat_completions(
                 "{\"index\":0,\"id\":\"call_ls\",\"type\":\"function\",\"function\":{\"name\":\"list_directory\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}},",
                 "{\"index\":1,\"id\":\"call_js\",\"type\":\"function\",\"function\":{\"name\":\"js\",\"arguments\":\"{\\\"code\\\":\\\"1+1\\\"}\"}}",
                 "]}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10}}\n\n",
                 "data: [DONE]\n\n"
             )
             .to_owned()
     } else {
         concat!(
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_js_2\",\"type\":\"function\",\"function\":{\"name\":\"js\",\"arguments\":\"{\\\"code\\\":\\\"1+1\\\"}\"}}]}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10}}\n\n",
                 "data: [DONE]\n\n"
             )
             .to_owned()
@@ -347,6 +349,7 @@ async fn fake_apply_patch_streaming_chat_completions(
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_patch\",\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"patch\\\":\\\"*** Begin Patch\\\\n\"}}]}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"*** Add File: target/codeseex-apply-patch-streaming-test/hello.txt\\\\n+hello\\\\n\"}}]}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"*** End Patch\\\"}\"}}]}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
                 "data: [DONE]\n\n"
             )
             .to_owned()
@@ -2616,15 +2619,30 @@ async fn streaming_mixed_internal_and_external_tools_runs_internal_first() {
     assert_eq!(requests.len(), 1);
 
     let (events, _) = inspection_store.recent_events(20, None).await.unwrap();
-    assert!(
-        !events
-            .iter()
-            .any(|event| event.event_type == "request_completed"),
-        "client tool handoff must not be logged as a completed conversation"
+    let completed = events
+        .iter()
+        .find(|event| event.event_type == "request_completed")
+        .expect("client tool handoff completion should be observable");
+    assert_eq!(
+        completed
+            .detail
+            .as_ref()
+            .and_then(|value| value.get("lifecycle")),
+        Some(&json!("client_tool_handoff"))
+    );
+    assert_eq!(
+        completed
+            .detail
+            .as_ref()
+            .and_then(|value| value.get("total_tokens")),
+        Some(&json!(10))
     );
     let summary = inspection_store.runtime_summary(10).await.unwrap();
     assert_eq!(summary.request_count, 0);
     assert!(summary.turn_history.is_empty());
+    assert_eq!(summary.billable_request_count, 1);
+    assert_eq!(summary.billable_history.len(), 1);
+    assert_eq!(summary.billable_history[0].total_tokens, 10);
 }
 
 #[tokio::test]
@@ -3418,7 +3436,7 @@ async fn streaming_apply_patch_returns_native_custom_tool_call() {
     std::fs::create_dir_all(&patch_dir).expect("create ignored apply_patch test directory");
     let patch_file = patch_dir.join("hello.txt");
     let _ = std::fs::remove_file(&patch_file);
-    let config = test_config_with_upstream(data_dir, fake_addr);
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
     let store = Store::open(&config.data_dir).await.unwrap();
     let proxy_state = ProxyState {
         config: Arc::new(config),
@@ -3485,6 +3503,30 @@ async fn streaming_apply_patch_returns_native_custom_tool_call() {
         .expect("fake upstream lock poisoned")
         .clone();
     assert_eq!(requests.len(), 1);
+
+    let store = Store::open(&data_dir).await.unwrap();
+    let summary = store.runtime_summary(10).await.expect("runtime summary");
+    assert_eq!(summary.request_count, 0);
+    assert_eq!(summary.billable_request_count, 1);
+    assert_eq!(summary.billable_history.len(), 1);
+    assert_eq!(summary.billable_history[0].lifecycle, "client_tool_handoff");
+    assert_eq!(summary.billable_history[0].total_tokens, 6);
+
+    let (events, _) = store
+        .recent_visible_events(20, None)
+        .await
+        .expect("visible events");
+    let completed = events
+        .iter()
+        .find(|event| event.event_type == "request_completed")
+        .expect("streaming client tool handoff completion should be observable");
+    assert_eq!(
+        completed
+            .detail
+            .as_ref()
+            .and_then(|value| value.get("lifecycle")),
+        Some(&json!("client_tool_handoff"))
+    );
 }
 
 #[tokio::test]
@@ -3549,13 +3591,24 @@ async fn nonstreaming_client_tool_handoff_is_not_user_completed_turn() {
 
     let summary = store.runtime_summary(10).await.expect("runtime summary");
     assert_eq!(summary.request_count, 0);
+    assert_eq!(summary.billable_request_count, 1);
+    assert_eq!(summary.billable_history.len(), 1);
+    assert_eq!(summary.total_output_tokens, 4);
     let (events, _) = store
         .recent_visible_events(20, None)
         .await
         .expect("visible events");
-    assert!(!events
+    let completed = events
         .iter()
-        .any(|event| event.event_type == "request_completed"));
+        .find(|event| event.event_type == "request_completed")
+        .expect("client tool handoff completion should be observable");
+    assert_eq!(
+        completed
+            .detail
+            .as_ref()
+            .and_then(|value| value.get("lifecycle")),
+        Some(&json!("client_tool_handoff"))
+    );
 
     let _ = std::fs::remove_file(&patch_file);
     let _ = std::fs::remove_dir_all(patch_dir);

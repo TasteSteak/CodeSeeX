@@ -88,6 +88,8 @@ fn apply_patch_definition_requires_paths_in_operation_headers() {
     assert!(description.contains("*** Update File: path"));
     assert!(description.contains("*** Delete File: path"));
     assert!(description.contains("Bare headers"));
+    assert!(description.contains("standalone grammar lines"));
+    assert!(description.contains("hunk-prefixed data lines"));
 }
 
 #[test]

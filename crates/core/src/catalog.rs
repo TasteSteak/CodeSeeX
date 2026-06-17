@@ -8,7 +8,8 @@ use std::path::Path;
 
 const CODEX_BRIDGED_IDENTITY: &str = "You are Codex, a coding agent based on DeepSeek-V4 and running through the local CodeSeeX proxy inside the Codex environment.";
 const LEGACY_APPLY_PATCH_LINE: &str = "- For local text edits, call apply_patch with a single raw Codex patch string. The patch must start with *** Begin Patch and end with *** End Patch.";
-const STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch must start with *** Begin Patch and end with *** End Patch.";
+const PREVIOUS_STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch must start with *** Begin Patch and end with *** End Patch.";
+const STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch uses standalone grammar lines for structure and hunk prefixes for file data lines; in add-file hunks, each file content line is written as + followed by content.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Catalog {
@@ -149,10 +150,14 @@ fn prompt_fields_are_safe(model: &Value) -> bool {
                 && instructions.contains("*** Add File: path")
                 && instructions.contains("Bare headers")
                 && instructions.contains("Do not answer with file contents as prose")
+                && instructions.contains("standalone grammar lines")
+                && instructions.contains("hunk prefixes for file data lines")
                 && messages_text.contains("CodeSeeX Proxy Compatibility")
                 && messages_text.contains("*** Add File: path")
                 && messages_text.contains("Bare headers")
                 && messages_text.contains("Do not answer with file contents as prose")
+                && messages_text.contains("standalone grammar lines")
+                && messages_text.contains("hunk prefixes for file data lines")
         }
         _ => false,
     }
@@ -188,6 +193,7 @@ fn normalize_prompt_value(value: &mut Value) {
 fn normalize_prompt_text(text: &str) -> String {
     text.replace(legacy_codeseex_identity().as_str(), CODEX_BRIDGED_IDENTITY)
         .replace(LEGACY_APPLY_PATCH_LINE, STRICT_APPLY_PATCH_LINE)
+        .replace(PREVIOUS_STRICT_APPLY_PATCH_LINE, STRICT_APPLY_PATCH_LINE)
 }
 
 fn legacy_codeseex_identity() -> String {

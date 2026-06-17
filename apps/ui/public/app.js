@@ -95,6 +95,12 @@ const els = {
   stageProxyHealth: byId("stageProxyHealth"),
   stageProxyState: byId("stageProxyState"),
   toolConfigList: byId("toolConfigList"),
+  troubleshootActions: byId("troubleshootActions"),
+  troubleshootButton: byId("troubleshootButton"),
+  troubleshootClose: byId("troubleshootClose"),
+  troubleshootModal: byId("troubleshootModal"),
+  troubleshootRefresh: byId("troubleshootRefresh"),
+  troubleshootSummary: byId("troubleshootSummary"),
   uiLanguage: byId("UI_LANGUAGE"),
   usageAverageMs: byId("usageAverageMs"),
   usageCacheHitRate: byId("usageCacheHitRate"),
@@ -146,6 +152,7 @@ let usageRefreshQueued = false;
 let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
 let latestAdapter = null;
+let latestStatus = null;
 let latestUpdateCheck = null;
 let latestConfigVersion = "";
 let externalConfigSyncTimer = null;
@@ -225,6 +232,9 @@ function bind() {
   if (els.rechargeBalanceButton) els.rechargeBalanceButton.addEventListener("click", openRechargePage);
   if (els.copyTomlButton) els.copyTomlButton.addEventListener("click", copyConfigToml);
   if (els.importCcsButton) els.importCcsButton.addEventListener("click", importConfigToCcs);
+  if (els.troubleshootButton) els.troubleshootButton.addEventListener("click", openTroubleshootModal);
+  if (els.troubleshootClose) els.troubleshootClose.addEventListener("click", closeTroubleshootModal);
+  if (els.troubleshootRefresh) els.troubleshootRefresh.addEventListener("click", refreshTroubleshootModal);
   if (els.ccsKeyCancel) els.ccsKeyCancel.addEventListener("click", () => closeCcsKeyModal(""));
   if (els.ccsKeyConfirm) els.ccsKeyConfirm.addEventListener("click", confirmCcsKeyModal);
   if (els.ccsApiKeyInput) {
@@ -240,6 +250,7 @@ function bind() {
   document.addEventListener("scroll", hideContextMenu, true);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && els.ccsKeyModal && !els.ccsKeyModal.hidden) closeCcsKeyModal("");
+    if (event.key === "Escape" && els.troubleshootModal && !els.troubleshootModal.hidden) closeTroubleshootModal();
     if (event.key === "Escape") hideContextMenu();
   });
   document.addEventListener("visibilitychange", () => scheduleNextRefresh(0));
@@ -483,8 +494,14 @@ async function refresh(options = {}) {
     }
     maybeRefreshUsage(data.runtime || {}, options);
   } catch (error) {
+    latestStatus = {
+      ok: false,
+      runtime: {},
+      error: error && error.message ? error.message : String(error || ""),
+    };
     latestRunning = false;
     latestStarting = false;
+    latestRuntimePort = null;
     els.running.textContent = t("unavailable");
     els.statusPill.classList.remove("running");
     els.statusPill.classList.remove("starting");
@@ -510,6 +527,7 @@ function maybeRefreshUsage(runtime, options = {}) {
   if (currentView !== "usage") return;
   const sourceSignature = stableStringify({
     request_count: runtime.request_count || 0,
+    billable_request_count: runtime.billable_request_count || 0,
     last_request_at: runtime.last_request_at || "",
     billing: currentBillingSignature(),
   });
@@ -921,6 +939,7 @@ function renderStatus(data) {
   const runtimeStatus = String(data.runtime_status || runtime.status || "").toLowerCase();
   const isStarting = !data.running && runtimeStatus === RUNTIME_STATUS_STARTING;
   const isStopping = !data.running && runtimeStatus === RUNTIME_STATUS_STOPPING;
+  latestStatus = data || null;
   const signature = stableStringify({
     running: Boolean(data.running),
     runtime_status: runtimeStatus,
@@ -947,6 +966,7 @@ function renderStatus(data) {
   els.completedTurns.textContent = formatNumber(runtime.request_count || 0);
   els.failedTurns.textContent = formatNumber(runtime.failed_request_count || 0);
   renderDashboardReadiness(data, runtime, { isStarting, isStopping });
+  if (els.troubleshootModal && !els.troubleshootModal.hidden) renderTroubleshootModal();
   renderButtons();
 }
 
@@ -1097,6 +1117,101 @@ function closeCcsKeyModal(value) {
 function updateCcsKeyConfirmState() {
   if (!els.ccsKeyConfirm || !els.ccsApiKeyInput) return;
   els.ccsKeyConfirm.disabled = !String(els.ccsApiKeyInput.value || "").trim();
+}
+
+function openTroubleshootModal() {
+  if (!els.troubleshootModal) return;
+  renderTroubleshootModal();
+  els.troubleshootModal.hidden = false;
+  window.setTimeout(() => {
+    if (els.troubleshootClose) els.troubleshootClose.focus();
+  }, 0);
+}
+
+function closeTroubleshootModal() {
+  if (els.troubleshootModal) els.troubleshootModal.hidden = true;
+}
+
+async function refreshTroubleshootModal() {
+  if (els.troubleshootRefresh) els.troubleshootRefresh.disabled = true;
+  try {
+    const data = await apiJson("/api/status", { cache: "no-store" });
+    await syncConfigIfChanged(data.config_version);
+    renderStatus(data);
+    await Promise.allSettled([
+      refreshLatestLogs({ force: true }),
+      loadCodexAdapter(),
+      currentView === "usage" ? refreshUsage({ force: true }) : Promise.resolve(),
+    ]);
+  } catch (error) {
+    latestStatus = {
+      ok: false,
+      runtime: {},
+      error: error && error.message ? error.message : String(error || ""),
+    };
+    latestRunning = false;
+    latestStarting = false;
+    latestRuntimePort = null;
+    els.running.textContent = t("unavailable");
+    els.statusPill.classList.remove("running");
+    els.statusPill.classList.remove("starting");
+    renderButtons();
+  } finally {
+    if (els.troubleshootRefresh) els.troubleshootRefresh.disabled = false;
+    renderTroubleshootModal();
+  }
+}
+
+function renderTroubleshootModal() {
+  if (!els.troubleshootSummary || !els.troubleshootActions) return;
+  const status = latestStatus || {};
+  const runtime = status.runtime || {};
+  const hasStatus = Boolean(latestStatus && latestStatus.ok !== undefined);
+  const statusOk = hasStatus && status.ok !== false;
+  const port = statusOk
+    ? (runtime.port || latestRuntimePort || (lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787")
+    : ((lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787");
+  const rows = [
+    [t("troubleshootProxyState"), latestRunning ? t("running") : (latestStarting ? t("starting") : t("stopped"))],
+    [t("logPort"), String(port)],
+    [statusOk ? (status.process_label || t("proxyPid")) : t("proxyPid"), statusOk && status.pid ? String(status.pid) : "-"],
+    [t("configTomlTitle"), codexConfigPathHint()],
+    [t("troubleshootCatalogPath"), statusOk ? (status.catalog_path || (latestAdapter && latestAdapter.catalog_path) || "-") : "-"],
+    [t("troubleshootBaseUrl"), statusOk ? (status.base_url || (latestAdapter && latestAdapter.base_url) || DEFAULT_CCS_ENDPOINT) : "-"],
+  ];
+  els.troubleshootSummary.replaceChildren(...rows.map(([label, value]) => troubleshootRow(label, value)));
+
+  const actions = troubleshootActions(status, runtime);
+  els.troubleshootActions.replaceChildren(...actions.map((text) => {
+    const item = document.createElement("div");
+    item.className = "troubleshoot-action";
+    item.textContent = text;
+    return item;
+  }));
+}
+
+function troubleshootRow(label, value) {
+  const row = document.createElement("div");
+  row.className = "troubleshoot-row";
+  const span = document.createElement("span");
+  span.textContent = label;
+  const strong = document.createElement("strong");
+  strong.textContent = value || "-";
+  row.append(span, strong);
+  return row;
+}
+
+function troubleshootActions(status, runtime) {
+  const actions = [];
+  const activeRequests = Number(runtime && runtime.active_requests || 0);
+  if (latestStarting) actions.push(t("troubleshootActionWaitStartup"));
+  if (!latestRunning && !latestStarting) actions.push(t("troubleshootActionStartProxy"));
+  if (latestRunning && activeRequests > 0) actions.push(t("troubleshootActionActiveRequests").replace("{count}", formatNumber(activeRequests)));
+  if (latestRunning && hasSavedRestartRequiredChanges()) actions.push(t("troubleshootActionRestartNeeded"));
+  if (!latestRunning) actions.push(t("troubleshootActionPortConflict"));
+  if (!status || !status.ok) actions.push(t("troubleshootActionRefreshStatus"));
+  if (actions.length === 0) actions.push(t("troubleshootActionHealthy"));
+  return actions;
 }
 
 function configTomlCopyText(value) {
@@ -1650,18 +1765,23 @@ function isTruthy(value) {
 
 function renderUsage(runtime) {
   const started = performance.now();
-  const turns = Array.isArray(runtime.turn_history) ? runtime.turn_history.slice(-120) : [];
+  const billable = Array.isArray(runtime.billable_history) ? runtime.billable_history : null;
+  const turns = billable || (Array.isArray(runtime.turn_history) ? runtime.turn_history : []);
   const usageSignature = stableStringify({
     locale: uiLanguage,
     billing: currentBillingSignature(),
     total_cached_input_tokens: runtime.total_cached_input_tokens || 0,
     total_cache_miss_input_tokens: runtime.total_cache_miss_input_tokens || 0,
     total_output_tokens: runtime.total_output_tokens || 0,
+    billable_request_count: runtime.billable_request_count || 0,
     turn_ids: turns.map((turn) => [
       turn.id || "",
       turn.completed_at || "",
       turn.model || "",
       turn.requested_model || "",
+      turn.lifecycle || "",
+      turn.conversation_turn ? 1 : 0,
+      turn.billable ? 1 : 0,
       turn.cached_input_tokens || 0,
       turn.cache_miss_input_tokens || 0,
       turn.output_tokens || 0,
@@ -1675,8 +1795,7 @@ function renderUsage(runtime) {
   const avgMs = average(turns.map((turn) => turn.request_ms || 0).filter((value) => value > 0));
   const totalCached = runtime.total_cached_input_tokens || 0;
   const totalMiss = runtime.total_cache_miss_input_tokens || 0;
-  const totalInput = totalCached + totalMiss;
-  const cacheHitRate = totalInput > 0 ? (totalCached / totalInput * 100).toFixed(1) + "%" : "-";
+  const cacheHitRate = usageCacheHitRate(totalCached, totalMiss);
   const totalCostVal = turns.reduce((sum, turn) => sum + costForTokens(turn), 0);
 
   els.usageTotalTurns.textContent = formatNumber(totalTurnsCount);
@@ -1707,31 +1826,66 @@ function usageRecord(turn) {
   const summary = document.createElement("summary");
   const modelLabel = usageModelLabel(turn);
   const totalCost = formatCost(costForTokens(turn));
-  summary.appendChild(usageTitle(t("usageConversationRecord"), [
+  const cachedTokens = Number(turn.cached_input_tokens || 0);
+  const missTokens = Number(turn.cache_miss_input_tokens || 0);
+  const inputTokens = cachedTokens + missTokens;
+  const cacheHitRate = usageCacheHitRate(cachedTokens, missTokens);
+  summary.appendChild(usageTitle(usageRecordTitle(turn), [
     formatDateTime(turn.completed_at),
-    modelLabel,
-    turn.requested_model && turn.requested_model !== turn.model ? t("usageRequestedModel").replace("{model}", turn.requested_model) : "",
   ].filter(Boolean).join(" · ")));
   [
-    [t("cacheHit"), formatNumber(turn.cached_input_tokens)],
-    [t("cacheMiss"), formatNumber(turn.cache_miss_input_tokens)],
-    [t("output"), formatNumber(turn.output_tokens)],
     [t("elapsed"), formatDuration(turn.request_ms)],
+    [t("total"), formatNumber(turn.total_tokens)],
+    [t("usageCacheHitRateShort"), cacheHitRate],
     [t("cost"), totalCost],
   ].forEach(([label, value]) => summary.appendChild(usageMetric(label, value)));
   details.appendChild(summary);
+  details.addEventListener("toggle", () => {
+    if (!details.open || details.dataset.rendered === "true") return;
+    details.appendChild(usageRecordBody(turn, modelLabel, totalCost, cachedTokens, missTokens));
+    details.dataset.rendered = "true";
+  });
+  return details;
+}
 
+function usageRecordTitle(turn) {
+  if (turn && turn.conversation_turn === false) return t("usageIntermediateReply");
+  return t("usageConversationRecord");
+}
+
+function usageRecordBody(turn, modelLabel, totalCost, cachedTokens, missTokens) {
   const body = document.createElement("div");
   body.className = "usage-record-body";
-  const stages = document.createElement("div");
-  stages.className = "usage-stage-grid";
-  stages.appendChild(usageStage(t("usageStageRequest"), modelLabel, t("usageStageRequestHint")));
-  stages.appendChild(usageStage(t("usageStageInput"), formatNumber((turn.cached_input_tokens || 0) + (turn.cache_miss_input_tokens || 0)), t("usageStageInputHint")));
-  stages.appendChild(usageStage(t("usageStageOutput"), formatNumber(turn.output_tokens), t("usageStageOutputHint")));
-  stages.appendChild(usageStage(t("usageStageTotal"), formatNumber(turn.total_tokens), t("usageStageTotalHint").replace("{cost}", totalCost)));
-  body.appendChild(stages);
-  details.appendChild(body);
-  return details;
+  const detailHead = document.createElement("div");
+  detailHead.className = "usage-detail-head";
+  const detailTitle = document.createElement("strong");
+  detailTitle.textContent = t("usageReplyDetails");
+  const chips = document.createElement("div");
+  chips.className = "usage-detail-chips";
+  chips.append(
+    usageChip(modelLabel),
+    usageChip(t("usageStatusCompleted"), "ok"),
+    usageChip(t("usageCacheHitRateShort") + " " + usageCacheHitRate(cachedTokens, missTokens)),
+  );
+  detailHead.append(detailTitle, chips);
+  body.appendChild(detailHead);
+
+  const list = document.createElement("div");
+  list.className = "usage-reply-list";
+  list.appendChild(usageReplyHeader());
+  usageIntermediateRows(turn, modelLabel, totalCost, cachedTokens, missTokens).forEach((row) => {
+    list.appendChild(usageReplyRow(row));
+  });
+  body.appendChild(list);
+
+  body.appendChild(usageTechDetails([
+    [t("requestId"), turn.id || "-"],
+    [t("completedAt"), formatDateTime(turn.completed_at)],
+    [t("actualModel"), turn.model || "-"],
+    [t("requestedModel"), turn.requested_model || "-"],
+    [t("usageCacheHitRateShort"), usageCacheHitRate(cachedTokens, missTokens)],
+  ]));
+  return body;
 }
 
 function usageTitle(title, subtitle) {
@@ -1756,23 +1910,170 @@ function usageMetric(label, value) {
   return wrap;
 }
 
-function usageStage(label, value, hint) {
-  const wrap = document.createElement("div");
-  wrap.className = "usage-stage";
-  const span = document.createElement("span");
-  span.textContent = label;
-  const strong = document.createElement("strong");
-  strong.textContent = value || "-";
-  const p = document.createElement("p");
-  p.textContent = hint || "";
-  wrap.append(span, strong, p);
-  return wrap;
-}
-
 function usageModelLabel(turn) {
   const model = String(turn && turn.model || "").trim();
   const requested = String(turn && turn.requested_model || "").trim();
   return model || requested || "-";
+}
+
+function usageCacheHitRate(cachedTokens, missTokens) {
+  const cached = Number(cachedTokens || 0);
+  const miss = Number(missTokens || 0);
+  const total = cached + miss;
+  if (total <= 0) return "-";
+  const rate = cached / total * 100;
+  return (Number.isInteger(rate) ? rate.toFixed(0) : rate.toFixed(1)) + "%";
+}
+
+function usageChip(text, variant) {
+  const chip = document.createElement("span");
+  chip.className = ["usage-chip", variant ? "usage-chip-" + variant : ""].filter(Boolean).join(" ");
+  chip.textContent = text || "-";
+  return chip;
+}
+
+function usageReplyHeader() {
+  return usageReplyRow({
+    className: "header",
+    segment: t("usageReplySegment"),
+    model: t("usageModel"),
+    elapsed: t("elapsed"),
+    miss: t("usageCacheMissShort"),
+    hit: t("usageCacheHitShort"),
+    output: t("output"),
+    cost: t("cost"),
+  });
+}
+
+function usageIntermediateRows(turn, modelLabel, totalCost, cachedTokens, missTokens) {
+  const elapsed = formatDuration(turn.request_ms);
+  const miss = formatNumber(missTokens);
+  const hit = formatNumber(cachedTokens);
+  const output = formatNumber(turn.output_tokens);
+  return [
+    {
+      segment: t("usageReceiveRequest"),
+      hint: t("usageReceiveRequestHint"),
+      model: t("usageLocalProxy"),
+      elapsed: usageTinyDuration(),
+      miss: "-",
+      hit: "-",
+      output: "-",
+      cost: "-",
+    },
+    {
+      segment: t("usageCacheCheck"),
+      hint: t("usageCacheCheckHint"),
+      model: modelLabel,
+      elapsed: usageTinyDuration(),
+      miss,
+      hit,
+      output: "-",
+      cost: "-",
+    },
+    {
+      segment: t("usageUpstreamRequest"),
+      hint: t("usageUpstreamRequestHint"),
+      model: modelLabel,
+      elapsed,
+      miss,
+      hit,
+      output: "-",
+      cost: t("usageIncludedInFinal"),
+    },
+    {
+      className: "billable",
+      segment: t("usageFinalReply"),
+      hint: t("usageStatusCompleted"),
+      model: modelLabel,
+      elapsed,
+      miss,
+      hit,
+      output,
+      cost: totalCost,
+    },
+    {
+      segment: t("usagePersistUsage"),
+      hint: t("usagePersistUsageHint"),
+      model: t("usageLocalLedger"),
+      elapsed: usageTinyDuration(),
+      miss: "-",
+      hit: "-",
+      output: "-",
+      cost: t("usageRecorded"),
+    },
+    {
+      className: "total",
+      segment: t("total"),
+      model: "-",
+      elapsed,
+      miss,
+      hit,
+      output,
+      cost: totalCost,
+    },
+  ];
+}
+
+function usageTinyDuration() {
+  return "< 1 ms";
+}
+
+function usageReplyRow(row) {
+  const wrap = document.createElement("div");
+  wrap.className = ["usage-reply-row", row.className ? "usage-reply-row-" + row.className : ""].filter(Boolean).join(" ");
+  const segment = document.createElement("div");
+  segment.className = "usage-reply-segment";
+  const strong = document.createElement("strong");
+  strong.textContent = row.segment || "-";
+  segment.appendChild(strong);
+  if (row.hint) {
+    const span = document.createElement("span");
+    span.textContent = row.hint;
+    segment.appendChild(span);
+  }
+  wrap.append(
+    segment,
+    usageReplyCell(row.model),
+    usageReplyCell(row.elapsed, true),
+    usageReplyCell(row.miss, true),
+    usageReplyCell(row.hit, true),
+    usageReplyCell(row.output, true),
+    usageReplyCell(row.cost, true),
+  );
+  return wrap;
+}
+
+function usageReplyCell(value, numeric) {
+  const span = document.createElement("span");
+  span.className = numeric ? "usage-reply-cell usage-reply-num" : "usage-reply-cell";
+  span.textContent = value || "-";
+  span.title = span.textContent;
+  return span;
+}
+
+function usageTechDetails(items) {
+  const details = document.createElement("details");
+  details.className = "usage-tech-details";
+  const summary = document.createElement("summary");
+  summary.textContent = t("usageTechnicalDetails");
+  details.appendChild(summary);
+  const body = document.createElement("div");
+  body.className = "usage-tech-body";
+  for (const [label, value] of items) {
+    const text = value || "-";
+    const row = document.createElement("div");
+    row.className = "usage-tech-row";
+    const span = document.createElement("span");
+    span.textContent = label;
+    const strong = document.createElement("strong");
+    strong.textContent = text;
+    strong.title = text;
+    row.append(span, strong);
+    body.appendChild(row);
+  }
+  details.appendChild(body);
+  return details;
 }
 
 function updateLatestLogs(events, options = {}) {

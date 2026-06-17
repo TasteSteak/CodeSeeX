@@ -334,6 +334,20 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_preserves_add_file_blank_and_hash_content_lines() {
+        let item = native_apply_patch_response_item_from_chat_call(&call(
+            "call_patch",
+            "apply_patch",
+            r#"{"patch":"*** Begin Patch\n*** Add File: notes.md\n+# Title\n+\n+body\n*** End Patch"}"#,
+        ));
+
+        assert_eq!(
+            item["input"],
+            "*** Begin Patch\n*** Add File: notes.md\n+# Title\n+\n+body\n*** End Patch"
+        );
+    }
+
+    #[test]
     fn web_search_maps_to_web_search_call_not_proxy_tool() {
         let items = proxy_visible_response_items(&[call(
             "call_web",

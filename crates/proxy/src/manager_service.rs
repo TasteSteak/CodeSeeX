@@ -115,10 +115,13 @@ impl ManagerRuntime {
                 "port": config.port,
                 "active_requests": runtime.as_ref().map(|value| value.active_requests).unwrap_or(0),
                 "request_count": runtime.as_ref().map(|value| value.request_count).unwrap_or(0),
+                "billable_request_count": runtime.as_ref().map(|value| value.billable_request_count).unwrap_or(0),
                 "failed_request_count": runtime.as_ref().map(|value| value.failed_request_count).unwrap_or(0),
                 "last_request_at": runtime.as_ref().and_then(|value| value.last_request_at.clone()),
                 "last_turn": runtime.as_ref().and_then(|value| value.last_turn.clone()),
+                "last_billable_request": runtime.as_ref().and_then(|value| value.last_billable_request.clone()),
                 "turn_history": [],
+                "billable_history": [],
                 "total_cached_input_tokens": 0,
                 "total_cache_miss_input_tokens": 0,
                 "total_output_tokens": 0,
@@ -132,16 +135,19 @@ impl ManagerRuntime {
     }
 
     pub async fn usage(&self) -> Value {
-        let runtime = self.store.runtime_summary(120).await.ok();
+        let runtime = self.store.runtime_summary(500).await.ok();
         json!({
             "ok": true,
             "runtime": {
                 "active_requests": runtime.as_ref().map(|value| value.active_requests).unwrap_or(0),
                 "request_count": runtime.as_ref().map(|value| value.request_count).unwrap_or(0),
+                "billable_request_count": runtime.as_ref().map(|value| value.billable_request_count).unwrap_or(0),
                 "failed_request_count": runtime.as_ref().map(|value| value.failed_request_count).unwrap_or(0),
                 "last_request_at": runtime.as_ref().and_then(|value| value.last_request_at.clone()),
                 "last_turn": runtime.as_ref().and_then(|value| value.last_turn.clone()),
+                "last_billable_request": runtime.as_ref().and_then(|value| value.last_billable_request.clone()),
                 "turn_history": runtime.as_ref().map(|value| value.turn_history.clone()).unwrap_or_default(),
+                "billable_history": runtime.as_ref().map(|value| value.billable_history.clone()).unwrap_or_default(),
                 "total_cached_input_tokens": runtime.as_ref().map(|value| value.total_cached_input_tokens).unwrap_or(0),
                 "total_cache_miss_input_tokens": runtime.as_ref().map(|value| value.total_cache_miss_input_tokens).unwrap_or(0),
                 "total_output_tokens": runtime.as_ref().map(|value| value.total_output_tokens).unwrap_or(0),

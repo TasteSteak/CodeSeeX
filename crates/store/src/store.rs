@@ -72,6 +72,9 @@ pub struct RequestTurn {
     pub id: String,
     pub model: String,
     pub requested_model: String,
+    pub lifecycle: String,
+    pub conversation_turn: bool,
+    pub billable: bool,
     pub completed_at: String,
     pub cached_input_tokens: u64,
     pub cache_miss_input_tokens: u64,
@@ -84,10 +87,13 @@ pub struct RequestTurn {
 pub struct RuntimeSummary {
     pub active_requests: u64,
     pub request_count: u64,
+    pub billable_request_count: u64,
     pub failed_request_count: u64,
     pub last_request_at: Option<String>,
     pub last_turn: Option<RequestTurn>,
+    pub last_billable_request: Option<RequestTurn>,
     pub turn_history: Vec<RequestTurn>,
+    pub billable_history: Vec<RequestTurn>,
     pub total_cached_input_tokens: u64,
     pub total_cache_miss_input_tokens: u64,
     pub total_output_tokens: u64,
@@ -214,21 +220,29 @@ impl Store {
 
     pub async fn runtime_summary(&self, turn_limit: u32) -> Result<RuntimeSummary> {
         let inner = self.lock_inner()?;
-        let mut turns = completed_turns(&inner);
+        let mut turns = completed_conversation_turns(&inner);
+        let mut billable = completed_billable_requests(&inner);
         let limit = usize::try_from(turn_limit.clamp(1, 500)).unwrap_or(120);
         if turns.len() > limit {
             turns.drain(0..turns.len() - limit);
         }
-        Ok(runtime_summary_from_inner(&inner, turns))
+        if billable.len() > limit {
+            billable.drain(0..billable.len() - limit);
+        }
+        Ok(runtime_summary_from_inner(&inner, turns, billable))
     }
 
     pub async fn runtime_overview(&self) -> Result<RuntimeSummary> {
         let inner = self.lock_inner()?;
-        let mut turns = completed_turns(&inner);
+        let mut turns = completed_conversation_turns(&inner);
+        let mut billable = completed_billable_requests(&inner);
         if turns.len() > 1 {
             turns.drain(0..turns.len() - 1);
         }
-        Ok(runtime_summary_from_inner(&inner, turns))
+        if billable.len() > 1 {
+            billable.drain(0..billable.len() - 1);
+        }
+        Ok(runtime_summary_from_inner(&inner, turns, billable))
     }
 
     pub async fn recent_events(
@@ -775,8 +789,14 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                 "status",
                 "requested_model",
                 "model",
+                "lifecycle",
                 "duration_ms",
                 "cost_cny",
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_miss_input_tokens",
+                "output_tokens",
+                "total_tokens",
             ],
         ),
         "request_failed" => copy_log_fields(
@@ -1060,7 +1080,7 @@ fn mark_stale_in_progress_requests(inner: &mut StoreInner) {
     }
 }
 
-fn completed_turns(inner: &StoreInner) -> Vec<RequestTurn> {
+fn completed_conversation_turns(inner: &StoreInner) -> Vec<RequestTurn> {
     let mut turns = inner
         .request_order
         .iter()
@@ -1074,9 +1094,24 @@ fn completed_turns(inner: &StoreInner) -> Vec<RequestTurn> {
     turns
 }
 
+fn completed_billable_requests(inner: &StoreInner) -> Vec<RequestTurn> {
+    let mut requests = inner
+        .request_order
+        .iter()
+        .filter_map(|id| inner.requests.get(id))
+        .filter(|request| request_is_completed_billable_request(request))
+        .filter_map(turn_from_request)
+        .collect::<Vec<_>>();
+    if requests.len() > MAX_RUNTIME_TURNS {
+        requests.drain(0..requests.len() - MAX_RUNTIME_TURNS);
+    }
+    requests
+}
+
 fn runtime_summary_from_inner(
     inner: &StoreInner,
     turn_history: Vec<RequestTurn>,
+    billable_history: Vec<RequestTurn>,
 ) -> RuntimeSummary {
     let active_requests = inner
         .requests
@@ -1087,6 +1122,11 @@ fn runtime_summary_from_inner(
         .requests
         .values()
         .filter(|request| request_is_completed_final_turn(request))
+        .count() as u64;
+    let billable_request_count = inner
+        .requests
+        .values()
+        .filter(|request| request_is_completed_billable_request(request))
         .count() as u64;
     let failed_request_count = inner
         .requests
@@ -1099,29 +1139,46 @@ fn runtime_summary_from_inner(
         })
         .count() as u64;
     let last_turn = turn_history.last().cloned();
-    let last_request_at = last_turn.as_ref().map(|turn| turn.completed_at.clone());
-    let total_cached_input_tokens = turn_history
+    let last_billable_request = billable_history.last().cloned();
+    let last_request_at = last_billable_request
+        .as_ref()
+        .or(last_turn.as_ref())
+        .map(|turn| turn.completed_at.clone());
+    let billable_totals = inner
+        .request_order
+        .iter()
+        .filter_map(|id| inner.requests.get(id))
+        .filter(|request| request_is_completed_billable_request(request))
+        .filter_map(turn_from_request)
+        .collect::<Vec<_>>();
+    let total_cached_input_tokens = billable_totals
         .iter()
         .map(|turn| turn.cached_input_tokens)
         .sum();
-    let total_cache_miss_input_tokens = turn_history
+    let total_cache_miss_input_tokens = billable_totals
         .iter()
         .map(|turn| turn.cache_miss_input_tokens)
         .sum();
-    let total_output_tokens = turn_history.iter().map(|turn| turn.output_tokens).sum();
-    let average_ms = if turn_history.is_empty() {
+    let total_output_tokens = billable_totals.iter().map(|turn| turn.output_tokens).sum();
+    let average_ms = if billable_totals.is_empty() {
         0
     } else {
-        turn_history.iter().map(|turn| turn.request_ms).sum::<u64>()
-            / u64::try_from(turn_history.len()).unwrap_or(1)
+        billable_totals
+            .iter()
+            .map(|turn| turn.request_ms)
+            .sum::<u64>()
+            / u64::try_from(billable_totals.len()).unwrap_or(1)
     };
     RuntimeSummary {
         active_requests,
         request_count,
+        billable_request_count,
         failed_request_count,
         last_request_at,
         last_turn,
+        last_billable_request,
         turn_history,
+        billable_history,
         total_cached_input_tokens,
         total_cache_miss_input_tokens,
         total_output_tokens,
@@ -1133,6 +1190,16 @@ fn request_is_completed_final_turn(request: &StoredRequest) -> bool {
     request.status == RequestStatus::Completed && !request_is_client_tool_handoff(request)
 }
 
+fn request_is_completed_billable_request(request: &StoredRequest) -> bool {
+    request.status == RequestStatus::Completed && request_has_billable_usage(request)
+}
+
+fn request_has_billable_usage(request: &StoredRequest) -> bool {
+    usage_value(&request.response)
+        .map(usage_has_tokens)
+        .unwrap_or(false)
+}
+
 fn request_is_client_tool_handoff(request: &StoredRequest) -> bool {
     request
         .diagnostic
@@ -1140,6 +1207,16 @@ fn request_is_client_tool_handoff(request: &StoredRequest) -> bool {
         .and_then(|diagnostic| diagnostic.get("codeseex_lifecycle"))
         .and_then(Value::as_str)
         == Some("client_tool_handoff")
+}
+
+fn request_lifecycle(request: &StoredRequest) -> String {
+    request
+        .diagnostic
+        .as_ref()
+        .and_then(|diagnostic| diagnostic.get("codeseex_lifecycle"))
+        .and_then(Value::as_str)
+        .unwrap_or("final_turn")
+        .to_owned()
 }
 
 fn turn_from_request(request: &StoredRequest) -> Option<RequestTurn> {
@@ -1198,6 +1275,9 @@ fn turn_from_request(request: &StoredRequest) -> Option<RequestTurn> {
             .or(request.model.as_deref())
             .unwrap_or_default()
             .to_owned(),
+        lifecycle: request_lifecycle(request),
+        conversation_turn: request_is_completed_final_turn(request),
+        billable: request_has_billable_usage(request),
         completed_at: request.updated_at.to_rfc3339(),
         cached_input_tokens,
         cache_miss_input_tokens,
@@ -1212,6 +1292,52 @@ fn usage_value(response: &Value) -> Option<&Value> {
         .get("usage")
         .or_else(|| response.pointer("/response/usage"))
         .or_else(|| response.pointer("/choices/0/usage"))
+}
+
+fn usage_has_tokens(usage: &Value) -> bool {
+    let input_tokens = first_u64(usage, &["input_tokens", "prompt_tokens"]).unwrap_or(0);
+    let cached_input_tokens = first_u64(
+        usage,
+        &[
+            "cached_input_tokens",
+            "input_cached_tokens",
+            "prompt_cache_hit_tokens",
+            "cache_hit_input_tokens",
+            "cached_tokens",
+        ],
+    )
+    .or_else(|| {
+        usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(value_to_u64)
+    })
+    .or_else(|| {
+        usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(value_to_u64)
+    })
+    .unwrap_or(0);
+    let cache_miss_input_tokens = first_u64(
+        usage,
+        &[
+            "cache_miss_input_tokens",
+            "input_cache_miss_tokens",
+            "prompt_cache_miss_tokens",
+            "cache_miss_tokens",
+        ],
+    )
+    .unwrap_or_else(|| input_tokens.saturating_sub(cached_input_tokens));
+    let output_tokens = first_u64(usage, &["output_tokens", "completion_tokens"]).unwrap_or(0);
+    let total_tokens = first_u64(usage, &["total_tokens"]).unwrap_or_else(|| {
+        cached_input_tokens
+            .saturating_add(cache_miss_input_tokens)
+            .saturating_add(output_tokens)
+    });
+    total_tokens > 0
+        || input_tokens > 0
+        || cached_input_tokens > 0
+        || cache_miss_input_tokens > 0
+        || output_tokens > 0
 }
 
 fn first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
@@ -1530,7 +1656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_summary_excludes_client_tool_handoff_responses() {
+    async fn runtime_summary_keeps_client_tool_handoff_billable_usage() {
         let dir = temp_dir("client-tool-handoff-runtime");
         let store = Store::open(&dir).await.expect("open store");
         store
@@ -1563,9 +1689,22 @@ mod tests {
 
         let summary = store.runtime_summary(10).await.expect("summary");
         assert_eq!(summary.request_count, 0);
+        assert_eq!(summary.billable_request_count, 1);
         assert!(summary.last_turn.is_none());
+        assert_eq!(
+            summary
+                .last_billable_request
+                .as_ref()
+                .map(|turn| turn.id.as_str()),
+            Some("resp_handoff")
+        );
         assert!(summary.turn_history.is_empty());
-        assert_eq!(summary.total_output_tokens, 0);
+        assert_eq!(summary.billable_history.len(), 1);
+        assert_eq!(summary.billable_history[0].lifecycle, "client_tool_handoff");
+        assert!(!summary.billable_history[0].conversation_turn);
+        assert!(summary.billable_history[0].billable);
+        assert_eq!(summary.total_cache_miss_input_tokens, 5);
+        assert_eq!(summary.total_output_tokens, 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
