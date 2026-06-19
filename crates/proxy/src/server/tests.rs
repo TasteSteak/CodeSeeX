@@ -3481,6 +3481,82 @@ async fn ordinary_mini_responses_request_keeps_tools_and_final_turn_lifecycle() 
 }
 
 #[tokio::test]
+async fn plain_external_feature_label_does_not_suppress_tools_or_turn_lifecycle() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("plain-feature-label-no-service");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_plain_feature_label",
+            "model": "gpt-5.4",
+            "feature": "thread_title",
+            "stream": false,
+            "reasoning": { "effort": "medium" },
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Update the project title using tools if needed." }]
+            }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "plain_external_tool",
+                    "description": "External client tool.",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["model"], "deepseek-v4-pro");
+    assert_eq!(requests[0]["thinking"], json!({ "type": "enabled" }));
+    let upstream_tool_names = upstream_function_tool_names(&requests[0]);
+    assert_default_codeseex_tools_present(&upstream_tool_names);
+    assert!(
+        upstream_tool_names.contains(&"plain_external_tool"),
+        "{upstream_tool_names:?}"
+    );
+
+    let summary = store.runtime_summary(10).await.unwrap();
+    assert_eq!(summary.request_count, 1);
+    assert_eq!(summary.billable_request_count, 1);
+    assert_eq!(summary.billable_history[0].lifecycle, "final_turn");
+    assert!(summary.billable_history[0].conversation_turn);
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
 async fn plain_external_responses_request_does_not_inject_synthetic_tool_search_upstream() {
     let fake_state = FakeUpstreamState::default();
     let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

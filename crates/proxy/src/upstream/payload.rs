@@ -81,7 +81,7 @@ pub(crate) fn request_shape_diagnostic(request: &Value) -> Value {
         "service_routing": if service_kind.is_service() { "flash" } else { "default" },
         "codex_service_request": request_is_codex_service(request),
         "codex_service_kind": service_kind.label(),
-        "service_classification_source": service_kind.classification_source(),
+        "service_classification_source": service_classification_source(&shape, service_kind),
         "service_signals": shape.service_signals(),
         "thinking_policy": if service_kind.is_service() { "disabled_for_service" } else { "request_or_user_config" },
         "has_previous_response_id": shape.has_previous_response_id,
@@ -114,10 +114,12 @@ pub(crate) enum CodexServiceRequestKind {
 
 impl CodexServiceRequestKind {
     fn from_request(request: &Value) -> Self {
-        if let Some(kind) = explicit_service_kind(request) {
-            return kind;
-        }
         let shape = RequestShape::from_request(request);
+        if let Some(kind) = shape.explicit_service_kind {
+            if shape.explicit_service_kind_is_trusted() {
+                return kind;
+            }
+        }
         if !shape.is_service_eligible() {
             return Self::None;
         }
@@ -158,14 +160,28 @@ impl CodexServiceRequestKind {
         }
     }
 
-    fn classification_source(self) -> &'static str {
-        match self {
-            Self::ThreadTitle => "thread_title_schema",
-            Self::AmbientSuggestions => "ambient_suggestions_schema",
-            Self::AmbientSuggestionSafety => "ambient_suggestion_safety_schema",
-            Self::UnknownService => "structured_service_like",
-            Self::None => "none",
-        }
+}
+
+fn service_classification_source(
+    shape: &RequestShape,
+    kind: CodexServiceRequestKind,
+) -> &'static str {
+    if kind == CodexServiceRequestKind::None {
+        return "none";
+    }
+    if shape.explicit_service_kind == Some(kind) && shape.explicit_service_kind_is_trusted() {
+        return if shape.codex_request_marker {
+            "explicit_codex_feature"
+        } else {
+            "explicit_service_shape"
+        };
+    }
+    match kind {
+        CodexServiceRequestKind::ThreadTitle => "thread_title_schema",
+        CodexServiceRequestKind::AmbientSuggestions => "ambient_suggestions_schema",
+        CodexServiceRequestKind::AmbientSuggestionSafety => "ambient_suggestion_safety_schema",
+        CodexServiceRequestKind::UnknownService => "structured_service_like",
+        CodexServiceRequestKind::None => "none",
     }
 }
 
@@ -244,6 +260,7 @@ struct RequestShape {
     has_ambient_suggestion_safety_schema_name: bool,
     has_ambient_suggestion_safety_schema_shape: bool,
     has_service_lifecycle_hint: bool,
+    explicit_service_kind: Option<CodexServiceRequestKind>,
     schema_name: Option<String>,
 }
 
@@ -327,6 +344,7 @@ impl RequestShape {
                 .is_some_and(schema_has_ambient_suggestion_safety_shape),
             has_service_lifecycle_hint: value_has_service_lifecycle_hint(metadata)
                 || value_has_service_lifecycle_hint(request.get("config").unwrap_or(&Value::Null)),
+            explicit_service_kind: explicit_service_kind(request),
             schema_name,
         }
     }
@@ -346,6 +364,12 @@ impl RequestShape {
             || self.store == Some(false)
             || self.codex_request_marker
                 && (self.has_title_task_signal || self.has_suggestion_task_signal)
+    }
+
+    fn explicit_service_kind_is_trusted(&self) -> bool {
+        self.codex_request_marker
+            || self.is_service_eligible()
+                && (self.has_service_lifecycle_signal() || self.store == Some(false))
     }
 
     fn has_service_lifecycle_signal(&self) -> bool {
@@ -381,6 +405,9 @@ impl RequestShape {
             "ambient_suggestions_schema_shape": self.has_ambient_suggestions_schema_shape,
             "ambient_suggestion_safety_schema_name": self.has_ambient_suggestion_safety_schema_name,
             "ambient_suggestion_safety_schema_shape": self.has_ambient_suggestion_safety_schema_shape,
+            "explicit_service_kind": self.explicit_service_kind.map(|kind| kind.label()),
+            "explicit_service_kind_trusted": self.explicit_service_kind
+                .is_some_and(|_| self.explicit_service_kind_is_trusted()),
             "service_lifecycle_hint": self.has_service_lifecycle_hint,
             "store_false": self.store == Some(false),
             "codex_request_marker": self.codex_request_marker,
@@ -1106,6 +1133,102 @@ mod tests {
         assert_eq!(
             resolve_upstream_model(&config, &request, "gpt-5.4"),
             MODEL_PRO
+        );
+    }
+
+    #[test]
+    fn plain_external_feature_label_does_not_force_service_behavior() {
+        let config = AppConfig::default();
+        let request = json!({
+            "model": "gpt-5.4",
+            "feature": "thread_title",
+            "input": "Update the project title using available tools.",
+            "tools": [{
+                "type": "function",
+                "function": { "name": "apply_patch" }
+            }],
+            "max_output_tokens": 512
+        });
+
+        assert_eq!(
+            codex_service_request_kind(&request),
+            CodexServiceRequestKind::None
+        );
+        assert_eq!(
+            request_shape_diagnostic(&request)["service_signals"]["explicit_service_kind"],
+            "thread_title"
+        );
+        assert_eq!(
+            request_shape_diagnostic(&request)["service_signals"]["explicit_service_kind_trusted"],
+            false
+        );
+        assert_eq!(
+            resolve_upstream_model(&config, &request, "gpt-5.4"),
+            MODEL_PRO
+        );
+    }
+
+    #[test]
+    fn codex_marker_trusts_explicit_service_feature() {
+        let config = AppConfig::default();
+        let request = json!({
+            "model": "gpt-5.4",
+            "feature": "thread_title",
+            "client_metadata": { "x-codex-installation-id": "codex-test" },
+            "input": "Generate a short conversation title.",
+            "max_output_tokens": 32
+        });
+
+        assert_eq!(
+            codex_service_request_kind(&request),
+            CodexServiceRequestKind::ThreadTitle
+        );
+        assert_eq!(
+            request_shape_diagnostic(&request)["service_classification_source"],
+            "explicit_codex_feature"
+        );
+        assert_eq!(
+            resolve_upstream_model(&config, &request, "gpt-5.4"),
+            MODEL_FLASH
+        );
+    }
+
+    #[test]
+    fn structured_service_shape_trusts_explicit_service_feature() {
+        let config = AppConfig::default();
+        let request = json!({
+            "model": "gpt-5.4",
+            "feature": "thread_title",
+            "input": "Generate a short conversation title.",
+            "store": false,
+            "max_output_tokens": 32,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "title",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" }
+                        },
+                        "required": ["title"],
+                        "additionalProperties": false
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            codex_service_request_kind(&request),
+            CodexServiceRequestKind::ThreadTitle
+        );
+        assert_eq!(
+            request_shape_diagnostic(&request)["service_classification_source"],
+            "explicit_service_shape"
+        );
+        assert_eq!(
+            resolve_upstream_model(&config, &request, "gpt-5.4"),
+            MODEL_FLASH
         );
     }
 
