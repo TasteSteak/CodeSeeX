@@ -16,7 +16,7 @@ struct EventsQuery {
 }
 
 pub(crate) fn router() -> Router<ProxyState> {
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/api/status", get(api_status))
         .route("/api/usage", get(api_usage))
@@ -28,7 +28,6 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/api/update-check", get(api_update_check))
         .route("/api/deepseek/balance", get(api_balance))
         .route("/api/events", get(api_events))
-        .route("/api/dev/seed-usage-template", post(seed_usage_template))
         .route("/api/start", post(api_start))
         .route("/api/restart", post(api_restart))
         .route("/api/stop", post(api_stop))
@@ -36,7 +35,10 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route(
             "/api/codex-adapter/generate",
             post(generate_adapter).get(generate_adapter),
-        )
+        );
+    #[cfg(any(debug_assertions, test))]
+    let router = router.route("/api/dev/seed-usage-template", post(seed_usage_template));
+    router
 }
 
 pub(crate) fn ensure_catalog(config: &AppConfig) -> anyhow::Result<()> {
@@ -141,6 +143,7 @@ async fn api_events(
     )
 }
 
+#[cfg(any(debug_assertions, test))]
 async fn seed_usage_template(State(state): State<ProxyState>) -> impl IntoResponse {
     manager_json_response(
         ManagerRuntime::from_proxy_state(&state)

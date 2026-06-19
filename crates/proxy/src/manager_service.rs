@@ -54,6 +54,7 @@ impl ManagerRuntime {
             ("GET", "/health") => ok(json!({ "ok": true, "service": "codeseex" })),
             ("GET", "/api/status") => ok(self.status().await),
             ("GET", "/api/usage") => ok(self.usage().await),
+            #[cfg(any(debug_assertions, test))]
             ("POST", "/api/dev/seed-usage-template") => self.seed_usage_template_preview().await,
             ("GET", "/api/config") => ok(self.config_payload()),
             ("POST", "/api/config") => {
@@ -158,6 +159,7 @@ impl ManagerRuntime {
         })
     }
 
+    #[cfg(any(debug_assertions, test))]
     pub async fn seed_usage_template_preview(&self) -> ManagerJsonResponse {
         if !usage_template_preview_enabled() {
             return status(
@@ -594,6 +596,7 @@ fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     }
 }
 
+#[cfg(any(debug_assertions, test))]
 fn usage_template_preview_enabled() -> bool {
     env::var("CODESEEX_USAGE_TEMPLATE_PREVIEW")
         .ok()
