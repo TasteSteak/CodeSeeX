@@ -25,6 +25,7 @@
 .about-action-button:disabled { opacity: 0.58; cursor: not-allowed; }
 .about-action-button:disabled:hover { background: var(--bg-panel); }
 .about-product-action { width: 100%; margin-top: auto; }
+.about-product-action:disabled { opacity: 1; }
 .about-footer-note { margin: -4px 2px 0; color: var(--text-muted); font-size: 11px; line-height: 1.55; white-space: pre-line; transition: var(--theme-transition); }
 .about-status { min-height: 38px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg-app); color: var(--text-secondary); font-size: 13px; line-height: 1.4; border: 1px solid var(--border-color); transition: var(--theme-transition); }
 .about-status.warning { background: var(--danger-bg); color: var(--danger); border-color: rgba(239, 68, 68, 0.3); }

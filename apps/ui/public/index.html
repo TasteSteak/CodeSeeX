@@ -199,11 +199,11 @@
             </div>
             <div class="usage-grid-spec usage-list-header">
               <div data-i18n="usageTriggerAndSummary">Summary / time</div>
-              <div class="text-right" data-i18n="elapsed">Elapsed</div>
-              <div class="text-right" data-i18n="usageInputTotal">Input total</div>
-              <div class="text-right" data-i18n="usageOutputTotal">Output total</div>
-              <div class="text-right" data-i18n="usageCacheHitRateShort">Cache hit rate</div>
-              <div class="text-right" data-i18n="cost">Cost</div>
+              <div class="usage-text-right" data-i18n="elapsed">Elapsed</div>
+              <div class="usage-text-right" data-i18n="usageInputTotal">Input total</div>
+              <div class="usage-text-right" data-i18n="usageOutputTotal">Output total</div>
+              <div class="usage-text-right" data-i18n="usageCacheHitRateShort">Cache hit rate</div>
+              <div class="usage-text-right" data-i18n="cost">Cost</div>
             </div>
             <div class="panel-body usage-record-wrap">
               <div class="usage-record-list selectable" id="usageRows"></div>
@@ -487,7 +487,7 @@
                   <p class="about-product-description" id="appDescription" data-i18n="aboutProductDescription">Local Codex bridge with a desktop manager, proxy, catalog, and tool controls.</p>
                   <span class="about-version-chip tabular-nums" id="appVersion">v-</span>
                 </div>
-                <button class="about-action-button about-product-action" type="button" disabled>
+                <button class="about-action-button about-product-action" type="button" disabled aria-disabled="true">
                   <span class="btn-icon btn-icon-link" aria-hidden="true"></span>
                   <span data-i18n="officialWebsite">Official website</span>
                 </button>

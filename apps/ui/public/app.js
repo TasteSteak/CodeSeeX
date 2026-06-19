@@ -1840,6 +1840,7 @@ function renderUsage(runtime) {
   els.usageCacheHitRate.className = ["usage-metric-value", "selectable", usageCacheToneClass(totalCached, totalMiss)].filter(Boolean).join(" ");
   els.usageAverageMs.textContent = formatDuration(avgMs);
   els.usageTotalCost.textContent = formatCost(totalCostVal);
+  els.usageTotalCost.classList.add("usage-cost-value");
   renderUsageRows(sessions);
   noteSlow("renderUsage", performance.now() - started);
 }
@@ -1985,7 +1986,7 @@ function usageTitleCell(title, subtitle) {
 
 function usageValueCell(value, tone) {
   const span = document.createElement("div");
-  span.className = ["usage-cell-value", "text-right", tone || ""].filter(Boolean).join(" ");
+  span.className = ["usage-cell-value", "usage-text-right", tone || ""].filter(Boolean).join(" ");
   span.textContent = value || "-";
   span.title = span.textContent;
   return span;
@@ -2080,7 +2081,7 @@ function usageSegmentDisplay(segment) {
 
 function usageTraceInputCell(total, hit) {
   const cell = document.createElement("div");
-  cell.className = "trace-cell trace-input-cell text-right";
+  cell.className = "trace-cell trace-input-cell usage-text-right";
   cell.append(
     usageTraceInputLine("total", total),
     usageTraceInputLine("hit", hit),
@@ -2104,7 +2105,7 @@ function usageTraceInputLine(kind, value) {
 
 function usageTraceCell(value, numeric, innerClass) {
   const cell = document.createElement("div");
-  cell.className = ["trace-cell", numeric ? "text-right" : ""].filter(Boolean).join(" ");
+  cell.className = ["trace-cell", numeric ? "usage-text-right" : ""].filter(Boolean).join(" ");
   const text = value || "-";
   if (text === "-" || innerClass) {
     const inner = document.createElement("span");
