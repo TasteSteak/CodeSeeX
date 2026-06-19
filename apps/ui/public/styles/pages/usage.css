@@ -370,7 +370,6 @@
 }
 
 .trace-stage {
-  position: relative;
   display: inline-flex;
   align-items: center;
   padding: 4px 6px;
@@ -385,6 +384,11 @@
   white-space: nowrap;
 }
 
+.trace-stage:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.42);
+  outline-offset: 2px;
+}
+
 :root[data-theme="dark"] .trace-stage {
   background: var(--ctrl-bg);
 }
@@ -393,67 +397,6 @@
   :root[data-theme="system"] .trace-stage {
     background: var(--ctrl-bg);
   }
-}
-
-.trace-stage::after {
-  position: absolute;
-  top: 0;
-  left: calc(100% + 10px);
-  z-index: 999;
-  width: max-content;
-  max-width: 380px;
-  padding: 12px 15px;
-  border: 1px solid #1f2937;
-  border-radius: 8px;
-  background: #03050a;
-  box-shadow:
-    0 16px 34px rgba(0, 0, 0, 0.32),
-    0 6px 14px rgba(0, 0, 0, 0.2);
-  color: #f8fafc;
-  content: attr(data-tip);
-  font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  font-size: 12.5px;
-  font-weight: 350;
-  font-variation-settings: "wght" 350;
-  letter-spacing: 0.01em;
-  line-height: 1.72;
-  opacity: 0;
-  pointer-events: none;
-  text-align: left;
-  transform: translate(6px, 0) scale(0.98);
-  transition:
-    opacity 0.15s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
-  white-space: pre-line;
-}
-
-.trace-stage::before {
-  position: absolute;
-  top: 7px;
-  left: calc(100% + 5px);
-  z-index: 1000;
-  width: 8px;
-  height: 8px;
-  border-left: 1px solid #1f2937;
-  border-bottom: 1px solid #1f2937;
-  background: #03050a;
-  content: "";
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(6px, 0) rotate(45deg) scale(0.98);
-  transition:
-    opacity 0.15s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.trace-stage:hover::before,
-.trace-stage:hover::after {
-  opacity: 1;
-  transform: translate(0, 0) scale(1);
-}
-
-.trace-stage:hover::before {
-  transform: translate(0, 0) rotate(45deg) scale(1);
 }
 
 .trace-stage.reply {
@@ -478,6 +421,34 @@
 
 .trace-stage.failed {
   color: var(--danger);
+}
+
+.usage-trace-tooltip {
+  position: fixed;
+  z-index: 9500;
+  width: max-content;
+  max-width: min(380px, calc(100vw - 24px));
+  padding: 12px 15px;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  background: #03050a;
+  box-shadow:
+    0 16px 34px rgba(0, 0, 0, 0.32),
+    0 6px 14px rgba(0, 0, 0, 0.2);
+  color: #f8fafc;
+  font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  font-size: 12.5px;
+  font-weight: 350;
+  font-variation-settings: "wght" 350;
+  letter-spacing: 0.01em;
+  line-height: 1.72;
+  pointer-events: none;
+  text-align: left;
+  white-space: pre-line;
+}
+
+.usage-trace-tooltip[hidden] {
+  display: none;
 }
 
 .split-tag-pill {

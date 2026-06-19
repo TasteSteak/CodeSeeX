@@ -161,6 +161,7 @@ let ccsKeyResolve = null;
 let uiLanguage = FALLBACK_LANGUAGE;
 let contextMenuEl = null;
 let contextMenuTarget = null;
+let usageTraceTooltipEl = null;
 let apiBaseUrl = null;
 
 init();
@@ -254,7 +255,11 @@ function bind() {
   if (els.logStream) els.logStream.addEventListener("scroll", handleLogScroll);
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("click", hideContextMenu);
-  document.addEventListener("scroll", hideContextMenu, true);
+  document.addEventListener("scroll", () => {
+    hideContextMenu();
+    hideUsageTraceTooltip();
+  }, true);
+  window.addEventListener("resize", hideUsageTraceTooltip);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && els.ccsKeyModal && !els.ccsKeyModal.hidden) closeCcsKeyModal("");
     if (event.key === "Escape" && els.troubleshootModal && !els.troubleshootModal.hidden) closeTroubleshootModal();
@@ -2040,6 +2045,8 @@ function usageSegmentRow(segment) {
   stage.className = ["trace-stage", usageStageClass(segment)].filter(Boolean).join(" ");
   stage.textContent = usageStageLabel(segment);
   stage.dataset.tip = usageSegmentTip(segment);
+  stage.tabIndex = 0;
+  bindUsageTraceTooltip(stage);
   combined.append(time, stage, usageSplitTag(display.tagCore, display.tagTelemetry));
 
   row.append(
@@ -2197,6 +2204,48 @@ function usageSegmentTip(segment) {
 function usageTipLine(label, value) {
   const text = String(value || "").trim();
   return text ? label + ": " + text : "";
+}
+
+function bindUsageTraceTooltip(target) {
+  target.addEventListener("mouseenter", () => showUsageTraceTooltip(target));
+  target.addEventListener("focus", () => showUsageTraceTooltip(target));
+  target.addEventListener("mouseleave", hideUsageTraceTooltip);
+  target.addEventListener("blur", hideUsageTraceTooltip);
+}
+
+function ensureUsageTraceTooltip() {
+  if (usageTraceTooltipEl) return usageTraceTooltipEl;
+  const tooltip = document.createElement("div");
+  tooltip.className = "usage-trace-tooltip";
+  tooltip.hidden = true;
+  document.body.appendChild(tooltip);
+  usageTraceTooltipEl = tooltip;
+  return tooltip;
+}
+
+function showUsageTraceTooltip(target) {
+  const text = target && target.dataset ? String(target.dataset.tip || "").trim() : "";
+  if (!text) return;
+  const tooltip = ensureUsageTraceTooltip();
+  tooltip.textContent = text;
+  tooltip.hidden = false;
+  const targetRect = target.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const gap = 10;
+  const margin = 12;
+  let left = targetRect.right + gap;
+  let top = targetRect.top;
+  if (left + tooltipRect.width + margin > window.innerWidth) {
+    left = Math.max(margin, targetRect.left - tooltipRect.width - gap);
+  }
+  top = Math.min(Math.max(margin, top), window.innerHeight - tooltipRect.height - margin);
+  tooltip.style.left = left + "px";
+  tooltip.style.top = top + "px";
+}
+
+function hideUsageTraceTooltip() {
+  if (!usageTraceTooltipEl) return;
+  usageTraceTooltipEl.hidden = true;
 }
 
 function usageRelativeDateTime(value) {
