@@ -203,14 +203,55 @@ async fn serve_with_shutdown_exits_after_listening() {
 async fn spawn_test_app(config: AppConfig) -> (PathBuf, SocketAddr) {
     let data_dir = config.data_dir.clone();
     let store = Store::open(&config.data_dir).await.unwrap();
-    let state = ProxyState::for_test(config, store);
+    let state = ProxyState::for_test(config.clone(), store);
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = app_router(state);
+    let app = app_router(state, &config);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     (data_dir, addr)
+}
+
+#[tokio::test]
+async fn manager_api_rejects_when_configured_listener_host_is_not_loopback() {
+    let mut config = test_config(temp_workspace("manager-non-loopback-bind"));
+    config.host = "0.0.0.0".to_owned();
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/api/status"))
+        .header(header::HOST, "localhost")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn v1_routes_still_work_when_configured_listener_host_is_not_loopback() {
+    let mut config = test_config(temp_workspace("v1-non-loopback-bind"));
+    config.host = "0.0.0.0".to_owned();
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/models"))
+        .header(header::ORIGIN, "https://example-client.test")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
 }
 
 #[tokio::test]

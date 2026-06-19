@@ -153,7 +153,7 @@ where
 
     ensure_catalog(&effective_config)?;
 
-    let app = app_router(state.clone());
+    let app = app_router(state.clone(), &effective_config);
 
     let listener =
         match TcpListener::bind((effective_config.host.as_str(), effective_config.port)).await {
@@ -304,9 +304,12 @@ fn warm_search_sources_for_probe(
     Box::pin(crate::tools::web::warm_search_sources(proxy_mode))
 }
 
-fn app_router(state: ProxyState) -> Router {
+fn app_router(state: ProxyState, config: &AppConfig) -> Router {
+    let manager_access = ManagerAccessPolicy {
+        listener_host_is_local: authority_host_is_local(&config.host),
+    };
     let manager_router = crate::manager_api::router()
-        .route_layer(middleware::from_fn(manager_local_request_guard));
+        .route_layer(middleware::from_fn_with_state(manager_access, manager_local_request_guard));
     let v1_router = Router::new()
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -328,10 +331,11 @@ fn app_router(state: ProxyState) -> Router {
 }
 
 async fn manager_local_request_guard(
+    State(policy): State<ManagerAccessPolicy>,
     request: Request,
     next: Next,
 ) -> axum::response::Response {
-    if manager_request_is_local(request.headers()) {
+    if manager_request_is_local(policy, request.headers()) {
         return next.run(request).await;
     }
     (
@@ -346,7 +350,15 @@ async fn manager_local_request_guard(
         .into_response()
 }
 
-fn manager_request_is_local(headers: &HeaderMap) -> bool {
+#[derive(Debug, Clone, Copy)]
+struct ManagerAccessPolicy {
+    listener_host_is_local: bool,
+}
+
+fn manager_request_is_local(policy: ManagerAccessPolicy, headers: &HeaderMap) -> bool {
+    if !policy.listener_host_is_local {
+        return false;
+    }
     let host_is_local = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
