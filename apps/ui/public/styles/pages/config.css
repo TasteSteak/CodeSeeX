@@ -23,3 +23,6 @@
 .tab-icon-tools { -webkit-mask: url("/assets/icons/tools.svg") center / contain no-repeat; mask: url("/assets/icons/tools.svg") center / contain no-repeat; }
 .config-tab-panel { display: none; }
 .config-tab-panel.active { display: block; }
+
+.config-language-select { width: 180px; }
+.config-port-input { width: 120px; }

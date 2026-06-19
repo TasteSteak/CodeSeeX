@@ -2555,6 +2555,7 @@ function setView(viewName) {
 function handleAboutAction(action) {
   if (!appInfo) return setAboutStatus(t("appInfoLoading"), true);
   const urls = appInfo.urls || {};
+  if (action === "website") return openOrExplain(urls.website || urls.official, t("websiteUnavailable"));
   if (action === "feedback") return openOrExplain(urls.feedback, t("feedbackUnavailable"));
   if (action === "source") return openOrExplain(urls.source, t("sourceUnavailable"));
   if (action === "license") return openOrExplain(urls.license, t("licenseUnavailable"));

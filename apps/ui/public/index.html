@@ -56,7 +56,7 @@
       </nav>
 
       <div class="sidebar-footer" data-i18n="sidebarFooter">
-        Powered by TasteSteak / 牛排吖 <br> LICENSE AGPL-3.0-only
+        Powered by TasteSteak<br>LICENSE AGPL-3.0-only
       </div>
     </aside>
 
@@ -260,7 +260,7 @@
 
                 <div class="setting-item">
                   <label for="UI_LANGUAGE" data-i18n="language">Language</label>
-                  <select id="UI_LANGUAGE" class="inline-control" style="width: 180px;"></select>
+                  <select id="UI_LANGUAGE" class="inline-control config-language-select"></select>
                 </div>
                 <div class="setting-divider"></div>
 
@@ -341,7 +341,7 @@
                     <label for="PROXY_PORT" data-i18n="proxyListenPort">CodeSeeX listen port</label>
                     <small class="muted" data-i18n="proxyListenPortHint">Used by the local Codex API endpoint. Restart the proxy after changing it.</small>
                   </span>
-                  <input type="number" id="PROXY_PORT" class="inline-control" min="1" max="65535" step="1" style="width: 120px;">
+                  <input type="number" id="PROXY_PORT" class="inline-control config-port-input" min="1" max="65535" step="1">
                 </div>
                 <div class="setting-divider"></div>
 
@@ -487,7 +487,7 @@
                   <p class="about-product-description" id="appDescription" data-i18n="aboutProductDescription">Local Codex bridge with a desktop manager, proxy, catalog, and tool controls.</p>
                   <span class="about-version-chip tabular-nums" id="appVersion">v-</span>
                 </div>
-                <button class="about-action-button about-product-action" type="button" disabled aria-disabled="true">
+                <button class="about-action-button about-product-action" type="button" data-about-action="website">
                   <span class="btn-icon btn-icon-link" aria-hidden="true"></span>
                   <span data-i18n="officialWebsite">Official website</span>
                 </button>
@@ -549,8 +549,7 @@
                 </section>
 
                 <p class="about-status" id="aboutStatus" data-i18n="ready">Ready.</p>
-                <p class="about-footer-note" data-i18n="aboutFooterNote">通过本地桌面管理器连接 Codex 与已配置的模型服务
-请使用合规的 API 凭证与端点，并遵守相关服务提供方的使用条款</p>
+                <p class="about-footer-note" data-i18n="aboutFooterNote">Connect Codex to the configured model service through the local desktop manager. Use valid API credentials and follow the provider terms.</p>
 
                 <div class="about-hidden-meta" hidden>
                   <span id="appName">-</span>
