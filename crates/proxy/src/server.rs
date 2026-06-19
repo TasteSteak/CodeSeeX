@@ -235,8 +235,20 @@ fn spawn_web_search_source_probe_subscriber(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let Ok(mut change) = changes.recv().await else {
-                break;
+            let mut change = match changes.recv().await {
+                Ok(change) => change,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let _ = store
+                        .record_event(
+                            "warn",
+                            "web_search_source_probe_lagged",
+                            "CodeSeeX web_search source probe skipped stale config events.",
+                            Some(&json!({ "skipped": skipped })),
+                        )
+                        .await;
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
             if !change.has_kind(RuntimeConfigChangeKind::NetworkProxy) {
                 continue;
@@ -247,8 +259,20 @@ fn spawn_web_search_source_probe_subscriber(
                 tokio::select! {
                     _ = &mut sleep => break,
                     received = changes.recv() => {
-                        let Ok(next) = received else {
-                            break;
+                        let next = match received {
+                            Ok(next) => next,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                let _ = store
+                                    .record_event(
+                                        "warn",
+                                        "web_search_source_probe_lagged",
+                                        "CodeSeeX web_search source probe skipped stale config events.",
+                                        Some(&json!({ "skipped": skipped })),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                         };
                         if next.has_kind(RuntimeConfigChangeKind::NetworkProxy) {
                             change = next;
@@ -359,6 +383,9 @@ fn manager_request_is_local(policy: ManagerAccessPolicy, headers: &HeaderMap) ->
     if !policy.listener_host_is_local {
         return false;
     }
+    if fetch_metadata_is_cross_site(headers) {
+        return false;
+    }
     let host_is_local = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -370,6 +397,13 @@ fn manager_request_is_local(policy: ManagerAccessPolicy, headers: &HeaderMap) ->
         .map(origin_host_is_local)
         .unwrap_or(true);
     host_is_local && origin_is_local
+}
+
+fn fetch_metadata_is_cross_site(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
 }
 
 fn origin_host_is_local(origin: &str) -> bool {

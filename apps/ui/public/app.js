@@ -2235,7 +2235,8 @@ function showUsageTraceTooltip(target) {
   if (left + tooltipRect.width + margin > window.innerWidth) {
     left = Math.max(margin, targetRect.left - tooltipRect.width - gap);
   }
-  top = Math.min(Math.max(margin, top), window.innerHeight - tooltipRect.height - margin);
+  const maxTop = Math.max(margin, window.innerHeight - tooltipRect.height - margin);
+  top = Math.min(Math.max(margin, top), maxTop);
   tooltip.style.left = left + "px";
   tooltip.style.top = top + "px";
 }

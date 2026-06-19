@@ -48,7 +48,7 @@
 .usage-detail-panel {
   display: flex;
   flex-direction: column;
-  overflow: visible;
+  overflow: hidden;
   margin-bottom: 20px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -81,7 +81,8 @@
 
 .usage-record-wrap {
   max-height: none;
-  overflow: visible;
+  overflow-x: auto;
+  overflow-y: visible;
   padding: 0;
 }
 
@@ -93,6 +94,7 @@
 }
 
 .usage-list-header {
+  min-width: 640px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--border-color);
   background: var(--ctrl-bg);
@@ -118,6 +120,7 @@
 .usage-record-list {
   display: flex;
   flex-direction: column;
+  min-width: 640px;
   overflow: visible;
   background: var(--bg-panel);
 }
@@ -423,6 +426,8 @@
   z-index: 9500;
   width: max-content;
   max-width: min(380px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: auto;
   padding: 12px 15px;
   border: 1px solid #1f2937;
   border-radius: 8px;
@@ -512,8 +517,19 @@
 }
 
 @media (max-width: 1120px) {
+  .usage-summary-grid {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+
   .usage-grid-spec {
-    grid-template-columns: minmax(280px, 1fr) 62px 78px 70px 80px 94px;
+    grid-template-columns: minmax(260px, 1fr) 62px 78px 70px 80px 94px;
     column-gap: 7px;
+  }
+}
+
+@media (max-width: 760px) {
+  .usage-summary-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
   }
 }

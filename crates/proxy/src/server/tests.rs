@@ -305,6 +305,24 @@ async fn manager_api_rejects_non_local_host() {
 }
 
 #[tokio::test]
+async fn manager_api_rejects_cross_site_fetch_metadata_without_origin() {
+    let config = test_config(temp_workspace("manager-fetch-site-rejects"));
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/restart"))
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response.json::<Value>().await.unwrap();
+    assert_eq!(body["error"]["code"], "manager_api_forbidden");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
 async fn tool_assets_reject_non_local_origin() {
     let config = test_config(temp_workspace("manager-tool-assets-origin"));
     let (data_dir, addr) = spawn_test_app(config).await;
@@ -510,6 +528,54 @@ async fn web_search_source_probe_runs_after_network_proxy_change() {
             .and_then(Value::as_str),
         Some("manager_save")
     );
+    handle.abort();
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn web_search_source_probe_survives_lagged_config_events() {
+    let data_dir = temp_workspace("search-probe-lagged-events");
+    let config = test_config(data_dir.clone());
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let runtime_config = crate::runtime_config::RuntimeConfigService::new(config.clone());
+    let changes = runtime_config.subscribe();
+    for _ in 0..80 {
+        runtime_config.emit_proxy_startup();
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_warm = calls.clone();
+    let handle = spawn_web_search_source_probe_subscriber(
+        runtime_config.clone(),
+        changes,
+        store.clone(),
+        std::time::Duration::from_millis(20),
+        Arc::new(move |_proxy_mode| {
+            let calls = calls_for_warm.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                json!({
+                    "stage": "search_source_probe",
+                    "source_order": ["bing_html"],
+                    "source_health": []
+                })
+            })
+        }),
+    );
+
+    runtime_config.emit_proxy_startup();
+
+    tokio::time::sleep(std::time::Duration::from_millis(160)).await;
+    assert!(
+        calls.load(AtomicOrdering::SeqCst) >= 1,
+        "lagged receiver should continue handling later probe events"
+    );
+    let (events, _) = store.recent_events(20, None).await.unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "web_search_source_probe_lagged"));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "web_search_source_probe"));
     handle.abort();
     let _ = std::fs::remove_dir_all(data_dir);
 }
