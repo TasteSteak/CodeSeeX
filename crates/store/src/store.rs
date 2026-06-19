@@ -24,6 +24,7 @@ const MAX_USAGE_SESSION_TITLE_CHARS: usize = 80;
 const MAX_USAGE_SEGMENT_SUMMARY_CHARS: usize = 180;
 const IN_PROGRESS_TTL_SECONDS: i64 = 6 * 60 * 60;
 const LOG_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
+#[cfg(any(debug_assertions, test))]
 const USAGE_TEMPLATE_SEED_PREFIX: &str = "codeseex_usage_template_";
 
 static STORE_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<StoreInner>>>>> = OnceLock::new();
@@ -320,6 +321,11 @@ impl Store {
     }
 
     pub async fn seed_usage_template_preview(&self) -> Result<usize> {
+        #[cfg(not(any(debug_assertions, test)))]
+        {
+            bail!("usage template preview seed is only available in debug builds");
+        }
+        #[cfg(any(debug_assertions, test))]
         seed_usage_template_preview_inner(self)
     }
 
@@ -647,6 +653,7 @@ fn shared_runtime_inner(data_dir: &Path) -> Result<Arc<Mutex<StoreInner>>> {
     Ok(inner)
 }
 
+#[cfg(any(debug_assertions, test))]
 fn seed_usage_template_preview_inner(store: &Store) -> Result<usize> {
     let now = Utc::now();
     let mut inner = store.lock_inner()?;
@@ -804,6 +811,7 @@ fn seed_usage_template_preview_inner(store: &Store) -> Result<usize> {
     Ok(inserted)
 }
 
+#[cfg(any(debug_assertions, test))]
 fn remove_usage_template_preview_inner(inner: &mut StoreInner) {
     inner
         .requests
@@ -820,6 +828,7 @@ fn remove_usage_template_preview_inner(inner: &mut StoreInner) {
 }
 
 #[derive(Debug)]
+#[cfg(any(debug_assertions, test))]
 struct SeedRequest {
     id: &'static str,
     previous: Option<&'static str>,
@@ -836,6 +845,7 @@ struct SeedRequest {
 }
 
 #[derive(Debug)]
+#[cfg(any(debug_assertions, test))]
 enum SeedEvent {
     Upstream {
         phase: &'static str,
@@ -851,6 +861,7 @@ enum SeedEvent {
     },
 }
 
+#[cfg(any(debug_assertions, test))]
 impl SeedEvent {
     fn upstream(phase: &'static str, iteration: u32, cached: u64, miss: u64, output: u64) -> Self {
         Self::Upstream {
@@ -871,6 +882,7 @@ impl SeedEvent {
     }
 }
 
+#[cfg(any(debug_assertions, test))]
 fn insert_seed_request(inner: &mut StoreInner, seed: SeedRequest, base: DateTime<Utc>) {
     let created_at = base + Duration::milliseconds(seed.created_offset_ms);
     let updated_at = created_at + Duration::milliseconds(seed.duration_ms.max(0));
@@ -964,6 +976,7 @@ fn insert_seed_request(inner: &mut StoreInner, seed: SeedRequest, base: DateTime
     prune_runtime_requests(inner);
 }
 
+#[cfg(any(debug_assertions, test))]
 fn push_seed_event(inner: &mut StoreInner, ts: DateTime<Utc>, event_type: &str, detail: Value) {
     inner.next_event_id = inner.next_event_id.saturating_add(1);
     inner.events.push_back(EventRecord {
