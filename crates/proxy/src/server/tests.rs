@@ -1268,6 +1268,93 @@ async fn fake_apply_patch_chat_completions(
     .into_response()
 }
 
+async fn fake_apply_patch_recovery_chat_completions(
+    State(state): State<FakeUpstreamState>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let tool_outputs = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .filter_map(|message| {
+                    (message.get("role").and_then(Value::as_str) == Some("tool")
+                        && message.get("tool_call_id").and_then(Value::as_str)
+                            == Some("call_patch"))
+                    .then(|| {
+                        message
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    {
+        let mut requests = state.requests.lock().expect("fake upstream lock poisoned");
+        requests.push(payload);
+    }
+    let body = if tool_outputs
+        .iter()
+        .any(|output| output.contains("Success."))
+    {
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "patch recovered"
+                }
+            }],
+            "usage": { "prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12 }
+        })
+    } else if tool_outputs
+        .iter()
+        .any(|output| output.contains("apply_patch verification failed"))
+    {
+        json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: target/codeseex-apply-patch-recovery-test/hello.txt\\n+fixed\\n*** End Patch\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": { "prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12 }
+        })
+    } else {
+        json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File\\n+broken\\n*** End Patch\"}"
+                        }
+                    }]
+                }
+            }],
+            "usage": { "prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10 }
+        })
+    };
+    Json(body).into_response()
+}
+
 async fn fake_tool_search_bridge_streaming_chat_completions(
     State(state): State<FakeUpstreamState>,
     Json(payload): Json<Value>,
@@ -6306,6 +6393,155 @@ async fn nonstreaming_client_tool_handoff_is_not_user_completed_turn() {
 
     let _ = std::fs::remove_file(&patch_file);
     let _ = std::fs::remove_dir_all(patch_dir);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn apply_patch_client_handoff_failure_can_be_replayed_and_corrected() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(fake_apply_patch_recovery_chat_completions),
+        )
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("apply-patch-client-recovery");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_apply_patch_recovery_first",
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "apply-patch-recovery-thread",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "patch a file" }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(first.status().is_success());
+    let first_body = first.json::<Value>().await.unwrap();
+    let first_call = first_body["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("custom_tool_call"))
+        .expect("first apply_patch handoff")
+        .clone();
+    assert_eq!(first_call["name"], "apply_patch");
+
+    let second = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_apply_patch_recovery_second",
+            "previous_response_id": "resp_apply_patch_recovery_first",
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "apply-patch-recovery-thread",
+            "input": [
+                first_call,
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "output": "apply_patch verification failed: invalid patch"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(second.status().is_success());
+    let second_body = second.json::<Value>().await.unwrap();
+    let second_call = second_body["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("custom_tool_call"))
+        .expect("corrected apply_patch handoff")
+        .clone();
+    assert_eq!(second_call["name"], "apply_patch");
+    assert!(second_call["input"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("+fixed"));
+    assert_eq!(
+        second_body.pointer("/incomplete_details/reason"),
+        None,
+        "guard must not stop a corrected second attempt"
+    );
+
+    let third = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_apply_patch_recovery_third",
+            "previous_response_id": "resp_apply_patch_recovery_second",
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "apply-patch-recovery-thread",
+            "input": [
+                second_call,
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "output": "Success. Updated the following files: A target/codeseex-apply-patch-recovery-test/hello.txt"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(third.status().is_success());
+    let third_body = third.json::<Value>().await.unwrap();
+    assert_eq!(third_body["status"], "completed");
+    assert!(
+        serde_json::to_string(&third_body)
+            .unwrap()
+            .contains("patch recovered"),
+        "{third_body}"
+    );
+
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 3);
+    let second_messages = serde_json::to_string(&requests[1]["messages"]).unwrap();
+    assert!(second_messages.contains("\"tool_call_id\":\"call_patch\""));
+    assert!(second_messages.contains("apply_patch verification failed"));
+    assert!(second_messages.contains("\\\"patch\\\""));
+    let third_messages = serde_json::to_string(&requests[2]["messages"]).unwrap();
+    assert!(third_messages.contains("Success. Updated the following files"));
+    assert!(third_messages.contains("+fixed"));
+
+    let summary = store.runtime_summary(10).await.expect("runtime summary");
+    assert_eq!(summary.request_count, 1);
+    assert_eq!(summary.billable_request_count, 3);
+    assert_eq!(summary.turn_history.len(), 1);
+    assert_eq!(summary.billable_history[0].lifecycle, "client_tool_handoff");
+    assert_eq!(summary.billable_history[1].lifecycle, "client_tool_handoff");
+    assert_eq!(summary.billable_history[2].lifecycle, "final_turn");
+    assert!(summary.billable_history[2].conversation_turn);
+
     let _ = std::fs::remove_dir_all(data_dir);
 }
 

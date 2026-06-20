@@ -1838,6 +1838,9 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                     (
                         "web_search",
                         &[
+                            "source_plan",
+                            "source_order",
+                            "source_health",
                             "sources_attempted",
                             "sources_deprioritized",
                             "source_diagnostics",
@@ -5320,6 +5323,17 @@ mod tests {
                     "ok": false,
                     "summary": "web_search search ok=false candidates=0",
                     "web_search": {
+                        "source_plan": "on_demand_probe",
+                        "source_order": ["bing_html", "duckduckgo_lite"],
+                        "source_health": [{
+                            "source": "bing_html",
+                            "reachable": true,
+                            "latency_ms": 120,
+                            "status": 200,
+                            "error": null,
+                            "age_ms": 18,
+                            "message": "do not keep source health prose"
+                        }],
                         "sources_attempted": ["bing_html"],
                         "source_diagnostics": [{
                             "source": "bing_html",
@@ -5341,6 +5355,16 @@ mod tests {
 
         let (events, _) = store.recent_events(10, None).await.expect("events");
         let detail = events[0].detail.as_ref().expect("detail");
+        assert_eq!(detail["web_search"]["source_plan"], "on_demand_probe");
+        assert_eq!(detail["web_search"]["source_order"][0], "bing_html");
+        assert_eq!(
+            detail["web_search"]["source_health"][0]["source"],
+            "bing_html"
+        );
+        assert_eq!(detail["web_search"]["source_health"][0]["reachable"], true);
+        assert!(detail["web_search"]["source_health"][0]
+            .get("message")
+            .is_none());
         assert_eq!(detail["web_search"]["sources_attempted"][0], "bing_html");
         assert_eq!(
             detail["web_search"]["source_diagnostics"][0]["error"],

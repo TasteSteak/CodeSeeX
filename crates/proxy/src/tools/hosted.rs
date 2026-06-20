@@ -108,8 +108,11 @@ pub(crate) fn tool_result_event_detail(
             object.insert(
                 "web_search".to_owned(),
                 json!({
+                    "source_plan": result.get("source_plan").cloned().unwrap_or(Value::Null),
+                    "source_order": result.get("source_order").cloned().unwrap_or(Value::Null),
                     "sources_attempted": result.get("sources_attempted").cloned().unwrap_or(Value::Null),
                     "sources_deprioritized": result.get("sources_deprioritized").cloned().unwrap_or(Value::Null),
+                    "source_health": compact_web_source_health_array(result.get("source_health")),
                     "source_diagnostics": compact_web_source_diagnostic_array(result.get("source_diagnostics")),
                     "fallback_errors": compact_web_source_diagnostic_array(result.get("fallback_errors"))
                 }),
@@ -152,8 +155,11 @@ fn compact_web_search_result_for_model(result: &Value) -> Value {
         "candidates": compact_web_result_array(result.get("candidates")),
         "opened_results": compact_web_result_array(result.get("opened_results")),
         "failed_results": compact_web_diagnostic_array(result.get("failed_results")),
+        "source_plan": result.get("source_plan").cloned().unwrap_or(Value::Null),
+        "source_order": result.get("source_order").cloned().unwrap_or(Value::Null),
         "sources_attempted": result.get("sources_attempted").cloned().unwrap_or(Value::Null),
         "sources_deprioritized": result.get("sources_deprioritized").cloned().unwrap_or(Value::Null),
+        "source_health": compact_web_source_health_array(result.get("source_health")),
         "source_diagnostics": compact_web_source_diagnostic_array(result.get("source_diagnostics")),
         "fallback_errors": compact_web_source_diagnostic_array(result.get("fallback_errors")),
         "error": result.get("error").cloned().unwrap_or(Value::Null),
@@ -163,6 +169,28 @@ fn compact_web_search_result_for_model(result: &Value) -> Value {
         "truncated": result.get("truncated").cloned().unwrap_or(Value::Null),
         "codeseex_compacted_for_model": true
     })
+}
+
+fn compact_web_source_health_array(value: Option<&Value>) -> Value {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        items
+            .iter()
+            .take(8)
+            .map(|item| {
+                json!({
+                    "source": item.get("source").cloned().unwrap_or(Value::Null),
+                    "reachable": item.get("reachable").cloned().unwrap_or(Value::Null),
+                    "latency_ms": item.get("latency_ms").cloned().unwrap_or(Value::Null),
+                    "status": item.get("status").cloned().unwrap_or(Value::Null),
+                    "error": item.get("error").cloned().unwrap_or(Value::Null),
+                    "age_ms": item.get("age_ms").cloned().unwrap_or(Value::Null)
+                })
+            })
+            .collect(),
+    )
 }
 
 fn compact_web_source_diagnostic_array(value: Option<&Value>) -> Value {

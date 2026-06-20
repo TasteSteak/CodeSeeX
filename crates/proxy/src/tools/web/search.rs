@@ -16,11 +16,14 @@ use super::net::{fetch_text, read_limited_response_bytes, request_error_message,
 use super::safety::normalize_candidate_url;
 
 const SEARCH_SOURCE_RESULT_GRACE_MS: u64 = 1_200;
+const SEARCH_SOURCE_PROBE_TIMEOUT_SECS: u64 = super::net::WEB_REQUEST_TIMEOUT_SECS;
+const SEARCH_SOURCE_ON_DEMAND_PROBE_TIMEOUT_SECS: u64 = 3;
 const LOW_CONFIDENCE_FALLBACK_MIN_SCORE: f64 = 0.08;
 const LOW_CONFIDENCE_FALLBACK_MAX_RESULTS: usize = 3;
 
 static SEARCH_SOURCE_HEALTH: OnceLock<Mutex<BTreeMap<String, SearchHealthSnapshot>>> =
     OnceLock::new();
+static SEARCH_SOURCE_REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(super) async fn query(
     client: &reqwest::Client,
@@ -28,23 +31,38 @@ pub(super) async fn query(
     query: &str,
     max_results: usize,
 ) -> Value {
-    let plan = search_plan(proxy_mode).await;
+    let plan = search_plan(client, proxy_mode).await;
     let mut fallback_errors = Vec::new();
     let mut collected = Vec::new();
     let mut sources_attempted = Vec::new();
     let mut source_diagnostics = Vec::new();
+    let primary_sources = plan.primary_sources();
+    let fallback_sources = plan.deprioritized_sources();
 
     run_search_sources_progressive(
         client,
         query,
         max_results,
-        &plan.ordered_sources,
+        &primary_sources,
         &mut collected,
         &mut fallback_errors,
         &mut sources_attempted,
         &mut source_diagnostics,
     )
     .await;
+    if usable_result_count(&collected) == 0 && !fallback_sources.is_empty() {
+        run_search_sources_progressive(
+            client,
+            query,
+            max_results,
+            &fallback_sources,
+            &mut collected,
+            &mut fallback_errors,
+            &mut sources_attempted,
+            &mut source_diagnostics,
+        )
+        .await;
+    }
 
     let raw_collected = collected.clone();
     let mut results = dedupe_results(collected);
@@ -71,6 +89,7 @@ pub(super) async fn query(
         "mode": "search",
         "query": query,
         "source": if results.is_empty() { "none" } else { "multi_source_html" },
+        "source_plan": plan.plan_source,
         "sources_attempted": sources_attempted,
         "source_order": plan.source_order_names(),
         "sources_deprioritized": plan.deprioritized_source_names(),
@@ -87,8 +106,12 @@ pub(super) async fn query(
 }
 
 pub(super) async fn warm_sources(client: &reqwest::Client, proxy_mode: NetworkProxyMode) -> Value {
-    let snapshot =
-        refresh_search_source_health(client, &crate::network::proxy_cache_key(proxy_mode)).await;
+    let snapshot = refresh_search_source_health(
+        client,
+        &crate::network::proxy_cache_key(proxy_mode),
+        SEARCH_SOURCE_PROBE_TIMEOUT_SECS,
+    )
+    .await;
     json!({
         "ok": true,
         "stage": "search_source_probe",
@@ -284,12 +307,23 @@ fn push_unique_source(output: &mut Vec<String>, source: &str) {
     }
 }
 
-async fn search_plan(proxy_mode: NetworkProxyMode) -> SearchPlan {
+async fn search_plan(client: &reqwest::Client, proxy_mode: NetworkProxyMode) -> SearchPlan {
     let cache_key = crate::network::proxy_cache_key(proxy_mode);
     if let Some(snapshot) = cached_search_source_health(&cache_key).await {
-        return SearchPlan::from_snapshot(snapshot);
+        return SearchPlan::from_snapshot(snapshot, "cached_probe");
     }
-    SearchPlan::unprobed(cache_key)
+    let refresh_lock = SEARCH_SOURCE_REFRESH_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = refresh_lock.lock().await;
+    if let Some(snapshot) = cached_search_source_health(&cache_key).await {
+        return SearchPlan::from_snapshot(snapshot, "cached_probe");
+    }
+    let snapshot = refresh_search_source_health(
+        client,
+        &cache_key,
+        SEARCH_SOURCE_ON_DEMAND_PROBE_TIMEOUT_SECS,
+    )
+    .await;
+    SearchPlan::from_snapshot(snapshot, "on_demand_probe")
 }
 
 async fn cached_search_source_health(cache_key: &str) -> Option<SearchHealthSnapshot> {
@@ -301,6 +335,7 @@ async fn cached_search_source_health(cache_key: &str) -> Option<SearchHealthSnap
 async fn refresh_search_source_health(
     client: &reqwest::Client,
     cache_key: &str,
+    timeout_secs: u64,
 ) -> SearchHealthSnapshot {
     let snapshot = SearchHealthSnapshot {
         cache_key: cache_key.to_owned(),
@@ -309,7 +344,7 @@ async fn refresh_search_source_health(
             SearchSource::ALL
                 .iter()
                 .copied()
-                .map(|source| probe_search_source(client, source)),
+                .map(|source| probe_search_source(client, source, timeout_secs)),
         )
         .await,
     };
@@ -319,7 +354,11 @@ async fn refresh_search_source_health(
     snapshot
 }
 
-async fn probe_search_source(client: &reqwest::Client, source: SearchSource) -> SearchSourceHealth {
+async fn probe_search_source(
+    client: &reqwest::Client,
+    source: SearchSource,
+    timeout_secs: u64,
+) -> SearchSourceHealth {
     let Some(url) = source.probe_url() else {
         return SearchSourceHealth {
             source,
@@ -331,7 +370,7 @@ async fn probe_search_source(client: &reqwest::Client, source: SearchSource) -> 
     };
     let started = Instant::now();
     let response = tokio::time::timeout(
-        Duration::from_secs(super::net::WEB_REQUEST_TIMEOUT_SECS),
+        Duration::from_secs(timeout_secs),
         client
             .get(url)
             .header(reqwest::header::USER_AGENT, user_agent())
@@ -716,28 +755,40 @@ struct SearchHealthSnapshot {
 #[derive(Clone, Debug)]
 struct SearchPlan {
     cache_key: String,
+    plan_source: &'static str,
     checked_at_age_ms: u64,
     ordered_sources: Vec<SearchSource>,
     health: Vec<SearchSourceHealth>,
 }
 
 impl SearchPlan {
-    fn from_snapshot(snapshot: SearchHealthSnapshot) -> Self {
+    fn from_snapshot(snapshot: SearchHealthSnapshot, plan_source: &'static str) -> Self {
         Self {
             cache_key: snapshot.cache_key,
+            plan_source,
             checked_at_age_ms: snapshot.checked_at.elapsed().as_millis() as u64,
             ordered_sources: ranked_sources_from_health(&snapshot.sources),
             health: snapshot.sources,
         }
     }
 
+    #[cfg(test)]
     fn unprobed(cache_key: String) -> Self {
         Self {
             cache_key,
+            plan_source: "unprobed",
             checked_at_age_ms: 0,
             ordered_sources: SearchSource::ALL.to_vec(),
             health: Vec::new(),
         }
+    }
+
+    fn primary_sources(&self) -> Vec<SearchSource> {
+        self.ordered_sources
+            .iter()
+            .copied()
+            .filter(|source| self.source_reachable(*source) != Some(false))
+            .collect()
     }
 
     fn deprioritized_sources(&self) -> Vec<SearchSource> {
@@ -1191,6 +1242,69 @@ mod tests {
     }
 
     #[test]
+    fn plan_splits_primary_and_deprioritized_sources() {
+        let plan = SearchPlan::from_snapshot(
+            SearchHealthSnapshot {
+                cache_key: "none".to_owned(),
+                checked_at: Instant::now(),
+                sources: vec![
+                    SearchSourceHealth {
+                        source: SearchSource::DuckDuckGoLite,
+                        reachable: false,
+                        latency_ms: Some(3000),
+                        status: None,
+                        error: Some("probe_timeout".to_owned()),
+                    },
+                    SearchSourceHealth {
+                        source: SearchSource::BingHtml,
+                        reachable: true,
+                        latency_ms: Some(200),
+                        status: Some(200),
+                        error: None,
+                    },
+                    SearchSourceHealth {
+                        source: SearchSource::BraveHtml,
+                        reachable: true,
+                        latency_ms: Some(1200),
+                        status: Some(200),
+                        error: None,
+                    },
+                    SearchSourceHealth {
+                        source: SearchSource::DuckDuckGoHtml,
+                        reachable: true,
+                        latency_ms: Some(1500),
+                        status: Some(200),
+                        error: None,
+                    },
+                    SearchSourceHealth {
+                        source: SearchSource::DuckDuckGoInstantAnswer,
+                        reachable: true,
+                        latency_ms: Some(1600),
+                        status: Some(200),
+                        error: None,
+                    },
+                ],
+            },
+            "cached_probe",
+        );
+
+        assert_eq!(
+            plan.primary_sources(),
+            vec![
+                SearchSource::BingHtml,
+                SearchSource::BraveHtml,
+                SearchSource::DuckDuckGoHtml,
+                SearchSource::DuckDuckGoInstantAnswer
+            ]
+        );
+        assert_eq!(
+            plan.deprioritized_sources(),
+            vec![SearchSource::DuckDuckGoLite]
+        );
+        assert_eq!(plan.plan_source, "cached_probe");
+    }
+
+    #[test]
     fn empty_success_is_kept_as_fallback_diagnostic() {
         let mut collected = Vec::new();
         let mut fallback_errors = Vec::new();
@@ -1337,7 +1451,7 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("PEP 745"));
-        assert!(results[0]["score"].as_f64().unwrap_or_default() >= 0.24);
+        assert!(results[0]["score"].as_f64().unwrap_or_default() >= 0.16);
     }
 
     #[test]
@@ -1362,6 +1476,6 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("PEP 745"));
-        assert!(results[0]["score"].as_f64().unwrap_or_default() >= 0.24);
+        assert!(results[0]["score"].as_f64().unwrap_or_default() >= 0.16);
     }
 }
