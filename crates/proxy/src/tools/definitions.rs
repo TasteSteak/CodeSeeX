@@ -66,13 +66,13 @@ fn codex_native_tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "apply_patch",
-                "description": "Apply one native Codex patch. The patch must be raw apply_patch text, not markdown or prose. It can add, update, delete, or move files.",
+                "description": "Apply one native Codex patch. The patch must be one complete raw apply_patch document, not markdown or prose. It must start with *** Begin Patch and end with *** End Patch. It can add, update, delete, or move files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "patch": {
                             "type": "string",
-                            "description": "Raw apply_patch text. Use one patch document with standalone grammar lines for patch structure and hunk-prefixed data lines for file content. Operation headers are *** Add File: path, *** Update File: path, and *** Delete File: path; Bare headers are invalid. For *** Add File: path, each file content line is encoded as + followed by content. Use @@ hunks for updates and omit content hunks for deletes. Standard unified hunk headers are accepted and normalized to native Codex @@ headers."
+                            "description": "One complete raw apply_patch document. The first line must be *** Begin Patch and the final line must be *** End Patch. Use standalone grammar lines for patch structure and hunk-prefixed data lines for file content. Operation headers are *** Add File: path, *** Update File: path, and *** Delete File: path; bare headers are invalid. For *** Add File: path, each file content line is encoded as + followed by content. Use @@ hunks for updates and omit content hunks for deletes. Standard unified hunk headers are accepted and normalized to native Codex @@ headers."
                         }
                     },
                     "required": ["patch"],

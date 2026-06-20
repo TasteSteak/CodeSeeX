@@ -120,6 +120,7 @@ async fn response_history_context(
             record.status,
             &next_tool_output_ids,
             current_tool_call_ids,
+            &previous_tool_call_ids,
         );
         if stored_turn_replay.messages.is_empty()
             && !stored_input_is_codex_full_context(&record.input)
@@ -667,6 +668,7 @@ fn stored_turn_messages_for_replay(
     status: RequestStatus,
     next_tool_output_ids: &HashSet<String>,
     current_tool_call_ids: &HashSet<String>,
+    previous_tool_call_ids: &HashSet<String>,
 ) -> StoredTurnReplay {
     let parsed = messages
         .iter()
@@ -677,6 +679,7 @@ fn stored_turn_messages_for_replay(
             parsed,
             next_tool_output_ids,
             current_tool_call_ids,
+            previous_tool_call_ids,
         );
     }
     StoredTurnReplay {
@@ -692,12 +695,21 @@ fn sanitize_completed_turn_messages(
     messages: Vec<ChatMessage>,
     next_tool_output_ids: &HashSet<String>,
     current_tool_call_ids: &HashSet<String>,
+    previous_tool_call_ids: &HashSet<String>,
 ) -> StoredTurnReplay {
     let mut replay = StoredTurnReplay::default();
     let mut index = 0;
     while index < messages.len() {
         let message = messages[index].clone();
         if message.role == "tool" {
+            if message
+                .tool_call_id
+                .as_deref()
+                .map(|id| previous_tool_call_ids.contains(id))
+                .unwrap_or(false)
+            {
+                replay.messages.push(message);
+            }
             index += 1;
             continue;
         }
@@ -1399,6 +1411,64 @@ mod tests {
         assert!(response_text_is_display_only(
             "**DeepSeek Thinking**\n\n> legacy spaced format"
         ));
+    }
+
+    #[test]
+    fn replay_keeps_leading_tool_output_for_previous_handoff_call() {
+        let previous_tool_call_ids = HashSet::from(["call_0".to_owned()]);
+        let next_tool_output_ids = HashSet::from(["call_1".to_owned()]);
+        let current_tool_call_ids = HashSet::new();
+        let turn_messages = vec![
+            serde_json::to_value(ChatMessage::tool_result("call_0", "first tool output"))
+                .expect("tool message"),
+            serde_json::to_value(ChatMessage::assistant_tool_calls(
+                vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "shell_command", "arguments": "{\"command\":\"Get-Content README.md\"}" }
+                })],
+                "",
+            ))
+            .expect("assistant message"),
+        ];
+
+        let replay = stored_turn_messages_for_replay(
+            &turn_messages,
+            RequestStatus::Completed,
+            &next_tool_output_ids,
+            &current_tool_call_ids,
+            &previous_tool_call_ids,
+        );
+
+        assert_eq!(replay.messages.len(), 2);
+        assert_eq!(replay.messages[0].role, "tool");
+        assert_eq!(replay.messages[0].tool_call_id.as_deref(), Some("call_0"));
+        assert!(replay.messages[1]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call["id"] == "call_1")));
+        assert!(replay.pending_tool_results_from_next_input);
+    }
+
+    #[test]
+    fn replay_still_drops_unmatched_leading_tool_output() {
+        let turn_messages = vec![
+            serde_json::to_value(ChatMessage::tool_result("call_orphan", "orphan output"))
+                .expect("tool message"),
+            serde_json::to_value(ChatMessage::text("assistant", "done")).expect("assistant"),
+        ];
+
+        let replay = stored_turn_messages_for_replay(
+            &turn_messages,
+            RequestStatus::Completed,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(replay.messages.len(), 1);
+        assert_eq!(replay.messages[0].role, "assistant");
+        assert_eq!(replay.messages[0].content, "done");
     }
 
     #[tokio::test]
