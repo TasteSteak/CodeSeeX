@@ -43,6 +43,13 @@ fn temp_workspace(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("codeseex-{label}-{}", Uuid::new_v4().simple()))
 }
 
+fn read_v1_access_token(data_dir: &std::path::Path) -> String {
+    std::fs::read_to_string(data_dir.join("secrets").join("v1_access.token"))
+        .expect("read generated v1 access token")
+        .trim()
+        .to_owned()
+}
+
 fn write_vision_analyze_config(config: &AppConfig, endpoint: &str) {
     std::fs::create_dir_all(&config.data_dir).expect("create test data dir");
     let mut settings = BTreeMap::new();
@@ -231,7 +238,7 @@ async fn manager_api_rejects_when_configured_listener_host_is_not_loopback() {
 }
 
 #[tokio::test]
-async fn v1_routes_still_work_when_configured_listener_host_is_not_loopback() {
+async fn v1_routes_reject_non_loopback_listener_without_token() {
     let mut config = test_config(temp_workspace("v1-non-loopback-bind"));
     config.host = "0.0.0.0".to_owned();
     let (data_dir, addr) = spawn_test_app(config).await;
@@ -243,14 +250,7 @@ async fn v1_routes_still_work_when_configured_listener_host_is_not_loopback() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-            .and_then(|value| value.to_str().ok()),
-        Some("*")
-    );
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -354,13 +354,34 @@ async fn manager_api_allows_local_requests_without_origin() {
 }
 
 #[tokio::test]
-async fn v1_routes_keep_openai_compatible_cors() {
+async fn v1_routes_reject_cross_site_browser_requests_without_token() {
     let config = test_config(temp_workspace("v1-cors"));
     let (data_dir, addr) = spawn_test_app(config).await;
 
     let response = reqwest::Client::new()
         .get(format!("http://{addr}/v1/models"))
         .header(header::ORIGIN, "https://example-client.test")
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn v1_routes_allow_requests_with_local_access_token() {
+    let mut config = test_config(temp_workspace("v1-token-allowed"));
+    config.host = "0.0.0.0".to_owned();
+    let (data_dir, addr) = spawn_test_app(config).await;
+    let token = read_v1_access_token(&data_dir);
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/models"))
+        .header(CODESEEX_V1_ACCESS_TOKEN_HEADER, token)
+        .header(header::ORIGIN, "https://example-client.test")
+        .header("sec-fetch-site", "cross-site")
         .send()
         .await
         .unwrap();
@@ -371,8 +392,62 @@ async fn v1_routes_keep_openai_compatible_cors() {
             .headers()
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .and_then(|value| value.to_str().ok()),
-        Some("*")
+        Some("https://example-client.test")
     );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn v1_routes_allow_token_preflight_without_exposing_upstream_key() {
+    let mut config = test_config(temp_workspace("v1-token-preflight"));
+    config.host = "0.0.0.0".to_owned();
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .request(Method::OPTIONS, format!("http://{addr}/v1/responses"))
+        .header(header::ORIGIN, "https://example-client.test")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "content-type, x-codeseex-token",
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("https://example-client.test")
+    );
+    assert!(response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("x-codeseex-token"));
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn v1_routes_reject_preflight_without_capability_header() {
+    let config = test_config(temp_workspace("v1-preflight-reject"));
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .request(Method::OPTIONS, format!("http://{addr}/v1/responses"))
+        .header(header::ORIGIN, "https://example-client.test")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -675,6 +750,27 @@ async fn fake_streaming_chat_completions(
             )
             .to_owned()
     };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(body))
+        .expect("fake upstream response should build")
+}
+
+async fn fake_streaming_usage_chunks_chat_completions(
+    State(state): State<FakeUpstreamState>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    {
+        let mut requests = state.requests.lock().expect("fake upstream lock poisoned");
+        requests.push(payload);
+    }
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"usage checked\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"prompt_cache_hit_tokens\":70,\"completion_tokens\":3,\"total_tokens\":103}}\n\n",
+        "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"prompt_cache_hit_tokens\":70,\"completion_tokens\":7,\"total_tokens\":107}}\n\n",
+        "data: [DONE]\n\n"
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
@@ -1259,6 +1355,35 @@ async fn fake_apply_patch_chat_completions(
                     "function": {
                         "name": "apply_patch",
                         "arguments": "{\"patch\":\"*** Begin Patch\\n*** Add File: target/codeseex-apply-patch-nonstream-test/hello.txt\\n+hello\\n*** End Patch\"}"
+                    }
+                }]
+            }
+        }],
+        "usage": { "prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10 }
+    }))
+    .into_response()
+}
+
+async fn fake_apply_patch_blank_context_chat_completions(
+    State(state): State<FakeUpstreamState>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    {
+        let mut requests = state.requests.lock().expect("fake upstream lock poisoned");
+        requests.push(payload);
+    }
+    Json(json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_patch",
+                    "type": "function",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": "{\"patch\":\"*** Begin Patch\\n*** Update File: src/lib.rs\\n@@\\n fn before() {}\\n\\n pub fn after() {}\\n*** End Patch\"}"
                     }
                 }]
             }
@@ -2706,6 +2831,82 @@ async fn streaming_internal_tools_execute_inside_proxy_without_client_function_c
             .and_then(|detail| detail.pointer("/usage/input_tokens"))
             .and_then(Value::as_u64)
             == Some(10)
+    }));
+}
+
+#[tokio::test]
+async fn streaming_usage_chunks_keep_last_chunk_within_iteration() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(fake_streaming_usage_chunks_chat_completions),
+        )
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("streaming-usage-chunks-last-wins");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_stream_usage_chunks",
+            "model": "deepseek-v4-pro",
+            "stream": true,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "check usage chunks" }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("usage checked"), "{body}");
+    assert!(body.contains("\"input_tokens\":100"), "{body}");
+    assert!(body.contains("\"cached_input_tokens\":70"), "{body}");
+    assert!(body.contains("\"cache_miss_input_tokens\":30"), "{body}");
+    assert!(body.contains("\"output_tokens\":7"), "{body}");
+    assert!(body.contains("\"total_tokens\":107"), "{body}");
+    assert!(!body.contains("\"output_tokens\":10"), "{body}");
+
+    let (events, _) = store.recent_events(50, None).await.unwrap();
+    assert!(events.iter().any(|event| {
+        event.event_type == "upstream_usage_chunk_diagnostic"
+            && event
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.get("usage_chunks"))
+                .and_then(Value::as_u64)
+                == Some(2)
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_type == "upstream_call_usage_breakdown"
+            && event
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.pointer("/usage/output_tokens"))
+                .and_then(Value::as_u64)
+                == Some(7)
     }));
 }
 
@@ -4935,12 +5136,16 @@ async fn streaming_web_search_budget_recovers_with_final_answer() {
         .lock()
         .expect("fake upstream lock poisoned")
         .clone();
-    assert_eq!(requests.len(), 4);
-    assert!(requests[0].get("tools").is_some());
-    assert!(requests[1].get("tools").is_some());
-    assert!(requests[2].get("tools").is_some());
-    assert!(requests[3].get("tools").is_none());
-    let recovery_messages = requests[3]["messages"].as_array().unwrap();
+    assert!(requests.len() >= 2, "{requests:?}");
+    let (recovery_request, tool_requests) = requests.split_last().expect("at least one request");
+    assert!(recovery_request.get("tools").is_none());
+    assert!(
+        tool_requests
+            .iter()
+            .all(|request| request.get("tools").is_some()),
+        "{requests:?}"
+    );
+    let recovery_messages = recovery_request["messages"].as_array().unwrap();
     assert!(
         recovery_messages.iter().any(|message| {
             message.get("role").and_then(Value::as_str) == Some("user")
@@ -4948,7 +5153,12 @@ async fn streaming_web_search_budget_recovers_with_final_answer() {
                     .get("content")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
-                    .contains("reached its per-response budget")
+                    .contains("CodeSeeX stopped the tool loop")
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .contains("Do not request or encode additional tool calls")
         }),
         "{}",
         serde_json::to_string_pretty(recovery_messages).unwrap()
@@ -4956,13 +5166,15 @@ async fn streaming_web_search_budget_recovers_with_final_answer() {
 
     let (events, _) = store.recent_events(80, None).await.unwrap();
     assert!(events.iter().any(|event| {
-        event.event_type == "tool_loop_web_search_budget_stopped"
-            && event
-                .detail
-                .as_ref()
-                .and_then(|detail| detail.get("recover_with_final_response"))
-                .and_then(Value::as_bool)
-                == Some(true)
+        matches!(
+            event.event_type.as_str(),
+            "tool_loop_web_search_budget_stopped" | "tool_loop_repeated_failure_stopped"
+        ) && event
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.get("recover_with_final_response"))
+            .and_then(Value::as_bool)
+            == Some(true)
     }));
     assert!(!events
         .iter()
@@ -5302,8 +5514,15 @@ async fn streaming_recovery_blocks_standard_tool_calls_when_tools_are_removed() 
         .lock()
         .expect("fake upstream lock poisoned")
         .clone();
-    assert_eq!(requests.len(), 4);
-    assert!(requests[3].get("tools").is_none());
+    assert!(requests.len() >= 2, "{requests:?}");
+    let (recovery_request, tool_requests) = requests.split_last().expect("at least one request");
+    assert!(recovery_request.get("tools").is_none());
+    assert!(
+        tool_requests
+            .iter()
+            .all(|request| request.get("tools").is_some()),
+        "{requests:?}"
+    );
 
     let (events, _) = store.recent_events(120, None).await.unwrap();
     assert!(events
@@ -6397,6 +6616,94 @@ async fn nonstreaming_client_tool_handoff_is_not_user_completed_turn() {
 }
 
 #[tokio::test]
+async fn nonstreaming_apply_patch_handoff_repairs_blank_context_line() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(fake_apply_patch_blank_context_chat_completions),
+        )
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("apply-patch-blank-context-handoff");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_apply_patch_blank_context_handoff",
+            "model": "deepseek-v4-pro",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "patch a file" }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    let patch_input = body["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item.get("type").and_then(Value::as_str) == Some("custom_tool_call")
+                && item.get("name").and_then(Value::as_str) == Some("apply_patch")
+        })
+        .and_then(|item| item.get("input"))
+        .and_then(Value::as_str)
+        .expect("apply_patch handoff should include native input");
+
+    assert!(
+        patch_input.contains(" fn before() {}\n \n pub fn after() {}"),
+        "{patch_input}"
+    );
+    assert!(
+        !patch_input.contains(" fn before() {}\n\n pub fn after() {}"),
+        "{patch_input}"
+    );
+
+    let (events, _) = store.recent_events(50, None).await.expect("events");
+    let diagnostic = events
+        .iter()
+        .find(|event| event.event_type == "apply_patch_input_micro_repair_diagnostic")
+        .expect("micro repair diagnostic should be recorded");
+    assert_eq!(diagnostic.audience.as_deref(), Some("safe_diagnostic"));
+    let detail = diagnostic.detail.as_ref().expect("diagnostic detail");
+    assert_eq!(detail["id"], "resp_apply_patch_blank_context_handoff");
+    assert_eq!(detail["call_id"], "call_patch");
+    assert_eq!(detail["tool_name"], "apply_patch");
+    assert_eq!(detail["repair_kind"], "blank_update_hunk_context_line");
+    assert_eq!(detail["blank_context_lines_repaired"], 1);
+    assert!(detail["input_chars"].as_u64().is_some());
+    let detail_json = serde_json::to_string(detail).expect("diagnostic json");
+    assert!(!detail_json.contains("fn before"));
+    assert!(!detail_json.contains("pub fn after"));
+    assert!(!detail_json.contains("*** Begin Patch"));
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
 async fn apply_patch_client_handoff_failure_can_be_replayed_and_corrected() {
     let fake_state = FakeUpstreamState::default();
     let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -6640,16 +6947,16 @@ async fn client_tool_handoff_guard_stops_repeated_failures_before_upstream_retry
         if index < 2 {
             assert_eq!(body["status"], "completed");
         } else {
-            assert_eq!(body["status"], "completed");
+            assert_eq!(body["status"], "failed");
             assert_eq!(
-                body.pointer("/incomplete_details/reason")
-                    .and_then(Value::as_str),
+                body.pointer("/error/code").and_then(Value::as_str),
                 Some("client_tool_handoff_guard_stopped")
             );
             assert_eq!(
-                body.pointer("/output/0/type").and_then(Value::as_str),
-                Some("message")
+                body.get("output").and_then(Value::as_array).map(Vec::len),
+                Some(0)
             );
+            assert_eq!(body.get("incomplete_details"), Some(&Value::Null));
         }
     }
 
@@ -6678,11 +6985,14 @@ async fn client_tool_handoff_guard_stops_repeated_failures_before_upstream_retry
         .unwrap();
     assert!(preflight.status().is_success());
     let body = preflight.json::<Value>().await.unwrap();
-    assert_eq!(body["status"], "completed");
+    assert_eq!(body["status"], "failed");
     assert_eq!(
-        body.pointer("/incomplete_details/reason")
-            .and_then(Value::as_str),
+        body.pointer("/error/code").and_then(Value::as_str),
         Some("client_tool_handoff_guard_stopped")
+    );
+    assert_eq!(
+        body.get("output").and_then(Value::as_array).map(Vec::len),
+        Some(0)
     );
 
     let requests = fake_state

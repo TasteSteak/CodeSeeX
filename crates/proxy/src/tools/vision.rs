@@ -121,7 +121,11 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "description": "Bearer token used only by the Vision module.",
             "placeholderKey": "visionApiKeyPlaceholder",
             "placeholder": "sk-...",
-            "value": setting_value(settings, API_KEY_KEY)
+            "value": "",
+            "configured": settings
+                .get(API_KEY_KEY)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
         }),
     ]
 }
@@ -426,10 +430,14 @@ impl VisionGenerateConfig {
 }
 
 fn read_tool_settings(app_config: &AppConfig) -> BTreeMap<String, String> {
-    UserConfig::read_from(&app_config.config_path())
+    let mut settings = UserConfig::read_from(&app_config.config_path())
         .ok()
         .map(|config| crate::config_payload::tool_settings_from_user_config(&config))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(api_key) = crate::secrets::vision_api_key(app_config) {
+        settings.insert(API_KEY_KEY.to_owned(), api_key);
+    }
+    settings
 }
 
 fn setting_value_opt(settings: &BTreeMap<String, String>, key: &'static str) -> Option<String> {
@@ -445,8 +453,12 @@ fn unavailable(
     detail: Option<String>,
 ) -> Value {
     let message = match tool {
-        GENERATE_TOOL_NAME | GENERATE_ALIAS_TOOL_NAME => "Vision is unavailable because its generation request URL, generation model, or API key is not configured.",
-        _ => "Vision is unavailable because its analyze request URL, model, or API key is not configured.",
+        GENERATE_TOOL_NAME | GENERATE_ALIAS_TOOL_NAME => {
+            "Vision is unavailable because its generation request URL, generation model, or API key is not configured."
+        }
+        _ => {
+            "Vision is unavailable because its analyze request URL, model, or API key is not configured."
+        }
     };
     json!({
         "ok": false,

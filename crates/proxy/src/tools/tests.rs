@@ -92,6 +92,8 @@ fn apply_patch_definition_requires_paths_in_operation_headers() {
     assert!(description.contains("bare headers"));
     assert!(description.contains("standalone grammar lines"));
     assert!(description.contains("hunk-prefixed data lines"));
+    assert!(description.contains("empty context line"));
+    assert!(description.contains("single space"));
 }
 
 #[test]
@@ -477,6 +479,172 @@ fn workspace_search_supports_include_and_exclude_globs() {
         .and_then(Value::as_str)
         .unwrap()
         .ends_with("/src/main.rs"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_search_defers_low_priority_dirs_from_broad_root() {
+    let root = temp_workspace("search-deferred-dirs");
+    let git_dir = root.join(".git");
+    let ui_dir = root
+        .join("apps")
+        .join("ui")
+        .join("public")
+        .join("styles")
+        .join("pages");
+    fs::create_dir_all(&git_dir).expect("create git dir");
+    fs::create_dir_all(&ui_dir).expect("create ui dir");
+    for index in 0..(MAX_SEARCH_FILES + 20) {
+        fs::write(git_dir.join(format!("{index:04}.txt")), "no match\n").expect("write noise");
+    }
+    fs::write(ui_dir.join("logs.css"), ".log-panel { display: flex; }\n")
+        .expect("write target css");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let searched = execute_tool_in_context(
+        &context,
+        "workspace_search",
+        r#"{"query":"log-panel","path":"."}"#,
+    );
+
+    assert_eq!(searched.get("ok").and_then(Value::as_bool), Some(true));
+    assert!(
+        searched
+            .get("deferred_dirs_discovered")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 1),
+        "expected low-priority directories to be deferred: {searched}"
+    );
+    let matches = searched.get("matches").and_then(Value::as_array).unwrap();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected target match before low-priority directory consumes the search budget: {searched}"
+    );
+    assert!(matches[0]
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap()
+        .ends_with("/apps/ui/public/styles/pages/logs.css"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_search_continues_into_deferred_dirs_by_default() {
+    let root = temp_workspace("search-deferred-default-included");
+    fs::create_dir_all(root.join(".git")).expect("create git dir");
+    fs::create_dir_all(root.join("src")).expect("create src dir");
+    fs::write(root.join("src").join("lib.rs"), "shared_needle in source\n").expect("write source");
+    fs::write(
+        root.join(".git").join("config"),
+        "shared_needle in git metadata\n",
+    )
+    .expect("write git metadata");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let searched = execute_tool_in_context(
+        &context,
+        "workspace_search",
+        r#"{"query":"shared_needle","path":".","max_results":10}"#,
+    );
+
+    assert_eq!(searched.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        searched
+            .get("include_deferred_dirs")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        searched
+            .get("deferred_dirs_searched")
+            .and_then(Value::as_u64),
+        Some(1),
+        "expected default search to continue into deferred dirs: {searched}"
+    );
+    let paths = searched
+        .get("matches")
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("path").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(paths.iter().any(|path| path.ends_with("/src/lib.rs")));
+    assert!(paths.iter().any(|path| path.ends_with("/.git/config")));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_search_can_search_explicit_low_priority_root() {
+    let root = temp_workspace("search-explicit-low-priority-root");
+    fs::create_dir_all(root.join("target")).expect("create target dir");
+    fs::write(
+        root.join("target").join("artifact.txt"),
+        "needle in target\n",
+    )
+    .expect("write target file");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let searched = execute_tool_in_context(
+        &context,
+        "workspace_search",
+        r#"{"query":"needle","path":"target"}"#,
+    );
+
+    assert_eq!(searched.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        searched
+            .get("deferred_dirs_discovered")
+            .and_then(Value::as_u64),
+        Some(0)
+    );
+    let matches = searched.get("matches").and_then(Value::as_array).unwrap();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected explicit target search to work: {searched}"
+    );
+    assert!(matches[0]
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap()
+        .ends_with("/target/artifact.txt"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_search_explicit_include_can_search_low_priority_dir() {
+    let root = temp_workspace("search-explicit-low-priority-include");
+    fs::create_dir_all(root.join("target")).expect("create target dir");
+    fs::write(
+        root.join("target").join("artifact.txt"),
+        "needle in target\n",
+    )
+    .expect("write target file");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let searched = execute_tool_in_context(
+        &context,
+        "workspace_search",
+        r#"{"query":"needle","include":"target/*"}"#,
+    );
+
+    assert_eq!(searched.get("ok").and_then(Value::as_bool), Some(true));
+    let matches = searched.get("matches").and_then(Value::as_array).unwrap();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected explicit include to search matching low-priority directory: {searched}"
+    );
+    assert!(matches[0]
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap()
+        .ends_with("/target/artifact.txt"));
 
     let _ = fs::remove_dir_all(root);
 }

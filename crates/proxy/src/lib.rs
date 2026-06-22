@@ -10,6 +10,7 @@ mod network;
 mod response_sse;
 mod responses;
 mod runtime_config;
+mod secrets;
 mod server;
 mod telemetry;
 mod text;

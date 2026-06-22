@@ -1,0 +1,47 @@
+/* ==========================================================================
+   组件层：指标小卡片统一高质感标准骨架 (cards.css)
+   ========================================================================== */
+
+   .metric-card, .usage-metric-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: var(--shadow-sm);
+    transition: var(--theme-transition);
+    min-width: 0; /* 极其关键：防止内部长数字或长英文将卡片单向挤出对齐线 */
+  }
+  
+  .metric-card:hover, .usage-metric-card:hover {
+    box-shadow: var(--shadow-md);
+    border-color: var(--text-muted);
+  }
+  
+  .metric-label, .usage-metric-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: var(--theme-transition);
+  }
+  
+  .metric-value, .usage-metric-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-main);
+    word-break: break-all;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: var(--theme-transition);
+  }
+  
+  /* 预留使用率金额的高亮色规范 */
+  #usageTotalCost.usage-cost-value {
+    color: var(--success);
+  }

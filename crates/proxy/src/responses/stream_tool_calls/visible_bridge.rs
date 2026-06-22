@@ -555,6 +555,15 @@ impl JsonStringDecoder {
 struct PatchStreamNormalizer {
     line: String,
     pending_cr: bool,
+    in_update_file: bool,
+    hunk_buffer: Option<StreamHunkBuffer>,
+}
+
+#[derive(Debug, Default)]
+struct StreamHunkBuffer {
+    lines: Vec<String>,
+    blank_lines: Vec<usize>,
+    has_nonempty_unprefixed_line: bool,
 }
 
 impl PatchStreamNormalizer {
@@ -580,18 +589,91 @@ impl PatchStreamNormalizer {
     }
 
     fn finish(&mut self) -> String {
+        let mut output = String::new();
         if self.line.is_empty() {
-            return String::new();
+            self.flush_hunk_buffer(&mut output);
+            return output;
         }
-        let output = normalize_patch_line(&self.line);
+        self.push_line(&mut output);
         self.line.clear();
+        if output.ends_with('\n') {
+            output.pop();
+        }
         output
     }
 
     fn flush_line(&mut self, output: &mut String) {
-        output.push_str(&normalize_patch_line(&self.line));
-        output.push('\n');
+        self.push_line(output);
         self.line.clear();
+    }
+
+    fn push_line(&mut self, output: &mut String) {
+        let line = normalize_patch_line(&self.line);
+        if self.handle_boundary_line(&line, output) {
+            return;
+        }
+        if let Some(hunk) = self.hunk_buffer.as_mut() {
+            let index = hunk.lines.len();
+            if line.is_empty() {
+                hunk.blank_lines.push(index);
+            } else if !line.starts_with([' ', '+', '-']) {
+                hunk.has_nonempty_unprefixed_line = true;
+            }
+            hunk.lines.push(line);
+            return;
+        }
+        output.push_str(&line);
+        output.push('\n');
+    }
+
+    fn handle_boundary_line(&mut self, line: &str, output: &mut String) -> bool {
+        if line.starts_with("*** Update File: ") {
+            self.flush_hunk_buffer(output);
+            self.in_update_file = true;
+            output.push_str(line);
+            output.push('\n');
+            return true;
+        }
+        if line.starts_with("*** Add File: ")
+            || line.starts_with("*** Delete File: ")
+            || line.starts_with("*** End Patch")
+        {
+            self.flush_hunk_buffer(output);
+            self.in_update_file = false;
+            output.push_str(line);
+            output.push('\n');
+            return true;
+        }
+        if line.starts_with("*** Move to: ") {
+            self.flush_hunk_buffer(output);
+            output.push_str(line);
+            output.push('\n');
+            return true;
+        }
+        if self.in_update_file && line.starts_with("@@") {
+            self.flush_hunk_buffer(output);
+            self.hunk_buffer = Some(StreamHunkBuffer {
+                lines: vec![line.to_owned()],
+                ..StreamHunkBuffer::default()
+            });
+            return true;
+        }
+        false
+    }
+
+    fn flush_hunk_buffer(&mut self, output: &mut String) {
+        let Some(mut hunk) = self.hunk_buffer.take() else {
+            return;
+        };
+        if !hunk.has_nonempty_unprefixed_line {
+            for index in hunk.blank_lines {
+                hunk.lines[index] = " ".to_owned();
+            }
+        }
+        for line in hunk.lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
     }
 }
 
@@ -616,6 +698,44 @@ mod tests {
         assert_eq!(
             output,
             "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn streamed_patch_repairs_blank_context_lines_in_update_hunks() {
+        let mut extractor = JsonStringFieldExtractor::default();
+        let mut normalizer = PatchStreamNormalizer::default();
+        let mut output = String::new();
+        for chunk in [
+            r#"{"patch":"*** Begin Patch\n*** Update File: a.txt\n@@"#,
+            r#"\n before\n\n after\n*** End Patch"}"#,
+        ] {
+            output.push_str(&normalizer.feed(&extractor.feed(chunk)));
+        }
+        output.push_str(&normalizer.finish());
+
+        assert_eq!(
+            output,
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n before\n \n after\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn streamed_patch_does_not_repair_ambiguous_nonempty_unprefixed_hunks() {
+        let mut extractor = JsonStringFieldExtractor::default();
+        let mut normalizer = PatchStreamNormalizer::default();
+        let mut output = String::new();
+        for chunk in [
+            r#"{"patch":"*** Begin Patch\n*** Update File: a.txt\n@@"#,
+            r#"\n before\n\nafter\n*** End Patch"}"#,
+        ] {
+            output.push_str(&normalizer.feed(&extractor.feed(chunk)));
+        }
+        output.push_str(&normalizer.finish());
+
+        assert_eq!(
+            output,
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n before\n\nafter\n*** End Patch"
         );
     }
 

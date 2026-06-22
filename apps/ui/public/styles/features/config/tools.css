@@ -25,3 +25,8 @@
 .tool-card-body { padding: 0 20px; background: var(--bg-panel); }
 .tool-card-body .setting-item > span { white-space: nowrap; }
 .tool-card-body .segmented-control { flex: none; margin-left: auto; }
+
+.tool-secret-field { display: flex; flex-direction: column; align-items: stretch; gap: 7px; margin-left: auto; min-width: min(320px, 100%); }
+.tool-secret-status { font-size: 12px; line-height: 1.35; color: var(--text-muted); }
+.tool-secret-clear { display: inline-flex; align-items: center; gap: 7px; align-self: flex-start; color: var(--text-secondary); font-size: 12px; line-height: 1.35; cursor: pointer; user-select: none; }
+.tool-secret-clear input { margin: 0; }

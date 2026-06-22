@@ -1,3 +1,6 @@
 mod store;
 
-pub use store::{ClientToolHandoffCall, ClientToolHandoffGuardStop, RequestStatus, Store};
+pub use store::{
+    ClientToolHandoffCall, ClientToolHandoffGuardStop, EventViewQuery, RequestStatus, Store,
+    UsagePage, UsageSessionDetail,
+};

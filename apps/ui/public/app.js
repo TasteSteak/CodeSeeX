@@ -1,10 +1,12 @@
-const LOG_INITIAL_PAGE_SIZE = 30;
-const LOG_OLDER_PAGE_SIZE = 15;
-const LOG_MAX_ITEMS = 1000;
+const LOG_INITIAL_PAGE_SIZE = 60;
+const LOG_OLDER_PAGE_SIZE = 30;
+const LOG_RENDER_WINDOW_SIZE = 60;
+const LOG_MEMORY_MAX_ITEMS = 500;
 const LOG_BOTTOM_LOAD_THRESHOLD = 80;
 const CONFIG_AUTOSAVE_DELAY_MS = 450;
 const CONFIG_TEXT_AUTOSAVE_DELAY_MS = 2500;
 const CONFIG_AUTOSAVE_RETRY_MS = 700;
+const SENSITIVE_CONFIG_INPUT_IDS = new Set(["DEEPSEEK_BASE_URL", "PROXY_PORT"]);
 const DEBUG_MANAGER_BASE_URL = "http://127.0.0.1:8787";
 const DEEPSEEK_RECHARGE_URL = "https://platform.deepseek.com/top_up";
 const CCS_IMPORT_URL = "ccswitch://v1/import";
@@ -59,6 +61,7 @@ const els = {
   completedTurns: byId("completedTurns"),
   autoStart: byId("AUTO_START"),
   configTomlCode: byId("configTomlCode"),
+  configSaveStatus: byId("configSaveStatus"),
   configTomlCopyStatus: byId("configTomlCopyStatus"),
   configTomlStatus: byId("configTomlStatus"),
   copyTomlButton: byId("copyTomlButton"),
@@ -72,6 +75,11 @@ const els = {
   loadingOverlay: byId("loadingOverlay"),
   loadingTitle: byId("loadingTitle"),
   logStream: byId("logStream"),
+  logCategoryFilter: byId("logCategoryFilter"),
+  logLevelFilter: byId("logLevelFilter"),
+  logRequestFilter: byId("logRequestFilter"),
+  logSearchInput: byId("logSearchInput"),
+  logFollowToggle: byId("logFollowToggle"),
   navItems: Array.from(document.querySelectorAll(".nav-item[data-view]")),
   pageSubtitle: byId("pageSubtitle"),
   pageTitle: byId("pageTitle"),
@@ -141,14 +149,36 @@ let logEvents = [];
 let logHasMore = false;
 let logLoadingOlder = false;
 let logRenderPending = false;
+let logRenderedKeys = new Map();
+let logWindowStart = null;
+let logNextCursor = null;
+let logLatestCursor = null;
+let logLatestEventRevision = null;
+let logFilterTimer = null;
+let logFilters = { audience: "safe", category: "all", level: "all", request_id: "", q: "" };
+let logAutoFollow = true;
+let logRefreshController = null;
+let logRefreshSequence = 0;
+let logRenderFrame = null;
+let logRenderFrameOptions = null;
 let latestLogsLoadedOnce = false;
 let latestLogsRefreshInFlight = false;
 let lastBalanceData = null;
 let lastStatusSignature = "";
 let lastUsageSignature = "";
 let latestUsageRuntime = null;
+let usageSessionDomById = new Map();
+let usageSessionDetailCache = new Map();
+let usageOpenSessionOrder = [];
+let usageLatestRevision = null;
+let usageNextCursor = null;
+let usageHasMore = false;
 let usageRefreshInFlight = false;
 let usageRefreshQueued = false;
+let usageRefreshController = null;
+let usageRefreshSequence = 0;
+let usageRenderFrame = null;
+let usageRenderRuntime = null;
 let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
 let latestAdapter = null;
@@ -162,6 +192,7 @@ let uiLanguage = FALLBACK_LANGUAGE;
 let contextMenuEl = null;
 let contextMenuTarget = null;
 let usageTraceTooltipEl = null;
+let toolConfigControlCache = new Map();
 let apiBaseUrl = null;
 
 init();
@@ -211,7 +242,6 @@ async function loadI18n(targetLanguage) {
       languageId === FALLBACK_LANGUAGE ? Promise.resolve(null) : fetchLanguagePack(FALLBACK_LANGUAGE),
       fetchLanguagePack(languageId),
     ]);
-    if (pack) languages = mergeLanguageName(languages, languageId, pack.languageName || languageId);
     uiLanguage = languageId;
     configuredLanguage = normalizeConfiguredLanguageId(targetLanguage);
     i18n = Object.assign(
@@ -253,6 +283,19 @@ function bind() {
     });
   }
   if (els.logStream) els.logStream.addEventListener("scroll", handleLogScroll);
+  if (els.logCategoryFilter) els.logCategoryFilter.addEventListener("change", handleLogFilterChange);
+  if (els.logLevelFilter) els.logLevelFilter.addEventListener("change", handleLogFilterChange);
+  if (els.logRequestFilter) els.logRequestFilter.addEventListener("input", scheduleLogFilterChange);
+  if (els.logSearchInput) els.logSearchInput.addEventListener("input", scheduleLogFilterChange);
+  if (els.logFollowToggle) {
+    els.logFollowToggle.addEventListener("change", () => {
+      logAutoFollow = Boolean(els.logFollowToggle.checked);
+      if (logAutoFollow && logRenderPending) {
+        logRenderPending = false;
+        scheduleRenderLogs({ followTop: true });
+      }
+    });
+  }
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("click", hideContextMenu);
   document.addEventListener("scroll", () => {
@@ -278,6 +321,14 @@ function bind() {
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
     input.addEventListener("focusout", handleConfigInput);
+    if (SENSITIVE_CONFIG_INPUT_IDS.has(input.id)) {
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        handleConfigInput({ type: "change", target: input });
+        input.blur();
+      });
+    }
   });
 
   onRadioChange("CONFIG_TAB", setConfigTab);
@@ -458,7 +509,13 @@ async function saveConfig() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) throw new Error("Config save failed");
+    if (!response.ok) {
+      const errorDetail = await response.text().catch(() => "");
+      const error = new Error(configSaveErrorMessage(response.status, errorDetail));
+      error.status = response.status;
+      error.detail = errorDetail;
+      throw error;
+    }
     const status = await response.json().catch(() => null);
     const needsRestart = hasRestartRequiredChanges(payload);
     lastSavedConfig = normalizeConfigPayload(payload);
@@ -476,11 +533,25 @@ async function saveConfig() {
     await refresh({ forceLogs: true, force: true });
     if (currentView === "usage") await refreshUsage({ force: true });
   } catch (error) {
-    renderConfigSaveState("error");
+    renderConfigSaveState("error", error && error.message ? error.message : "");
   } finally {
     configSaving = false;
     if (saveCompleted && pendingConfig) scheduleConfigSave(CONFIG_AUTOSAVE_RETRY_MS);
   }
+}
+
+function configSaveErrorMessage(status, detail) {
+  let parsed = null;
+  try {
+    parsed = detail ? JSON.parse(detail) : null;
+  } catch {}
+  const code = parsed && (parsed.code || parsed.error);
+  if (status === 409 || code === "config_version_conflict") {
+    return parsed && parsed.message ? parsed.message : t("configSaveConflict");
+  }
+  return parsed && (parsed.message || parsed.error)
+    ? String(parsed.message || parsed.error)
+    : t("configSaveError");
 }
 
 async function refresh(options = {}) {
@@ -496,13 +567,27 @@ async function refresh(options = {}) {
     const data = await apiJson("/api/status", { cache: "no-store" });
     await syncConfigIfChanged(data.config_version);
     renderStatus(data);
+    const eventRevision = data.runtime && data.runtime.event_revision !== undefined && data.runtime.event_revision !== null
+      ? Number(data.runtime.event_revision)
+      : null;
     if (Array.isArray(data.events)) {
       updateLatestLogs(data.events, {
         force: Boolean(options.forceLogs),
         hasMore: data.has_more,
+        latestCursor: data.latest_cursor,
+        eventRevision,
       });
-    } else if (options.forceLogs || currentView === "logs" || !latestLogsLoadedOnce) {
-      await refreshLatestLogs({ force: Boolean(options.forceLogs) });
+    } else if (options.forceLogs || currentView === "logs") {
+      if (options.forceLogs
+        || !latestLogsLoadedOnce
+        || eventRevision === null
+        || logLatestEventRevision === null
+        || eventRevision !== logLatestEventRevision) {
+        await refreshLatestLogs({
+          force: Boolean(options.forceLogs),
+          eventRevision,
+        });
+      }
     }
     maybeRefreshUsage(data.runtime || {}, options);
   } catch (error) {
@@ -537,8 +622,20 @@ async function refresh(options = {}) {
 
 function maybeRefreshUsage(runtime, options = {}) {
   if (currentView !== "usage") return;
+  if (document.hidden && !options.force) return;
   const activeRequests = Number(runtime.active_requests || 0);
+  const usageRevision = runtime.usage_revision === undefined || runtime.usage_revision === null
+    ? null
+    : Number(runtime.usage_revision);
+  if (!options.force
+    && activeRequests <= 0
+    && usageRevision !== null
+    && usageLatestRevision !== null
+    && usageRevision === usageLatestRevision) {
+    return;
+  }
   const sourceSignature = stableStringify({
+    usage_revision: usageRevision,
     active_requests: activeRequests,
     request_count: runtime.request_count || 0,
     billable_request_count: runtime.billable_request_count || 0,
@@ -552,17 +649,34 @@ function maybeRefreshUsage(runtime, options = {}) {
 }
 
 async function refreshUsage(options = {}) {
+  if (document.hidden && !options.force) return;
   if (usageRefreshInFlight) {
     if (options.force) usageRefreshQueued = true;
     return;
   }
   usageRefreshInFlight = true;
+  if (usageRefreshController && typeof usageRefreshController.abort === "function") {
+    usageRefreshController.abort();
+  }
+  usageRefreshController = typeof AbortController === "function" ? new AbortController() : null;
+  const sequence = ++usageRefreshSequence;
   const started = performance.now();
   try {
-    const data = await apiJson("/api/usage", { cache: "no-store" });
+    const data = await apiJson(usageUrl(options), {
+      cache: "no-store",
+      signal: usageRefreshController ? usageRefreshController.signal : undefined,
+    });
+    if (sequence !== usageRefreshSequence) return;
     latestUsageRuntime = data.runtime || {};
-    renderUsage(latestUsageRuntime);
+    if (latestUsageRuntime.unchanged) return;
+    usageLatestRevision = latestUsageRuntime.usage_revision === undefined || latestUsageRuntime.usage_revision === null
+      ? usageLatestRevision
+      : Number(latestUsageRuntime.usage_revision);
+    usageNextCursor = latestUsageRuntime.next_cursor || usageNextCursor;
+    usageHasMore = Boolean(latestUsageRuntime.has_more);
+    scheduleRenderUsage(latestUsageRuntime);
   } catch (error) {
+    if (error && (error.name === "AbortError" || String(error.message || "").includes("aborted"))) return;
     updateLatestLogs([{
       ts: new Date().toISOString(),
       type: "client_error",
@@ -581,26 +695,115 @@ async function refreshUsage(options = {}) {
 }
 
 async function refreshLatestLogs(options = {}) {
-  if (latestLogsRefreshInFlight) return;
+  if (document.hidden && !options.force) return;
+  if (currentView !== "logs" && !options.force) return;
+  if (!options.force
+    && options.eventRevision !== undefined
+    && options.eventRevision !== null
+    && logLatestEventRevision !== null
+    && Number(options.eventRevision) === logLatestEventRevision) {
+    return;
+  }
+  if (logRefreshController && typeof logRefreshController.abort === "function") {
+    logRefreshController.abort();
+  }
+  logRefreshController = typeof AbortController === "function" ? new AbortController() : null;
+  const sequence = ++logRefreshSequence;
   latestLogsRefreshInFlight = true;
   try {
-    const data = await apiJson("/api/events?limit=" + LOG_INITIAL_PAGE_SIZE, { cache: "no-store" });
+    if (options.reset) resetLogState();
+    const after = !options.force && !options.reset && logLatestCursor ? logLatestCursor : null;
+    const data = await apiJson(logEventsUrl(LOG_INITIAL_PAGE_SIZE, null, { after }), {
+      cache: "no-store",
+      signal: logRefreshController ? logRefreshController.signal : undefined,
+    });
+    if (sequence !== logRefreshSequence) return;
     latestLogsLoadedOnce = true;
+    if (data.event_revision !== undefined && data.event_revision !== null) {
+      logLatestEventRevision = Number(data.event_revision);
+    } else if (options.eventRevision !== undefined && options.eventRevision !== null) {
+      logLatestEventRevision = Number(options.eventRevision);
+    }
     updateLatestLogs(Array.isArray(data.events) ? data.events : [], {
       force: Boolean(options.force),
-      hasMore: data.has_more,
+      hasMore: after ? undefined : data.has_more,
+      nextCursor: data.next_cursor,
+      latestCursor: data.latest_cursor,
+      eventRevision: data.event_revision,
+      incremental: Boolean(after),
     });
   } catch (error) {
+    if (error && (error.name === "AbortError" || String(error.message || "").includes("aborted"))) return;
     updateLatestLogs([{
       ts: new Date().toISOString(),
       type: "client_error",
       level: "error",
       message: error.message || String(error),
       detail: clientErrorDetail("/api/events", error),
-    }], { force: true });
+    }], { force: true, nextCursor: null });
   } finally {
-    latestLogsRefreshInFlight = false;
+    if (sequence === logRefreshSequence) latestLogsRefreshInFlight = false;
   }
+}
+
+function usageUrl(options = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit || 60));
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (!options.force && usageLatestRevision !== null && !options.cursor) {
+    params.set("since_revision", String(usageLatestRevision));
+  }
+  return "/api/usage?" + params.toString();
+}
+
+function logEventsUrl(limit, cursor, options = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit || LOG_INITIAL_PAGE_SIZE));
+  params.set("audience", logFilters.audience || "safe");
+  if (logFilters.category && logFilters.category !== "all") params.set("category", logFilters.category);
+  if (logFilters.level && logFilters.level !== "all") params.set("level", logFilters.level);
+  if (logFilters.request_id) params.set("request_id", logFilters.request_id);
+  if (logFilters.q) params.set("q", logFilters.q);
+  if (options.after) params.set("after", options.after);
+  else if (cursor) params.set("cursor", cursor);
+  return "/api/events?" + params.toString();
+}
+
+function readLogFiltersFromUi() {
+  return {
+    audience: "safe",
+    category: els.logCategoryFilter ? els.logCategoryFilter.value || "all" : "all",
+    level: els.logLevelFilter ? els.logLevelFilter.value || "all" : "all",
+    request_id: els.logRequestFilter ? String(els.logRequestFilter.value || "").trim() : "",
+    q: els.logSearchInput ? String(els.logSearchInput.value || "").trim() : "",
+  };
+}
+
+function scheduleLogFilterChange() {
+  if (logFilterTimer) clearTimeout(logFilterTimer);
+  logFilterTimer = setTimeout(() => {
+    logFilterTimer = null;
+    handleLogFilterChange();
+  }, 220);
+}
+
+function handleLogFilterChange() {
+  logFilters = readLogFiltersFromUi();
+  refreshLatestLogs({ force: true, reset: true }).catch(() => {});
+}
+
+function resetLogState() {
+  logEvents = [];
+  logDividers = [];
+  logHasMore = false;
+  logLoadingOlder = false;
+  logRenderPending = false;
+  logWindowStart = null;
+  logNextCursor = null;
+  logLatestCursor = null;
+  logLatestEventRevision = null;
+  logRenderFrameOptions = null;
+  lastLogRenderSignature = "";
 }
 
 async function syncConfigIfChanged(configVersion) {
@@ -841,7 +1044,6 @@ async function ensureLanguageLoaded(languageId) {
   const pack = await fetchLanguagePack(target);
   if (!pack) return null;
   i18n = Object.assign({}, i18n, { [target]: pack });
-  languages = mergeLanguageName(languages, target, pack.languageName || target);
   renderLanguageOptions();
   return pack;
 }
@@ -867,22 +1069,6 @@ async function fetchLanguagePack(languageId) {
   const pack = await response.json().catch(() => null);
   if (!pack || typeof pack !== "object" || Array.isArray(pack)) return null;
   return pack;
-}
-
-function mergeLanguageName(list, id, name) {
-  const target = normalizeLanguageId(id);
-  const next = [];
-  let replaced = false;
-  for (const language of Array.isArray(list) ? list : []) {
-    if (normalizeLanguageId(language && language.id) === target) {
-      next.push({ id: target, name: name || language.name || target, url: language.url || "" });
-      replaced = true;
-    } else {
-      next.push(language);
-    }
-  }
-  if (!replaced && target) next.push({ id: target, name: name || target, url: "" });
-  return next.sort((left, right) => left.id.localeCompare(right.id));
 }
 
 function scheduleNextRefresh(delayMs) {
@@ -924,26 +1110,31 @@ async function refreshBalance() {
 }
 
 async function loadOlderLogs() {
-  if (logLoadingOlder || !logHasMore) return;
-  const oldest = oldestLogTs();
-  if (!oldest) return;
+  if (logLoadingOlder) return;
+  if (pageLogWindowOlder()) {
+    renderLogs({ preserveAnchor: true });
+    return;
+  }
+  if (!logHasMore) return;
+  const cursor = oldestLogCursor();
+  if (!cursor) return;
   logLoadingOlder = true;
-  const oldScrollTop = els.logStream.scrollTop;
   try {
-    const url = "/api/events?limit=" + LOG_OLDER_PAGE_SIZE + "&before=" + encodeURIComponent(oldest);
+    const url = logEventsUrl(LOG_OLDER_PAGE_SIZE, cursor);
     const data = await apiJson(url, { cache: "no-store" });
     const older = Array.isArray(data.events) ? data.events : [];
     const existingKeys = new Set(logEvents.map(logEventKey));
     const addedOlder = older.filter((event) => event && event.ts && !existingKeys.has(logEventKey(event)));
     logHasMore = Boolean(data.has_more);
+    logNextCursor = data.next_cursor || logNextCursor;
     if (addedOlder.length > 0) {
       const newestLoaded = addedOlder[addedOlder.length - 1];
       logDividers.push({ key: logEventKey(newestLoaded), count: addedOlder.length });
     }
-    logEvents = mergeEvents(older.concat(logEvents)).slice(-LOG_MAX_ITEMS);
+    logEvents = trimLogMemory(mergeEvents(older.concat(logEvents)));
+    if (addedOlder.length > 0) logWindowStart = 0;
     pruneLogDividers();
-    renderLogs();
-    els.logStream.scrollTop = oldScrollTop;
+    renderLogs({ preserveAnchor: true });
   } finally {
     logLoadingOlder = false;
   }
@@ -1425,6 +1616,7 @@ function renderTools(tools, config) {
       label: field.label,
       description: field.description,
       defaultValue: field.defaultValue,
+      configured: Boolean(field.configured),
       options: (field.options || []).map((option) => option.value),
     })),
   })));
@@ -1433,6 +1625,9 @@ function renderTools(tools, config) {
   if (signature !== currentToolsSignature) {
     currentToolsSignature = signature;
     els.toolConfigList.replaceChildren(...nextTools.map(renderToolCard));
+    rebuildToolConfigControlCache();
+  } else if (toolConfigControlCache.size === 0) {
+    rebuildToolConfigControlCache();
   }
   if (!pendingConfig && !configSaving) {
     const valueSignature = stableStringify(normalizeConfigPayload(config));
@@ -1563,11 +1758,13 @@ function renderToolField(field) {
     item.appendChild(renderBooleanField(field));
   } else if (field.type === "textarea") {
     item.appendChild(renderTextAreaField(field));
+  } else if (field.type === "password") {
+    item.appendChild(renderPasswordField(field));
   } else {
     const input = document.createElement("input");
     input.className = "inline-control";
     input.name = field.key;
-    input.type = field.type === "number" ? "number" : (field.type === "password" ? "password" : "text");
+    input.type = field.type === "number" ? "number" : "text";
     input.value = field.value || field.defaultValue || "";
     input.placeholder = translateToolText(field.placeholderKey, field.placeholder || "");
     item.appendChild(input);
@@ -1652,25 +1849,95 @@ function renderTextAreaField(field) {
   return textarea;
 }
 
+function renderPasswordField(field) {
+  const wrap = document.createElement("div");
+  wrap.className = "tool-secret-field";
+  const input = document.createElement("input");
+  input.className = "inline-control";
+  input.name = field.key;
+  input.type = "password";
+  input.value = "";
+  input.placeholder = translateToolText(field.placeholderKey, field.placeholder || "");
+  input.autocomplete = "new-password";
+  wrap.appendChild(input);
+  if (field.configured) {
+    const status = document.createElement("small");
+    status.className = "muted tool-secret-status";
+    status.textContent = t("secretConfigured");
+    wrap.appendChild(status);
+
+    const clearLabel = document.createElement("label");
+    clearLabel.className = "tool-secret-clear";
+    const clear = document.createElement("input");
+    clear.type = "checkbox";
+    clear.name = field.key + "_CLEAR";
+    const clearText = document.createElement("span");
+    clearText.textContent = t("clearSavedSecret");
+    clearLabel.append(clear, clearText);
+    wrap.appendChild(clearLabel);
+  }
+  return wrap;
+}
+
+function rebuildToolConfigControlCache() {
+  toolConfigControlCache = new Map();
+  if (!els.toolConfigList) return;
+  els.toolConfigList.querySelectorAll("[name]").forEach((element) => {
+    const name = String(element.name || "").trim();
+    if (!name) return;
+    if (name === ENABLED_TOOLS_KEY && element.dataset.toolId) {
+      toolConfigControlCache.set(`enabled:${normalizeToolId(element.dataset.toolId)}`, element);
+    } else if (element.type === "radio") {
+      toolConfigControlCache.set(`radio:${name}:${String(element.value || "")}`, element);
+    } else if (!toolConfigControlCache.has(`field:${name}`)) {
+      toolConfigControlCache.set(`field:${name}`, element);
+    }
+  });
+}
+
+function toolEnabledInput(id) {
+  return toolConfigControlCache.get(`enabled:${normalizeToolId(id)}`) || null;
+}
+
+function toolFieldInput(key) {
+  return toolConfigControlCache.get(`field:${String(key || "")}`) || null;
+}
+
+function setToolRadioValue(name, value) {
+  const input = toolConfigControlCache.get(`radio:${String(name || "")}:${String(value || "")}`);
+  if (input) input.checked = true;
+}
+
+function getToolRadioValue(name) {
+  const prefix = `radio:${String(name || "")}:`;
+  for (const [key, input] of toolConfigControlCache.entries()) {
+    if (key.startsWith(prefix) && input.checked) return input.value;
+  }
+  return "";
+}
+
 function applyToolConfigValues(config) {
-  const enabledTools = parseEnabledTools(config && config[ENABLED_TOOLS_KEY], currentTools);
+  const values = config || {};
+  const enabledTools = parseEnabledTools(values[ENABLED_TOOLS_KEY], currentTools);
   for (const tool of currentTools) {
     if (isSystemTool(tool)) continue;
     const id = normalizeToolId(tool && tool.id);
-    const input = document.querySelector(`[name="${cssEscape(ENABLED_TOOLS_KEY)}"][data-tool-id="${cssEscape(id)}"]`);
+    const input = toolEnabledInput(id);
     if (input) input.checked = enabledTools.includes(id);
   }
   for (const field of toolConfigFields()) {
-    const value = config[field.key] !== undefined ? String(config[field.key]) : String(field.defaultValue || "");
-    if (field.type === "segmented") setRadioValue(field.key, value);
+    const value = values[field.key] !== undefined ? String(values[field.key]) : String(field.defaultValue || "");
+    if (field.type === "segmented") setToolRadioValue(field.key, value);
     else if (field.type === "boolean") {
-      const input = document.querySelector(`[name="${cssEscape(field.key)}"]`);
+      const input = toolFieldInput(field.key);
       if (input) input.checked = isTruthy(value);
     }
     else {
-      const input = document.querySelector(`[name="${cssEscape(field.key)}"]`);
+      const input = toolFieldInput(field.key);
       if (input && document.activeElement !== input) input.value = value;
     }
+    const clearInput = toolFieldInput(field.key + "_CLEAR");
+    if (clearInput) clearInput.checked = false;
   }
 }
 
@@ -1681,20 +1948,22 @@ function collectToolConfigPayload() {
   for (const tool of currentTools) {
     if (isSystemTool(tool)) continue;
     const id = normalizeToolId(tool && tool.id);
-    const input = document.querySelector(`[name="${cssEscape(ENABLED_TOOLS_KEY)}"][data-tool-id="${cssEscape(id)}"]`);
+    const input = toolEnabledInput(id);
     if (input && input.checked) enabledTools.push(id);
   }
   payload[ENABLED_TOOLS_KEY] = stringifyEnabledTools(enabledTools);
   for (const field of toolConfigFields()) {
     if (!field.key) continue;
-    if (field.type === "segmented") payload[field.key] = getRadioValue(field.key) || field.defaultValue || "";
+    if (field.type === "segmented") payload[field.key] = getToolRadioValue(field.key) || field.defaultValue || "";
     else if (field.type === "boolean") {
-      const input = document.querySelector(`[name="${cssEscape(field.key)}"]`);
+      const input = toolFieldInput(field.key);
       payload[field.key] = input && input.checked ? "true" : "false";
     }
     else {
-      const input = document.querySelector(`[name="${cssEscape(field.key)}"]`);
+      const input = toolFieldInput(field.key);
       payload[field.key] = input ? input.value : field.defaultValue || "";
+      const clearInput = toolFieldInput(field.key + "_CLEAR");
+      if (clearInput && clearInput.checked) payload[field.key + "_CLEAR"] = "true";
     }
   }
   return payload;
@@ -1778,6 +2047,22 @@ function isTruthy(value) {
   return /^(1|true|yes|on|enabled)$/i.test(String(value || "").trim());
 }
 
+function scheduleRenderUsage(runtime) {
+  usageRenderRuntime = runtime || {};
+  if (typeof requestAnimationFrame !== "function") {
+    renderUsage(usageRenderRuntime);
+    usageRenderRuntime = null;
+    return;
+  }
+  if (usageRenderFrame !== null) return;
+  usageRenderFrame = requestAnimationFrame(() => {
+    usageRenderFrame = null;
+    const nextRuntime = usageRenderRuntime || {};
+    usageRenderRuntime = null;
+    renderUsage(nextRuntime);
+  });
+}
+
 function renderUsage(runtime) {
   const started = performance.now();
   const billable = Array.isArray(runtime.billable_history) ? runtime.billable_history : [];
@@ -1785,63 +2070,26 @@ function renderUsage(runtime) {
   const sessions = Array.isArray(runtime.usage_sessions)
     ? runtime.usage_sessions
     : usageSessionsFromTurns(fallbackTurns);
-  const usageSignature = stableStringify({
-    locale: uiLanguage,
-    billing: currentBillingSignature(),
-    total_cached_input_tokens: runtime.total_cached_input_tokens || 0,
-    total_cache_miss_input_tokens: runtime.total_cache_miss_input_tokens || 0,
-    total_output_tokens: runtime.total_output_tokens || 0,
-    billable_request_count: runtime.billable_request_count || 0,
-    sessions: sessions.map((session) => [
-      session.id || "",
-      session.completed_at || "",
-      session.title || "",
-      session.title_source || "",
-      session.status || "",
-      session.cached_input_tokens || 0,
-      session.cache_miss_input_tokens || 0,
-      session.output_tokens || 0,
-      session.total_tokens || 0,
-      session.request_ms || 0,
-      (session.segments || []).map((segment) => [
-        segment.id || "",
-        segment.kind || "",
-        segment.label || "",
-        segment.hint || "",
-        segment.model || "",
-        segment.reasoning_effort || "",
-        segment.tool_name || "",
-        segment.iteration || 0,
-        segment.status || "",
-        segment.cached_input_tokens || 0,
-        segment.cache_miss_input_tokens || 0,
-        segment.output_tokens || 0,
-        segment.total_tokens || 0,
-        segment.request_ms || 0,
-        (segment.rows || []).map((row) => row.id || ""),
-      ]),
-      (session.rows || []).map((row) => [
-        row.id || "",
-        row.kind || "",
-        row.model || "",
-        row.reasoning_effort || "",
-        row.lifecycle || "",
-        row.cached_input_tokens || 0,
-        row.cache_miss_input_tokens || 0,
-        row.output_tokens || 0,
-        row.total_tokens || 0,
-        row.request_ms || 0,
-      ]),
-    ]),
-  });
+  const usageSignature = [
+    uiLanguage,
+    currentBillingSignature(),
+    runtime.usage_revision || "",
+    runtime.last_activity_at || "",
+    runtime.total_cached_input_tokens || 0,
+    runtime.total_cache_miss_input_tokens || 0,
+    runtime.total_output_tokens || 0,
+    sessions.map((session) => usageSessionKey(session) + ":" + (session.session_revision || "")).join(","),
+  ].join("|");
   if (usageSignature === lastUsageSignature) return;
   lastUsageSignature = usageSignature;
-  const totalTurnsCount = fallbackTurns.length;
-  const avgMs = average(billable.map((turn) => turn.request_ms || 0).filter((value) => value > 0));
+  const totalTurnsCount = runtime.request_count || fallbackTurns.length;
+  const avgMs = runtime.average_ms || average(billable.map((turn) => turn.request_ms || 0).filter((value) => value > 0));
   const totalCached = runtime.total_cached_input_tokens || 0;
   const totalMiss = runtime.total_cache_miss_input_tokens || 0;
   const cacheHitRate = usageCacheHitRate(totalCached, totalMiss);
-  const totalCostVal = billable.reduce((sum, turn) => sum + costForTokens(turn), 0);
+  const totalCostVal = Array.isArray(runtime.billing_buckets) && runtime.billing_buckets.length
+    ? runtime.billing_buckets.reduce((sum, bucket) => sum + costForTokens(bucket), 0)
+    : billable.reduce((sum, turn) => sum + costForTokens(turn), 0);
 
   els.usageTotalTurns.textContent = formatNumber(totalTurnsCount);
   els.usageCacheHitRate.textContent = cacheHitRate;
@@ -1903,30 +2151,64 @@ function usageSessionsFromTurns(turns) {
 }
 
 function renderUsageRows(sessions) {
-  els.usageRows.replaceChildren();
   if (sessions.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "usage-empty";
-    empty.textContent = t("noRows");
-    els.usageRows.appendChild(empty);
+    syncKeyedChildren(els.usageRows, [{
+      key: "empty",
+      create: () => {
+        const empty = document.createElement("div");
+        empty.className = "usage-empty";
+        empty.textContent = t("noRows");
+        return empty;
+      },
+      update: (node) => {
+        node.textContent = t("noRows");
+      },
+    }], usageSessionDomById);
     return;
   }
-  for (const session of sessions.slice().reverse()) {
-    els.usageRows.appendChild(usageRecord(session));
-  }
+  const anchor = captureScrollAnchor(els.usageRows.closest(".usage-record-wrap") || els.usageRows);
+  const rows = sessions.slice(0, 60).map((session) => ({
+    key: usageSessionKey(session),
+    create: () => usageRecord(session),
+    update: (node) => updateUsageRecord(node, session),
+  }));
+  syncKeyedChildren(els.usageRows, rows, usageSessionDomById);
+  restoreScrollAnchor(els.usageRows.closest(".usage-record-wrap") || els.usageRows, anchor);
 }
 
 function usageRecord(session) {
   const details = document.createElement("details");
   details.className = "usage-record";
+  details.dataset.usageSessionId = usageSessionKey(session);
+  details.__usageSession = session;
   const summary = document.createElement("summary");
   summary.className = "usage-grid-spec";
+  renderUsageRecordSummary(summary, session);
+  details.appendChild(summary);
+  details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    ensureUsageRecordBody(details, details.__usageSession || session);
+  });
+  return details;
+}
+
+function updateUsageRecord(details, session) {
+  details.dataset.usageSessionId = usageSessionKey(session);
+  details.__usageSession = session;
+  const summary = details.querySelector(":scope > summary") || document.createElement("summary");
+  summary.className = "usage-grid-spec";
+  renderUsageRecordSummary(summary, session);
+  if (!summary.parentNode) details.insertBefore(summary, details.firstChild);
+  if (details.open) ensureUsageRecordBody(details, session, { force: true });
+}
+
+function renderUsageRecordSummary(summary, session) {
   const totalCost = formatCost(costForSession(session));
   const cachedTokens = Number(session.cached_input_tokens || 0);
   const missTokens = Number(session.cache_miss_input_tokens || 0);
   const inputTokens = cachedTokens + missTokens;
   const cacheHitRate = usageCacheHitRate(cachedTokens, missTokens);
-  summary.append(
+  summary.replaceChildren(
     usageTitleCell(usageSessionTitle(session), usageRelativeDateTime(session.completed_at)),
     usageValueCell(formatDuration(session.request_ms), "muted"),
     usageValueCell(formatNumber(inputTokens)),
@@ -1934,29 +2216,131 @@ function usageRecord(session) {
     usageValueCell(cacheHitRate, usageCacheToneClass(cachedTokens, missTokens)),
     usageValueCell(totalCost),
   );
-  details.appendChild(summary);
-  details.addEventListener("toggle", () => {
-    if (!details.open || details.dataset.rendered === "true") return;
-    details.appendChild(usageRecordBody(session));
+}
+
+function ensureUsageRecordBody(details, session, options = {}) {
+  rememberOpenUsageSession(usageSessionKey(session));
+  const detailed = usageDetailedSession(session);
+  if (!detailed) {
+    let body = details.querySelector(":scope > .usage-trace-pure-container");
+    if (!body) {
+      body = usageLoadingBody();
+      details.appendChild(body);
+    }
+    fetchUsageSessionDetail(details, session).catch(() => {});
+    pruneUsageOpenBodies(details);
+    return;
+  }
+  let body = details.querySelector(":scope > .usage-trace-pure-container");
+  if (!body) {
+    body = usageRecordBody(detailed);
+    details.appendChild(body);
+  } else if (options.force || details.dataset.rendered !== "true") {
+    updateUsageRecordBody(body, detailed);
+  }
+  details.dataset.rendered = "true";
+  pruneUsageOpenBodies(details);
+}
+
+function usageDetailedSession(session) {
+  const key = usageSessionKey(session);
+  const revision = String(session && session.session_revision || "");
+  const cached = usageSessionDetailCache.get(key);
+  if (cached && (!revision || cached.sessionRevision === revision)) return cached.session;
+  if (Array.isArray(session && session.segments) && session.segments.length) return session;
+  if (Array.isArray(session && session.rows) && session.rows.length) return session;
+  return null;
+}
+
+function usageLoadingBody() {
+  const body = document.createElement("div");
+  body.className = "usage-trace-pure-container";
+  body.dataset.loadingUsageBody = "true";
+  const row = document.createElement("div");
+  row.className = "usage-grid-spec trace-stripe-row";
+  const cell = document.createElement("div");
+  cell.className = "trace-cell";
+  cell.textContent = t("busyDetail");
+  row.append(cell, usageTraceCell("-", true), usageTraceInputCell("-", "-"), usageTraceCell("-", true), usageTraceCell("-", true), usageTraceCell("-", true));
+  body.appendChild(row);
+  return body;
+}
+
+async function fetchUsageSessionDetail(details, session) {
+  const key = usageSessionKey(session);
+  if (!key || details.dataset.loadingUsageDetail === "true") return;
+  details.dataset.loadingUsageDetail = "true";
+  try {
+    const data = await apiJson("/api/usage/session?id=" + encodeURIComponent(key), { cache: "no-store" });
+    const detailed = data && data.session;
+    if (!detailed) return;
+    usageSessionDetailCache.set(key, {
+      session: detailed,
+      sessionRevision: String(session && session.session_revision || ""),
+      usageRevision: Number(data.usage_revision || 0),
+    });
+    const body = details.querySelector(":scope > .usage-trace-pure-container") || usageRecordBody(detailed);
+    updateUsageRecordBody(body, detailed);
+    if (!body.parentNode) details.appendChild(body);
     details.dataset.rendered = "true";
-  });
-  return details;
+    pruneUsageDetailCache();
+  } finally {
+    details.dataset.loadingUsageDetail = "false";
+  }
+}
+
+function rememberOpenUsageSession(key) {
+  if (!key) return;
+  usageOpenSessionOrder = usageOpenSessionOrder.filter((value) => value !== key);
+  usageOpenSessionOrder.push(key);
+}
+
+function pruneUsageDetailCache() {
+  while (usageOpenSessionOrder.length > 3) {
+    const key = usageOpenSessionOrder.shift();
+    usageSessionDetailCache.delete(key);
+  }
+}
+
+function pruneUsageOpenBodies(activeDetails) {
+  pruneUsageDetailCache();
+  const keep = new Set(usageOpenSessionOrder.slice(-3));
+  for (const details of Array.from(els.usageRows.querySelectorAll(".usage-record[open]"))) {
+    if (details === activeDetails) continue;
+    const key = details.dataset.usageSessionId || "";
+    if (keep.has(key)) continue;
+    const body = details.querySelector(":scope > .usage-trace-pure-container");
+    if (body) body.remove();
+    details.dataset.rendered = "false";
+  }
+}
+
+function usageSessionKey(session) {
+  const rows = Array.isArray(session && session.rows) ? session.rows : [];
+  const firstRowId = rows.length ? String(rows[0] && rows[0].id || "").trim() : "";
+  return firstRowId || String(session && session.id || session && session.completed_at || session && session.title || "usage-session");
 }
 
 function usageSessionTitle(session) {
   const title = String(session && session.title || "").trim();
   if (session && session.conversation_turn === false) {
-    return usageSemanticText(title || "service_request");
+    return usageSessionSemanticTitle(title || "service_request");
   }
   if (title && (session.title_source === "semantic" || session.title_source === "localized")) {
-    return usageSemanticText(title);
+    return usageSessionSemanticTitle(title);
   }
   if (title) return title;
   return session && session.conversation_turn === false ? t("usageIntermediateReply") : t("usageConversationRecord");
 }
 
+function usageSessionSemanticTitle(value) {
+  const key = String(value || "").trim();
+  if (key === "service_request") return t("usageServiceRequestTitle");
+  return usageSemanticText(key);
+}
+
 function usageRecordTitle(turn) {
-  if (turn && turn.lifecycle === "service_ephemeral") return t("usageServiceRequest");
+  if (turn && turn.lifecycle === "service_ephemeral") return t("usageServiceRequestTitle");
   if (turn && turn.lifecycle === "failed_billable") return t("usageFailedBillable");
   if (turn && turn.conversation_turn === false) return t("usageIntermediateReply");
   return t("usageConversationRecord");
@@ -1972,11 +2356,37 @@ function usageTurnKind(turn, isFinal) {
 function usageRecordBody(session) {
   const body = document.createElement("div");
   body.className = "usage-trace-pure-container";
-  const segments = usageSegmentsForRender(session);
-  segments.forEach((segment) => {
-    body.appendChild(usageSegmentRow(segment));
-  });
+  updateUsageRecordBody(body, session);
   return body;
+}
+
+function updateUsageRecordBody(body, session) {
+  const segments = usageSegmentsForRender(session);
+  if (body.dataset.loadingUsageBody === "true") {
+    body.replaceChildren();
+    delete body.dataset.loadingUsageBody;
+    body.__usageSegmentDomById = new Map();
+  } else if (!body.__usageSegmentDomById) {
+    body.__usageSegmentDomById = new Map();
+  }
+  syncKeyedChildren(body, segments.map((segment, index) => ({
+    key: usageSegmentKey(segment, index),
+    signature: stableStringify(["usage-segment", uiLanguage, segment]),
+    create: () => usageSegmentRow(segment),
+  })), body.__usageSegmentDomById);
+}
+
+function usageSegmentKey(segment, index) {
+  const id = String(segment && segment.id || "").trim();
+  if (id) return "usage-segment|" + id;
+  return [
+    "usage-segment",
+    segment && segment.kind || "",
+    segment && segment.completed_at || "",
+    segment && segment.tool_name || "",
+    segment && segment.iteration || "",
+    index,
+  ].join("|");
 }
 
 function usageTitleCell(title, subtitle) {
@@ -2030,8 +2440,9 @@ function usageCacheToneClass(cachedTokens, missTokens) {
 
 function usageSegmentsForRender(session) {
   const segments = Array.isArray(session && session.segments) ? session.segments : [];
-  if (segments.length) return segments;
-  return Array.isArray(session && session.rows) ? session.rows : [];
+  if (segments.length) return segments.slice().reverse();
+  const rows = Array.isArray(session && session.rows) ? session.rows : [];
+  return rows.slice().reverse();
 }
 
 function usageSegmentRow(segment) {
@@ -2128,6 +2539,9 @@ function usageTraceCell(value, numeric, innerClass) {
 }
 
 function costForSession(session) {
+  if (Array.isArray(session && session.billing_buckets) && session.billing_buckets.length) {
+    return session.billing_buckets.reduce((sum, bucket) => sum + costForTokens(bucket), 0);
+  }
   const rows = Array.isArray(session && session.rows) ? session.rows : [];
   if (rows.length) return rows.reduce((sum, row) => sum + costForTokens(row), 0);
   return costForTokens(session || {});
@@ -2338,71 +2752,135 @@ function usageSemanticText(value) {
 function updateLatestLogs(events, options = {}) {
   const next = Array.isArray(events) ? events : [];
   const hasMore = options.hasMore === undefined ? null : Boolean(options.hasMore);
-  const shouldFollow = options.force || logEvents.length === 0 || isAtLogTop();
+  if (options.nextCursor !== undefined) logNextCursor = options.nextCursor || logNextCursor;
+  if (options.latestCursor !== undefined) {
+    logLatestCursor = options.latestCursor || logLatestCursor;
+  } else if (next.length > 0) {
+    const newest = next[next.length - 1];
+    logLatestCursor = newest.cursor || [newest.ts || "", newest.id || ""].join("|") || logLatestCursor;
+  }
+  if (options.eventRevision !== undefined && options.eventRevision !== null) {
+    logLatestEventRevision = Number(options.eventRevision);
+  }
+  const shouldFollow = options.force || logEvents.length === 0 || (logAutoFollow && isAtLogTop());
   const nextEvents = logEvents.length === 0 ? next.slice(-LOG_INITIAL_PAGE_SIZE) : eventsAfterNewestLog(next);
   if (!options.force && nextEvents.length === 0) {
     logHasMore = hasMore === null ? (next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore) : hasMore;
     if (logRenderPending && shouldFollow) {
       logRenderPending = false;
-      renderLogs();
-      els.logStream.scrollTop = 0;
+      scheduleRenderLogs({ followTop: true });
     }
     return;
   }
   if (shouldFollow) {
-    logEvents = mergeEvents(logEvents.concat(nextEvents)).slice(-LOG_MAX_ITEMS);
+    logEvents = trimLogMemory(mergeEvents(logEvents.concat(nextEvents)));
+    logWindowStart = null;
     logHasMore = hasMore === null ? (next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore) : hasMore;
     pruneLogDividers();
     logRenderPending = false;
-    renderLogs();
-    els.logStream.scrollTop = 0;
+    scheduleRenderLogs({ followTop: true });
   } else {
-    logEvents = mergeEvents(logEvents.concat(nextEvents)).slice(-LOG_MAX_ITEMS);
+    logEvents = trimLogMemory(mergeEvents(logEvents.concat(nextEvents)));
     logHasMore = hasMore === null ? (next.length >= LOG_INITIAL_PAGE_SIZE || logHasMore) : hasMore;
     pruneLogDividers();
     logRenderPending = true;
   }
 }
 
-function renderLogs() {
+function renderLogs(options = {}) {
   const started = performance.now();
-  const shouldFollow = isAtLogTop();
-  const previousScrollTop = els.logStream ? els.logStream.scrollTop : 0;
-  const signature = stableStringify({
-    locale: uiLanguage,
-    events: logEvents.map(logEventKey),
-    dividers: logDividers,
-  });
+  const shouldFollow = options.followTop || isAtLogTop();
+  const anchor = options.preserveAnchor ? captureScrollAnchor(els.logStream) : null;
+  const signature = [
+    uiLanguage,
+    visibleLogEvents().map(logEventKey).join(","),
+    logDividers.map((divider) => `${divider.key}:${divider.count}`).join(","),
+  ].join("|");
   if (signature === lastLogRenderSignature) return;
   lastLogRenderSignature = signature;
-  els.logStream.replaceChildren();
   if (logEvents.length === 0) {
-    els.logStream.appendChild(logEntry({
+    syncKeyedChildren(els.logStream, [{
+      key: "empty",
+      create: () => logEntry({
       time: "--:--:--",
       prefix: "SYS",
       message: t("noLogs"),
       detail: t("noLogsDetail"),
       baseClass: "log-type-system",
-    }));
+      }),
+      update: (node) => {
+        const next = logEntry({
+          time: "--:--:--",
+          prefix: "SYS",
+          message: t("noLogs"),
+          detail: t("noLogsDetail"),
+          baseClass: "log-type-system",
+        });
+        node.replaceWith(next);
+        return next;
+      },
+    }], logRenderedKeys);
     return;
   }
-  for (const item of logRenderItems()) {
+  const nodes = logRenderItems().map((item) => {
     if (item.kind === "divider") {
-      els.logStream.appendChild(logDivider(item.count));
-      continue;
+      return {
+        key: item.key,
+        signature: `divider|${uiLanguage}|${item.count}`,
+        create: () => logDivider(item.count),
+      };
     }
-    const event = item.event;
-    els.logStream.appendChild(logEntry(normalizeLogEvent(event)));
-  }
-  els.logStream.scrollTop = shouldFollow ? 0 : previousScrollTop;
+    const normalized = normalizeLogEvent(item.event);
+    return {
+      key: item.key,
+      signature: logEventRenderSignature(item.event, normalized),
+      create: () => logEntry(normalized),
+    };
+  });
+  syncKeyedChildren(els.logStream, nodes, logRenderedKeys);
+  if (anchor) restoreScrollAnchor(els.logStream, anchor);
+  else if (shouldFollow) els.logStream.scrollTop = 0;
   noteSlow("renderLogs", performance.now() - started);
+}
+
+function scheduleRenderLogs(options = {}) {
+  logRenderFrameOptions = Object.assign({}, logRenderFrameOptions || {}, options);
+  if (typeof requestAnimationFrame !== "function") {
+    const nextOptions = logRenderFrameOptions || {};
+    logRenderFrameOptions = null;
+    renderLogs(nextOptions);
+    return;
+  }
+  if (logRenderFrame !== null) return;
+  logRenderFrame = requestAnimationFrame(() => {
+    logRenderFrame = null;
+    const nextOptions = logRenderFrameOptions || {};
+    logRenderFrameOptions = null;
+    renderLogs(nextOptions);
+  });
+}
+
+function logEventRenderSignature(event, normalized) {
+  return [
+    "event",
+    uiLanguage,
+    event && event.ts || "",
+    event && event.id || "",
+    event && event.type || event && event.event_type || "",
+    normalized.level,
+    normalized.category,
+    normalized.title,
+    normalized.summary,
+    normalized.requestId,
+    normalized.sessionHint,
+    normalized.riskFlags.join(","),
+  ].join("|");
 }
 
 function handleLogScroll() {
   if (isAtLogTop() && logRenderPending) {
     logRenderPending = false;
-    renderLogs();
-    els.logStream.scrollTop = 0;
+    scheduleRenderLogs({ followTop: true });
   }
   if (isAtLogBottom()) loadOlderLogs();
 }
@@ -2410,7 +2888,7 @@ function handleLogScroll() {
 function logRenderItems() {
   const dividerMap = new Map(logDividers.map((divider) => [divider.key, divider]));
   const items = [];
-  for (const event of logEvents.slice().reverse()) {
+  for (const event of visibleLogEvents().slice().reverse()) {
     const divider = dividerMap.get(logEventKey(event));
     if (divider) items.push({ kind: "divider", key: "divider|" + divider.key, count: divider.count });
     items.push({ kind: "event", key: logEventKey(event), event });
@@ -2418,27 +2896,151 @@ function logRenderItems() {
   return items;
 }
 
-function normalizeLogEvent(event) {
-  const type = event.type || "event";
-  const level = event.level || "info";
-  let prefix = "SYS";
-  let baseClass = "log-type-system";
-  if (level === "error") prefix = "ERR";
-  else if (level === "warn") prefix = "WRN";
-  else if (type.includes("tool")) {
-    prefix = "TOOL";
-    baseClass = "log-type-tool";
-  } else if (type.includes("request")) {
-    prefix = "REQ";
-    baseClass = "log-type-request";
+function visibleLogEvents() {
+  if (logEvents.length <= LOG_RENDER_WINDOW_SIZE) return logEvents;
+  const latestStart = Math.max(0, logEvents.length - LOG_RENDER_WINDOW_SIZE);
+  const start = logWindowStart === null
+    ? latestStart
+    : Math.max(0, Math.min(logWindowStart, latestStart));
+  const end = Math.min(logEvents.length, start + LOG_RENDER_WINDOW_SIZE);
+  return logEvents.slice(start, end);
+}
+
+function currentLogWindowRange() {
+  if (logEvents.length <= LOG_RENDER_WINDOW_SIZE) {
+    return { start: 0, end: logEvents.length };
   }
+  const latestStart = Math.max(0, logEvents.length - LOG_RENDER_WINDOW_SIZE);
+  const start = logWindowStart === null
+    ? latestStart
+    : Math.max(0, Math.min(logWindowStart, latestStart));
+  return { start, end: Math.min(logEvents.length, start + LOG_RENDER_WINDOW_SIZE) };
+}
+
+function pageLogWindowOlder() {
+  const range = currentLogWindowRange();
+  if (range.start <= 0) return false;
+  logWindowStart = Math.max(0, range.start - LOG_RENDER_WINDOW_SIZE);
+  return true;
+}
+
+function trimLogMemory(events) {
+  if (events.length <= LOG_MEMORY_MAX_ITEMS) return events;
+  const removed = events.length - LOG_MEMORY_MAX_ITEMS;
+  if (logWindowStart !== null) logWindowStart = Math.max(0, logWindowStart - removed);
+  return events.slice(removed);
+}
+
+function syncKeyedChildren(container, items, cache) {
+  if (!container) return;
+  const nextKeys = new Set(items.map((item) => item.key));
+  for (const [key, node] of Array.from(cache.entries())) {
+    if (nextKeys.has(key)) continue;
+    if (node && node.parentNode === container) container.removeChild(node);
+    cache.delete(key);
+  }
+  for (const item of items) {
+    let node = cache.get(item.key);
+    if (!node) {
+      node = item.create();
+      cache.set(item.key, node);
+    } else if (item.signature && node.dataset.renderSignature !== item.signature) {
+      const nextNode = item.create();
+      if (node.parentNode === container) node.replaceWith(nextNode);
+      node = nextNode;
+      cache.set(item.key, node);
+    } else if (typeof item.update === "function") {
+      const nextNode = item.update(node);
+      if (nextNode && nextNode !== node) {
+        node = nextNode;
+        cache.set(item.key, node);
+      }
+    }
+    node.dataset.scrollAnchorKey = item.key;
+    node.dataset.renderKey = item.key;
+    if (item.signature) node.dataset.renderSignature = item.signature;
+    container.appendChild(node);
+  }
+}
+
+function captureScrollAnchor(scroller) {
+  if (!scroller) return null;
+  const bounds = scroller.getBoundingClientRect();
+  const candidates = Array.from(scroller.querySelectorAll("[data-scroll-anchor-key]"));
+  for (const element of candidates) {
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom < bounds.top || rect.top > bounds.bottom) continue;
+    return {
+      key: element.dataset.scrollAnchorKey,
+      offset: rect.top - bounds.top,
+      scrollTop: scroller.scrollTop,
+    };
+  }
+  return { scrollTop: scroller.scrollTop };
+}
+
+function restoreScrollAnchor(scroller, anchor) {
+  if (!scroller || !anchor) return;
+  if (!anchor.key) {
+    scroller.scrollTop = anchor.scrollTop || 0;
+    return;
+  }
+  const element = scroller.querySelector(`[data-scroll-anchor-key="${cssEscape(anchor.key)}"]`);
+  if (!element) {
+    scroller.scrollTop = anchor.scrollTop || 0;
+    return;
+  }
+  const bounds = scroller.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
+  scroller.scrollTop += rect.top - bounds.top - anchor.offset;
+}
+
+function normalizeLogEvent(event) {
+  const type = event.type || event.event_type || "event";
+  const level = String(event.severity || event.level || "info").toLowerCase();
+  const category = String(event.category || fallbackLogCategory(type, level)).toLowerCase();
+  const safeDetail = event.safe_detail || event.detail || null;
+  const requestId = event.request_id || (safeDetail && safeDetail.id) || "";
+  const riskFlags = Array.isArray(event.risk_flags) ? event.risk_flags.filter(Boolean) : [];
   return {
     time: event.ts ? formatTimeOnly(event.ts) : formatTimeOnly(new Date()),
-    prefix,
-    message: userLogMessage(type, event.message || ""),
-    detail: event.detail ? formatLogDetail(type, event.detail) : "",
-    baseClass: `${baseClass} log-level-${level}`,
+    level,
+    category,
+    categoryLabel: logCategoryLabel(category),
+    title: event.title || userLogMessage(type, event.message || ""),
+    summary: event.summary || event.message || "",
+    requestId,
+    sessionHint: event.session_hint || "",
+    riskFlags,
+    metrics: event.metrics || {},
+    detailRows: logDetailRows(safeDetail, event.metrics || {}),
+    baseClass: `log-category-${category} log-level-${level}`,
   };
+}
+
+function fallbackLogCategory(type, level) {
+  if (level === "error") return "error";
+  if (String(type || "").includes("tool")) return "tool";
+  if (String(type || "").includes("request")) return "request";
+  return "system";
+}
+
+function logCategoryLabel(category) {
+  const key = {
+    request: "logCategoryRequest",
+    tool: "logCategoryTool",
+    protocol: "logCategoryProtocol",
+    context: "logCategoryContext",
+    web: "logCategoryWeb",
+    security: "logCategorySecurity",
+    system: "logCategorySystem",
+    error: "logCategoryError",
+  }[category];
+  return key ? t(key) : String(category || "system").toUpperCase();
+}
+
+function logLevelLabel(level) {
+  return String(level || "info").toUpperCase();
 }
 
 function userLogMessage(type, fallback) {
@@ -2475,19 +3077,120 @@ function userLogMessage(type, fallback) {
 }
 
 function logEntry(item) {
-  const wrap = document.createElement("div");
+  const wrap = document.createElement("details");
   wrap.className = `log-entry ${item.baseClass || ""}`;
-  const header = document.createElement("div");
-  header.className = "log-header";
-  header.innerHTML = `<span class="log-time">${escapeHtml(item.time)}</span><span class="log-badge">${escapeHtml(item.prefix)}</span><span class="log-msg">${escapeHtml(item.message)}</span>`;
-  wrap.appendChild(header);
-  if (item.detail) {
+  if (!item.detailRows.length) wrap.classList.add("log-entry-empty-detail");
+
+  const row = document.createElement("summary");
+  row.className = "log-row";
+  appendTextSpan(row, "log-time", item.time);
+  appendTextSpan(row, "log-level", logLevelLabel(item.level));
+  appendTextSpan(row, "log-category", item.categoryLabel);
+
+  const main = document.createElement("span");
+  main.className = "log-main";
+  const titleLine = document.createElement("span");
+  titleLine.className = "log-title-line";
+  appendTextSpan(titleLine, "log-title", item.title || t("runtimeEvent"));
+  const meta = document.createElement("span");
+  meta.className = "log-meta";
+  if (item.requestId) appendTextSpan(meta, "log-request-id", compactLogValue(item.requestId, 24));
+  if (item.sessionHint) appendTextSpan(meta, "log-session-hint", compactLogValue(item.sessionHint, 28));
+  titleLine.appendChild(meta);
+  main.appendChild(titleLine);
+
+  const subline = document.createElement("span");
+  subline.className = "log-subline";
+  appendTextSpan(subline, "log-summary", item.summary || "");
+  const riskList = document.createElement("span");
+  riskList.className = "log-risk-list";
+  for (const flag of item.riskFlags.slice(0, 4)) {
+    appendTextSpan(riskList, "log-risk", logRiskLabel(flag));
+  }
+  subline.appendChild(riskList);
+  main.appendChild(subline);
+  row.appendChild(main);
+  wrap.appendChild(row);
+
+  if (item.detailRows.length) {
     const detail = document.createElement("div");
-    detail.className = "log-detail selectable";
-    detail.textContent = item.detail;
+    detail.className = "log-detail-grid selectable";
+    for (const detailRow of item.detailRows) {
+      const label = document.createElement("span");
+      label.className = "log-detail-key";
+      label.textContent = detailRow.key;
+      const value = document.createElement("span");
+      value.className = "log-detail-value";
+      value.textContent = detailRow.value;
+      detail.append(label, value);
+    }
     wrap.appendChild(detail);
   }
   return wrap;
+}
+
+function appendTextSpan(parent, className, text) {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text || "";
+  parent.appendChild(span);
+  return span;
+}
+
+function logRiskLabel(flag) {
+  const value = String(flag || "").trim();
+  return value ? value.replace(/_/g, " ") : "";
+}
+
+function logDetailRows(detail, metrics) {
+  const rows = [];
+  appendLogDetailRows(rows, detail, "", 0);
+  if (metrics && typeof metrics === "object" && !Array.isArray(metrics)) {
+    for (const [key, value] of Object.entries(metrics)) {
+      if (value === undefined || value === null || value === "") continue;
+      if (logDetailContainsKey(detail, key)) continue;
+      addLogDetailRow(rows, "metric." + key, value);
+    }
+  }
+  return rows.slice(0, 48);
+}
+
+function logDetailContainsKey(value, targetKey) {
+  if (!value || typeof value !== "object" || !targetKey) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => logDetailContainsKey(item, targetKey));
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === targetKey) return true;
+    if (nested && typeof nested === "object" && logDetailContainsKey(nested, targetKey)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function appendLogDetailRows(rows, value, prefix, depth) {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    addLogDetailRow(rows, prefix || "items", value);
+    return;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    if (nested === undefined || nested === null || nested === "") continue;
+    const label = prefix ? prefix + "." + key : key;
+    if (nested && typeof nested === "object" && !Array.isArray(nested) && depth < 1) {
+      appendLogDetailRows(rows, nested, label, depth + 1);
+    } else {
+      addLogDetailRow(rows, label, nested);
+    }
+  }
+}
+
+function addLogDetailRow(rows, key, value) {
+  rows.push({
+    key,
+    value: compactLogValue(value, 360),
+  });
 }
 
 function logDivider(count) {
@@ -2627,6 +3330,12 @@ function handleConfigInput(event) {
   if (!lastSavedConfig) return;
   const nextPayload = buildConfigPayload();
   const next = normalizeConfigPayload(nextPayload);
+  if (shouldKeepConfigAsDraft(event)) {
+    pendingConfig = null;
+    clearAutosaveTimer();
+    renderConfigSaveState(sameConfigPayload(next, lastSavedConfig) ? "clean" : "draft");
+    return;
+  }
   if (sameConfigPayload(next, lastSavedConfig)) {
     pendingConfig = null;
     clearAutosaveTimer();
@@ -2652,6 +3361,13 @@ function configAutosaveDelayForEvent(event) {
   return isTextConfigInput(event.target) ? CONFIG_TEXT_AUTOSAVE_DELAY_MS : CONFIG_AUTOSAVE_DELAY_MS;
 }
 
+function shouldKeepConfigAsDraft(event) {
+  if (!event || event.type !== "input") return false;
+  const target = event.target;
+  if (!target || !SENSITIVE_CONFIG_INPUT_IDS.has(target.id || target.name)) return false;
+  return isTextConfigInput(target);
+}
+
 function isTextConfigInput(target) {
   if (!target || !target.tagName) return false;
   const tag = target.tagName.toLowerCase();
@@ -2664,6 +3380,7 @@ function isTextConfigInput(target) {
 function buildConfigPayload() {
   return {
     ...collectToolConfigPayload(),
+    CONFIG_VERSION: latestConfigVersion || "",
     DEEPSEEK_THINKING: getRadioValue("DEEPSEEK_THINKING") || "auto",
     UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE")),
     DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(getRadioValue("DEEPSEEK_TEMPERATURE_PRESET")),
@@ -2690,6 +3407,7 @@ function buildConfigPayload() {
 function normalizeConfigPayload(payload) {
   const output = {};
   for (const [key, value] of Object.entries(payload || {})) {
+    if (key === "CONFIG_VERSION" || key === "config_version") continue;
     if (Array.isArray(value)) {
       output[key] = key === ENABLED_TOOLS_KEY
         ? stringifyEnabledTools(value)
@@ -2733,9 +3451,26 @@ function clearAutosaveTimer() {
   autosaveTimer = null;
 }
 
-function renderConfigSaveState(state) {
+function renderConfigSaveState(state, detail = "") {
   const restartState = state === "savedRestart";
   if (els.restartRequiredBadge) els.restartRequiredBadge.hidden = !(restartRequired || restartState);
+  if (!els.configSaveStatus) return;
+  const key = {
+    draft: "configDraft",
+    pending: "configPending",
+    saving: "configSaving",
+    saved: "configSaved",
+    savedRestart: "configSavedRestart",
+    error: "configSaveError",
+  }[state];
+  els.configSaveStatus.hidden = !key;
+  if (!key) {
+    els.configSaveStatus.textContent = "";
+    els.configSaveStatus.dataset.state = "";
+    return;
+  }
+  els.configSaveStatus.textContent = detail ? `${t(key)}: ${detail}` : t(key);
+  els.configSaveStatus.dataset.state = state;
 }
 
 function setBusy(nextBusy, title, detail) {
@@ -3160,16 +3895,21 @@ function mergeEvents(events) {
     seen.add(key);
     output.push(event);
   }
-  return output.sort((left, right) => String(left.ts).localeCompare(String(right.ts)));
+  return output.sort((left, right) => {
+    const time = String(left.ts).localeCompare(String(right.ts));
+    if (time !== 0) return time;
+    return Number(left.id || 0) - Number(right.id || 0);
+  });
 }
 
 function eventsAfterNewestLog(events) {
-  const newest = newestLogTs();
   const existingKeys = new Set(logEvents.map(logEventKey));
-  return events.filter((event) => event && event.ts && String(event.ts) > newest && !existingKeys.has(logEventKey(event)));
+  return events.filter((event) => event && event.ts && !existingKeys.has(logEventKey(event)));
 }
 
 function logEventKey(event) {
+  const id = event && event.id !== undefined && event.id !== null ? String(event.id) : "";
+  if (id) return [event.ts || "", id].join("|");
   return [event.ts, event.type || "", event.message || "", JSON.stringify(event.detail || null)].join("|");
 }
 
@@ -3180,6 +3920,12 @@ function pruneLogDividers() {
 
 function oldestLogTs() {
   return logEvents.length > 0 ? logEvents[0].ts : null;
+}
+
+function oldestLogCursor() {
+  if (logEvents.length === 0) return logNextCursor;
+  const oldest = logEvents[0];
+  return oldest.cursor || [oldest.ts || "", oldest.id || ""].join("|") || logNextCursor;
 }
 
 function newestLogTs() {

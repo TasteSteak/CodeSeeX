@@ -4,12 +4,14 @@ use crate::http_utils::{config_version, is_newer_version, normalize_version_labe
 use crate::runtime_config::{RuntimeConfigChangeSource, RuntimeConfigService};
 use crate::tools::registry::{enabled_tool_ids, tool_registry, tool_settings};
 use codeseex_core::catalog::{
-    build_codeseex_catalog, catalog_file_is_compatible, codex_toml_snippet, write_catalog_atomic,
+    app_server_model_list, build_codeseex_catalog, catalog_file_is_compatible, codex_toml_snippet,
+    write_catalog_atomic,
 };
 use codeseex_core::models::available_models;
 use codeseex_core::urls::balance_url;
+use codeseex_core::AppServerModelListParams;
 use codeseex_core::{AppConfig, UserConfig};
-use codeseex_store::Store;
+use codeseex_store::{EventViewQuery, Store};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
@@ -53,9 +55,10 @@ impl ManagerRuntime {
         match (method.as_str(), path) {
             ("GET", "/health") => ok(json!({ "ok": true, "service": "codeseex" })),
             ("GET", "/api/status") => ok(self.status().await),
-            ("GET", "/api/usage") => ok(self.usage().await),
-            #[cfg(any(debug_assertions, test))]
-            ("POST", "/api/dev/seed-usage-template") => self.seed_usage_template_preview().await,
+            ("GET", "/api/usage") => ok(self.usage_with_query(query).await),
+            ("GET", "/api/usage/session") => self.usage_session(query).await,
+            ("GET", "/api/models") => ok(self.model_list_value(query)),
+            ("POST", "/api/app-server") => ok(self.app_server_rpc(body.unwrap_or(&Value::Null))),
             ("GET", "/api/config") => ok(self.config_payload()),
             ("POST", "/api/config") => {
                 self.save_config(body.cloned().unwrap_or_else(|| json!({})))
@@ -89,6 +92,43 @@ impl ManagerRuntime {
         self.runtime_config.active_config()
     }
 
+    pub fn model_list(&self, params: AppServerModelListParams) -> Value {
+        serde_json::to_value(app_server_model_list(params)).unwrap_or_else(|_| {
+            json!({
+                "data": [],
+                "nextCursor": null
+            })
+        })
+    }
+
+    fn model_list_value(&self, query: Option<&Value>) -> Value {
+        self.model_list(model_list_params_from_query(query))
+    }
+
+    fn app_server_rpc(&self, body: &Value) -> Value {
+        let id = body.get("id").cloned().unwrap_or(Value::Null);
+        match body.get("method").and_then(Value::as_str) {
+            Some("model/list") => json!({
+                "id": id,
+                "result": self.model_list(model_list_params_from_query(body.get("params"))),
+            }),
+            Some(method) => json!({
+                "id": id,
+                "error": {
+                    "code": "method_not_found",
+                    "message": format!("Unsupported app server method '{method}'.")
+                }
+            }),
+            None => json!({
+                "id": id,
+                "error": {
+                    "code": "invalid_request",
+                    "message": "Missing app server method."
+                }
+            }),
+        }
+    }
+
     fn client(&self) -> reqwest::Client {
         let config = self.active_config();
         let timeout = std::time::Duration::from_millis(config.upstream.timeout_ms);
@@ -114,16 +154,14 @@ impl ManagerRuntime {
             "runtime": {
                 "status": "running",
                 "port": config.port,
+                "usage_revision": runtime.as_ref().map(|value| value.usage_revision).unwrap_or(0),
+                "event_revision": runtime.as_ref().map(|value| value.event_revision).unwrap_or(0),
                 "active_requests": runtime.as_ref().map(|value| value.active_requests).unwrap_or(0),
                 "request_count": runtime.as_ref().map(|value| value.request_count).unwrap_or(0),
                 "billable_request_count": runtime.as_ref().map(|value| value.billable_request_count).unwrap_or(0),
                 "failed_request_count": runtime.as_ref().map(|value| value.failed_request_count).unwrap_or(0),
                 "last_request_at": runtime.as_ref().and_then(|value| value.last_request_at.clone()),
-                "last_turn": runtime.as_ref().and_then(|value| value.last_turn.clone()),
-                "last_billable_request": runtime.as_ref().and_then(|value| value.last_billable_request.clone()),
-                "turn_history": runtime.as_ref().map(|value| value.turn_history.clone()).unwrap_or_default(),
-                "billable_history": runtime.as_ref().map(|value| value.billable_history.clone()).unwrap_or_default(),
-                "usage_sessions": runtime.as_ref().map(|value| value.usage_sessions.clone()).unwrap_or_default(),
+                "last_activity_at": runtime.as_ref().and_then(|value| value.last_activity_at.clone()),
                 "total_cached_input_tokens": runtime.as_ref().map(|value| value.total_cached_input_tokens).unwrap_or(0),
                 "total_cache_miss_input_tokens": runtime.as_ref().map(|value| value.total_cache_miss_input_tokens).unwrap_or(0),
                 "total_output_tokens": runtime.as_ref().map(|value| value.total_output_tokens).unwrap_or(0),
@@ -137,49 +175,76 @@ impl ManagerRuntime {
     }
 
     pub async fn usage(&self) -> Value {
-        let runtime = self.store.runtime_summary(500).await.ok();
+        self.usage_with_query(None).await
+    }
+
+    pub async fn usage_with_query(&self, query: Option<&Value>) -> Value {
+        let limit = query
+            .and_then(|value| value.get("limit"))
+            .and_then(value_to_u32)
+            .unwrap_or(60);
+        let cursor = query
+            .and_then(|value| value.get("cursor"))
+            .and_then(Value::as_str);
+        let since_revision = query
+            .and_then(|value| value.get("since_revision"))
+            .and_then(value_to_u64);
+        let page = self
+            .store
+            .usage_page(limit, cursor, since_revision)
+            .await
+            .ok();
         json!({
             "ok": true,
             "runtime": {
-                "active_requests": runtime.as_ref().map(|value| value.active_requests).unwrap_or(0),
-                "request_count": runtime.as_ref().map(|value| value.request_count).unwrap_or(0),
-                "billable_request_count": runtime.as_ref().map(|value| value.billable_request_count).unwrap_or(0),
-                "failed_request_count": runtime.as_ref().map(|value| value.failed_request_count).unwrap_or(0),
-                "last_request_at": runtime.as_ref().and_then(|value| value.last_request_at.clone()),
-                "last_turn": runtime.as_ref().and_then(|value| value.last_turn.clone()),
-                "last_billable_request": runtime.as_ref().and_then(|value| value.last_billable_request.clone()),
-                "turn_history": runtime.as_ref().map(|value| value.turn_history.clone()).unwrap_or_default(),
-                "billable_history": runtime.as_ref().map(|value| value.billable_history.clone()).unwrap_or_default(),
-                "usage_sessions": runtime.as_ref().map(|value| value.usage_sessions.clone()).unwrap_or_default(),
-                "total_cached_input_tokens": runtime.as_ref().map(|value| value.total_cached_input_tokens).unwrap_or(0),
-                "total_cache_miss_input_tokens": runtime.as_ref().map(|value| value.total_cache_miss_input_tokens).unwrap_or(0),
-                "total_output_tokens": runtime.as_ref().map(|value| value.total_output_tokens).unwrap_or(0),
-                "average_ms": runtime.as_ref().map(|value| value.average_ms).unwrap_or(0)
+                "usage_revision": page.as_ref().map(|value| value.usage_revision).unwrap_or(0),
+                "event_revision": page.as_ref().map(|value| value.event_revision).unwrap_or(0),
+                "unchanged": page.as_ref().map(|value| value.unchanged).unwrap_or(false),
+                "active_requests": page.as_ref().map(|value| value.active_requests).unwrap_or(0),
+                "request_count": page.as_ref().map(|value| value.request_count).unwrap_or(0),
+                "billable_request_count": page.as_ref().map(|value| value.billable_request_count).unwrap_or(0),
+                "failed_request_count": page.as_ref().map(|value| value.failed_request_count).unwrap_or(0),
+                "last_request_at": page.as_ref().and_then(|value| value.last_request_at.clone()),
+                "last_activity_at": page.as_ref().and_then(|value| value.last_activity_at.clone()),
+                "usage_sessions": page.as_ref().map(|value| value.usage_sessions.clone()).unwrap_or_default(),
+                "has_more": page.as_ref().map(|value| value.has_more).unwrap_or(false),
+                "next_cursor": page.as_ref().and_then(|value| value.next_cursor.clone()),
+                "billing_buckets": page.as_ref().map(|value| value.billing_buckets.clone()).unwrap_or_default(),
+                "total_cached_input_tokens": page.as_ref().map(|value| value.total_cached_input_tokens).unwrap_or(0),
+                "total_cache_miss_input_tokens": page.as_ref().map(|value| value.total_cache_miss_input_tokens).unwrap_or(0),
+                "total_output_tokens": page.as_ref().map(|value| value.total_output_tokens).unwrap_or(0),
+                "average_ms": page.as_ref().map(|value| value.average_ms).unwrap_or(0)
             }
         })
     }
 
-    #[cfg(any(debug_assertions, test))]
-    pub async fn seed_usage_template_preview(&self) -> ManagerJsonResponse {
-        if !usage_template_preview_enabled() {
+    pub async fn usage_session(&self, query: Option<&Value>) -> ManagerJsonResponse {
+        let Some(id) = query
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             return status(
-                404,
+                400,
                 json!({
                     "ok": false,
-                    "error": "usage_template_preview_disabled"
+                    "error": "missing_usage_session_id"
                 }),
             );
-        }
-        match self.store.seed_usage_template_preview().await {
-            Ok(records) => ok(json!({
+        };
+        match self.store.usage_session_detail(id).await {
+            Ok(detail) => ok(json!({
                 "ok": true,
-                "records": records
+                "usage_revision": detail.usage_revision,
+                "session": detail.session
             })),
             Err(error) => status(
                 500,
                 json!({
                     "ok": false,
-                    "error": error.to_string()
+                    "error": "usage_session_failed",
+                    "message": error.to_string()
                 }),
             ),
         }
@@ -238,10 +303,23 @@ impl ManagerRuntime {
                     &config.data_dir,
                 ));
                 for key in tool_config_keys {
+                    if key == crate::tools::vision::API_KEY_KEY {
+                        continue;
+                    }
                     if let Some(value) = settings.get(&key) {
                         object.insert(key, Value::String(value.clone()));
                     }
                 }
+                let legacy_configured = settings
+                    .get(crate::tools::vision::API_KEY_KEY)
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false);
+                object.insert(
+                    "VISION_API_KEY_CONFIGURED".to_owned(),
+                    Value::Bool(
+                        crate::secrets::vision_api_key_configured(&config) || legacy_configured,
+                    ),
+                );
             }
         }
         payload
@@ -249,9 +327,35 @@ impl ManagerRuntime {
 
     pub async fn save_config(&self, payload: Value) -> ManagerJsonResponse {
         let config = self.active_config();
-        let existing_config = UserConfig::read_from(&config.config_path()).unwrap_or_default();
+        if let Some(client_version) = payload
+            .get("CONFIG_VERSION")
+            .or_else(|| payload.get("config_version"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let current_version = config_version(&config);
+            if client_version != current_version {
+                return status(
+                    409,
+                    json!({
+                        "ok": false,
+                        "code": "config_version_conflict",
+                        "message": "Configuration changed outside this editor. Refresh before saving.",
+                        "config_version": current_version
+                    }),
+                );
+            }
+        }
+        let mut existing_config = UserConfig::read_from(&config.config_path()).unwrap_or_default();
+        if let Err(error) = apply_secret_payload(&config, &payload, &mut existing_config) {
+            return status(500, json!({ "ok": false, "error": error.to_string() }));
+        }
         let existing_retention_days = existing_config.log_retention_days();
-        let user_config = user_config_from_payload(&payload, existing_config, &config);
+        let mut user_config = user_config_from_payload(&payload, existing_config, &config);
+        if let Err(error) = migrate_legacy_vision_secret(&config, &mut user_config) {
+            return status(500, json!({ "ok": false, "error": error.to_string() }));
+        }
         match user_config.write_atomic(&config.config_path()) {
             Ok(()) => {
                 if let Some(change) = self
@@ -328,7 +432,7 @@ impl ManagerRuntime {
                 ok(json!({
                     "ok": true,
                     "saved": true,
-                    "config_version": now_seconds().to_string(),
+                    "config_version": config_version(&config),
                     "path": config.config_path().to_string_lossy(),
                     "maintenance": maintenance
                 }))
@@ -486,15 +590,54 @@ impl ManagerRuntime {
             .and_then(|value| value.get("limit"))
             .and_then(value_to_u32)
             .unwrap_or(30);
-        let before = query
-            .and_then(|value| value.get("before"))
-            .and_then(Value::as_str);
-        match self.store.recent_visible_events(limit, before).await {
-            Ok((events, has_more)) => ok(json!({
-                "ok": true,
-                "events": events,
-                "has_more": has_more
-            })),
+        let event_query = EventViewQuery {
+            limit,
+            before: query
+                .and_then(|value| value.get("before"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            cursor: query
+                .and_then(|value| value.get("cursor"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            after: query
+                .and_then(|value| value.get("after"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            audience: query
+                .and_then(|value| value.get("audience"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            category: query
+                .and_then(|value| value.get("category"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            level: query
+                .and_then(|value| value.get("level"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            request_id: query
+                .and_then(|value| value.get("request_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            q: query
+                .and_then(|value| value.get("q"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+        match self.store.recent_event_views(event_query).await {
+            Ok((events, has_more, next_cursor)) => {
+                let (_, event_revision) = self.store.revisions().await.unwrap_or((0, 0));
+                let latest_cursor = events.last().and_then(|event| event.cursor.clone());
+                ok(json!({
+                    "ok": true,
+                    "events": events,
+                    "has_more": has_more,
+                    "next_cursor": next_cursor,
+                    "latest_cursor": latest_cursor,
+                    "event_revision": event_revision
+                }))
+            }
             Err(error) => status(
                 500,
                 json!({ "ok": false, "error": error.to_string(), "events": [] }),
@@ -571,6 +714,79 @@ fn catalog_file_matches_current(
     existing == expected
 }
 
+fn apply_secret_payload(
+    config: &AppConfig,
+    payload: &Value,
+    existing_config: &mut UserConfig,
+) -> Result<(), String> {
+    let clear_requested = payload_bool(payload, "VISION_API_KEY_CLEAR");
+    let new_key = payload
+        .get(crate::tools::vision::API_KEY_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if clear_requested {
+        crate::secrets::clear_vision_api_key(config).map_err(|error| error.to_string())?;
+        clear_legacy_vision_key(existing_config);
+    }
+    if let Some(new_key) = new_key {
+        crate::secrets::write_vision_api_key(config, &new_key)
+            .map_err(|error| error.to_string())?;
+        clear_legacy_vision_key(existing_config);
+    }
+    Ok(())
+}
+
+fn migrate_legacy_vision_secret(
+    config: &AppConfig,
+    user_config: &mut UserConfig,
+) -> Result<(), String> {
+    let Some(legacy_key) = take_legacy_vision_key(user_config) else {
+        return Ok(());
+    };
+    if !crate::secrets::vision_api_key_configured(config) {
+        crate::secrets::write_vision_api_key(config, &legacy_key)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn payload_bool(payload: &Value, key: &str) -> bool {
+    match payload.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "enabled"
+        ),
+        _ => false,
+    }
+}
+
+fn clear_legacy_vision_key(config: &mut UserConfig) {
+    let _ = take_legacy_vision_key(config);
+}
+
+fn take_legacy_vision_key(config: &mut UserConfig) -> Option<String> {
+    let tools = config.tools.as_mut()?;
+    let vision = tools.vision_analyze.as_mut()?;
+    let value = vision
+        .api_key
+        .take()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if vision.analyze_url.is_none()
+        && vision.analyze_model.is_none()
+        && vision.generate_url.is_none()
+        && vision.generate_model.is_none()
+        && vision.api_key.is_none()
+    {
+        tools.vision_analyze = None;
+    }
+    value
+}
+
 fn ok(body: Value) -> ManagerJsonResponse {
     status(200, body)
 }
@@ -596,19 +812,6 @@ fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     }
 }
 
-#[cfg(any(debug_assertions, test))]
-fn usage_template_preview_enabled() -> bool {
-    env::var("CODESEEX_USAGE_TEMPLATE_PREVIEW")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn canonical_enabled_tool_ids(ids: &[String]) -> Vec<String> {
     let mut output = Vec::new();
     for id in ids {
@@ -632,14 +835,14 @@ fn languages() -> Value {
         "system_locale": std::env::var("LANG").ok(),
         "languages": [
             { "id": "en_us", "name": "English", "url": "/lang/en_us.json" },
-            { "id": "zh_cn", "name": "Chinese (Simplified)", "url": "/lang/zh_cn.json" },
-            { "id": "zh_tw", "name": "Chinese (Traditional)", "url": "/lang/zh_tw.json" },
-            { "id": "zh_hk", "name": "Chinese (Hong Kong)", "url": "/lang/zh_hk.json" },
-            { "id": "ja_jp", "name": "Japanese", "url": "/lang/ja_jp.json" },
-            { "id": "ko_kr", "name": "Korean", "url": "/lang/ko_kr.json" },
-            { "id": "fr_fr", "name": "French", "url": "/lang/fr_fr.json" },
+            { "id": "zh_cn", "name": "简体中文 - 中国大陆", "url": "/lang/zh_cn.json" },
+            { "id": "zh_tw", "name": "繁體中文 - 台灣", "url": "/lang/zh_tw.json" },
+            { "id": "zh_hk", "name": "繁體中文 - 香港", "url": "/lang/zh_hk.json" },
+            { "id": "ja_jp", "name": "日本語", "url": "/lang/ja_jp.json" },
+            { "id": "ko_kr", "name": "한국어", "url": "/lang/ko_kr.json" },
+            { "id": "fr_fr", "name": "Français", "url": "/lang/fr_fr.json" },
             { "id": "de_de", "name": "Deutsch", "url": "/lang/de_de.json" },
-            { "id": "ru_ru", "name": "Russian", "url": "/lang/ru_ru.json" }
+            { "id": "ru_ru", "name": "Русский", "url": "/lang/ru_ru.json" }
         ]
     })
 }
@@ -702,6 +905,39 @@ fn value_to_u32(value: &Value) -> Option<u32> {
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .or_else(|| value.as_str().and_then(|text| text.parse::<u32>().ok()))
+}
+
+fn value_to_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+}
+
+fn model_list_params_from_query(query: Option<&Value>) -> AppServerModelListParams {
+    AppServerModelListParams {
+        cursor: query
+            .and_then(|value| value.get("cursor"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        limit: query
+            .and_then(|value| value.get("limit"))
+            .and_then(value_to_u32),
+        include_hidden: query
+            .and_then(|value| value.get("includeHidden"))
+            .and_then(value_to_bool),
+    }
+}
+
+fn value_to_bool(value: &Value) -> Option<bool> {
+    value.as_bool().or_else(|| {
+        let text = value.as_str()?.trim().to_ascii_lowercase();
+        match text.as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -832,6 +1068,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_api_returns_safe_diagnostic_view() {
+        let config = temp_config("events-safe-diagnostic-view");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+        runtime
+            .store
+            .record_event(
+                "info",
+                "context_compile_diagnostic",
+                "Context compile diagnostic.",
+                Some(&json!({
+                    "id": "resp_events_api",
+                    "context": {
+                        "input_items": 5,
+                        "message_items": 2,
+                        "tool_result_items": 1,
+                        "unsafe_prompt": "do not expose"
+                    }
+                })),
+            )
+            .await
+            .expect("record diagnostic");
+
+        let response = runtime
+            .handle_json(
+                "GET",
+                "/api/events",
+                Some(&json!({
+                    "limit": 10,
+                    "audience": "safe",
+                    "category": "context"
+                })),
+                None,
+            )
+            .await;
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.get("ok").and_then(Value::as_bool), Some(true));
+        let events = response
+            .body
+            .get("events")
+            .and_then(Value::as_array)
+            .expect("events array");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].get("category").and_then(Value::as_str),
+            Some("context")
+        );
+        assert_eq!(
+            events[0].get("request_id").and_then(Value::as_str),
+            Some("resp_events_api")
+        );
+        let body = serde_json::to_string(&response.body).expect("body json");
+        assert!(!body.contains("unsafe_prompt"));
+
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
     async fn status_and_usage_share_runtime_totals() {
         let config = temp_config("status-usage-runtime");
         let runtime = ManagerRuntime::open(config.clone())
@@ -875,7 +1171,8 @@ mod tests {
             "total_cached_input_tokens",
             "total_cache_miss_input_tokens",
             "total_output_tokens",
-            "usage_sessions",
+            "usage_revision",
+            "event_revision",
         ] {
             assert_eq!(
                 status.pointer(&format!("/runtime/{key}")),
@@ -883,51 +1180,14 @@ mod tests {
                 "{key} should match between status and usage"
             );
         }
-        assert_eq!(
-            status
-                .pointer("/runtime/billable_history")
-                .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(1)
-        );
+        assert!(status.pointer("/runtime/billable_history").is_none());
+        assert!(status.pointer("/runtime/turn_history").is_none());
+        assert!(status.pointer("/runtime/usage_sessions").is_none());
         assert_eq!(
             usage
                 .pointer("/runtime/usage_sessions/0/title")
                 .and_then(Value::as_str),
             Some("hello")
-        );
-
-        let _ = std::fs::remove_dir_all(config.data_dir);
-    }
-
-    #[tokio::test]
-    async fn usage_template_preview_endpoint_is_env_gated() {
-        let config = temp_config("usage-template-preview-gated");
-        let runtime = ManagerRuntime::open(config.clone())
-            .await
-            .expect("open manager runtime");
-
-        std::env::remove_var("CODESEEX_USAGE_TEMPLATE_PREVIEW");
-        let disabled = runtime
-            .handle_json("POST", "/api/dev/seed-usage-template", None, None)
-            .await;
-        assert_eq!(disabled.status, 404);
-
-        std::env::set_var("CODESEEX_USAGE_TEMPLATE_PREVIEW", "1");
-        let enabled = runtime
-            .handle_json("POST", "/api/dev/seed-usage-template", None, None)
-            .await;
-        std::env::remove_var("CODESEEX_USAGE_TEMPLATE_PREVIEW");
-        assert_eq!(enabled.status, 200);
-        assert_eq!(enabled.body.get("records").and_then(Value::as_u64), Some(6));
-
-        let usage = runtime.usage().await;
-        assert_eq!(
-            usage
-                .pointer("/runtime/usage_sessions")
-                .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(4)
         );
 
         let _ = std::fs::remove_dir_all(config.data_dir);
@@ -974,9 +1234,12 @@ mod tests {
             payload.get("VISION_ANALYZE_MODEL").and_then(Value::as_str),
             Some("vision-model")
         );
+        assert!(payload.get("VISION_API_KEY").is_none());
         assert_eq!(
-            payload.get("VISION_API_KEY").and_then(Value::as_str),
-            Some("secret-key")
+            payload
+                .get("VISION_API_KEY_CONFIGURED")
+                .and_then(Value::as_bool),
+            Some(true)
         );
         let _ = std::fs::remove_dir_all(config.data_dir);
     }

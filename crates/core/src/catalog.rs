@@ -9,7 +9,66 @@ use std::path::Path;
 const CODEX_BRIDGED_IDENTITY: &str = "You are Codex, a coding agent based on DeepSeek-V4 and running through the local CodeSeeX proxy inside the Codex environment.";
 const LEGACY_APPLY_PATCH_LINE: &str = "- For local text edits, call apply_patch with a single raw Codex patch string. The patch must start with *** Begin Patch and end with *** End Patch.";
 const PREVIOUS_STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch must start with *** Begin Patch and end with *** End Patch.";
-const STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch must start with *** Begin Patch and end with *** End Patch, and uses standalone grammar lines for structure and hunk prefixes for file data lines; in add-file hunks, each file content line is written as + followed by content.";
+pub const APPLY_PATCH_SYSTEM_PROMPT_RULES: &str = concat!(
+    "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. ",
+    "Use Codex native apply_patch grammar: the first line must be *** Begin Patch and the final line must be *** End Patch. ",
+    "Use standalone grammar lines for structure and hunk prefixes for file data lines. Operation headers are exactly *** Add File: path, *** Update File: path, and *** Delete File: path. Bare headers such as --- a/file or +++ b/file are invalid. ",
+    "For update hunks, every file data line must start with a hunk prefix: space for unchanged context, + for added lines, or - for removed lines. An empty context line is not a blank line; encode it as a single space character line. ",
+    "For add-file hunks, each file content line is written as + followed by content.\n",
+    "Apply patch examples:\n",
+    "Update one file:\n",
+    "*** Begin Patch\n",
+    "*** Update File: src/lib.rs\n",
+    "@@\n",
+    " pub fn old_name() {}\n",
+    "-pub fn broken() {}\n",
+    "+pub fn fixed() {}\n",
+    "*** End Patch\n\n",
+    "Update with an empty unchanged line:\n",
+    "*** Begin Patch\n",
+    "*** Update File: src/lib.rs\n",
+    "@@\n",
+    " fn before() {}\n",
+    " \n",
+    " fn after() {}\n",
+    "*** End Patch\n",
+    "The blank-looking line above is a context line containing exactly one space.\n\n",
+    "Edit multiple files in one patch:\n",
+    "*** Begin Patch\n",
+    "*** Update File: src/lib.rs\n",
+    "@@\n",
+    "-pub mod old;\n",
+    "+pub mod new;\n",
+    "*** Update File: tests/lib_test.rs\n",
+    "@@\n",
+    "-assert_eq!(name(), \"old\");\n",
+    "+assert_eq!(name(), \"new\");\n",
+    "*** End Patch\n\n",
+    "Add a file:\n",
+    "*** Begin Patch\n",
+    "*** Add File: src/new_module.rs\n",
+    "+pub fn name() -> &'static str {\n",
+    "+    \"new\"\n",
+    "+}\n",
+    "*** End Patch\n\n",
+    "Delete a file:\n",
+    "*** Begin Patch\n",
+    "*** Delete File: src/old_module.rs\n",
+    "*** End Patch\n\n",
+    "Move or rename a file:\n",
+    "*** Begin Patch\n",
+    "*** Update File: src/old_name.rs\n",
+    "*** Move to: src/new_name.rs\n",
+    "*** End Patch"
+);
+pub const APPLY_PATCH_TOOL_PARAMETER_DESCRIPTION: &str = concat!(
+    "One complete raw apply_patch document. The first line must be *** Begin Patch and the final line must be *** End Patch. ",
+    "Use standalone grammar lines for patch structure and hunk-prefixed data lines for file content. ",
+    "Operation headers are *** Add File: path, *** Update File: path, and *** Delete File: path; Bare headers such as --- a/file or +++ b/file are invalid, and do not use bare headers. ",
+    "For *** Update File: path, use @@ hunks. Every hunk file data line must start with exactly one hunk prefix: space for unchanged context, + for an added line, or - for a removed line. Encode an empty context line as a line containing a single space, never as a truly blank line. ",
+    "For *** Add File: path, each file content line is encoded as + followed by content. Omit content hunks for deletes. Standard unified hunk headers are accepted and normalized to native Codex @@ headers."
+);
+const STRICT_APPLY_PATCH_LINE: &str = APPLY_PATCH_SYSTEM_PROMPT_RULES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Catalog {
@@ -26,6 +85,72 @@ pub struct CatalogModel {
     pub priority: u32,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerModelListParams {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+    pub include_hidden: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerModelListResponse {
+    pub data: Vec<AppServerModel>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerModel {
+    pub id: String,
+    pub model: String,
+    pub upgrade: Option<String>,
+    pub upgrade_info: Option<AppServerModelUpgradeInfo>,
+    pub availability_nux: Option<AppServerModelAvailabilityNux>,
+    pub display_name: String,
+    pub description: String,
+    pub hidden: bool,
+    pub supported_reasoning_efforts: Vec<AppServerReasoningEffortOption>,
+    pub default_reasoning_effort: String,
+    pub input_modalities: Vec<String>,
+    pub supports_personality: bool,
+    pub additional_speed_tiers: Vec<String>,
+    pub service_tiers: Vec<AppServerModelServiceTier>,
+    pub default_service_tier: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerReasoningEffortOption {
+    pub reasoning_effort: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerModelUpgradeInfo {
+    pub model: String,
+    pub upgrade_copy: Option<String>,
+    pub model_link: Option<String>,
+    pub migration_markdown: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerModelAvailabilityNux {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppServerModelServiceTier {
+    pub id: String,
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +170,46 @@ pub fn build_codeseex_catalog() -> Catalog {
     catalog
 }
 
+pub fn app_server_model_list(params: AppServerModelListParams) -> AppServerModelListResponse {
+    app_server_model_list_from_catalog(&build_codeseex_catalog(), params)
+}
+
+pub fn app_server_model_list_from_catalog(
+    catalog: &Catalog,
+    params: AppServerModelListParams,
+) -> AppServerModelListResponse {
+    let include_hidden = params.include_hidden.unwrap_or(false);
+    let start = params
+        .cursor
+        .as_deref()
+        .and_then(|cursor| cursor.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = params
+        .limit
+        .filter(|value| *value > 0)
+        .map(|value| value as usize)
+        .unwrap_or(50);
+    let any_explicit_default = catalog.models.iter().any(catalog_model_is_default);
+    let models = catalog
+        .models
+        .iter()
+        .filter(|model| include_hidden || !catalog_model_is_hidden(model))
+        .map(|model| app_server_model_from_catalog_model(model, any_explicit_default))
+        .collect::<Vec<_>>();
+    let end = if limit == 0 {
+        start.min(models.len())
+    } else {
+        start.saturating_add(limit).min(models.len())
+    };
+    let data = models
+        .get(start.min(models.len())..end)
+        .unwrap_or_default()
+        .to_vec();
+    let next_cursor = (end < models.len()).then(|| end.to_string());
+
+    AppServerModelListResponse { data, next_cursor }
+}
+
 fn catalog_from_seed(text: &str) -> serde_json::Result<Catalog> {
     let mut seed: CatalogSeed = serde_json::from_str(text)?;
     if !seed.common_model_fields.is_empty() {
@@ -60,6 +225,202 @@ fn catalog_from_seed(text: &str) -> serde_json::Result<Catalog> {
     Ok(Catalog {
         models: seed.models,
     })
+}
+
+fn catalog_model_is_hidden(model: &CatalogModel) -> bool {
+    match model.extra.get("hidden").and_then(Value::as_bool) {
+        Some(hidden) => hidden,
+        None => matches!(
+            model.extra.get("visibility").and_then(Value::as_str),
+            Some("hidden")
+        ),
+    }
+}
+
+fn catalog_model_is_default(model: &CatalogModel) -> bool {
+    model
+        .extra
+        .get("is_default")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn string_extra(extra: &BTreeMap<String, Value>, key: &str) -> Option<String> {
+    extra
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn bool_extra(extra: &BTreeMap<String, Value>, key: &str) -> Option<bool> {
+    extra.get(key).and_then(Value::as_bool)
+}
+
+fn string_array_extra(extra: &BTreeMap<String, Value>, key: &str) -> Option<Vec<String>> {
+    Some(
+        extra
+            .get(key)?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+fn supported_reasoning_efforts(model: &CatalogModel) -> Vec<AppServerReasoningEffortOption> {
+    let efforts = model
+        .extra
+        .get("supported_reasoning_efforts")
+        .or_else(|| model.extra.get("supported_reasoning_levels"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(reasoning_effort_option)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if efforts.is_empty() {
+        vec![AppServerReasoningEffortOption {
+            reasoning_effort: string_extra(&model.extra, "default_reasoning_level")
+                .unwrap_or_else(|| "medium".to_owned()),
+            description: "Default reasoning effort".to_owned(),
+        }]
+    } else {
+        efforts
+    }
+}
+
+fn reasoning_effort_option(value: &Value) -> Option<AppServerReasoningEffortOption> {
+    let object = value.as_object()?;
+    let effort = object
+        .get("reasoningEffort")
+        .or_else(|| object.get("reasoning_effort"))
+        .or_else(|| object.get("effort"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    let description = object
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Some(AppServerReasoningEffortOption {
+        reasoning_effort: effort.to_owned(),
+        description: description.to_owned(),
+    })
+}
+
+fn model_upgrade_info(value: Option<&Value>) -> Option<AppServerModelUpgradeInfo> {
+    let value = value?;
+    if let Some(model) = value.as_str().filter(|value| !value.trim().is_empty()) {
+        return Some(AppServerModelUpgradeInfo {
+            model: model.to_owned(),
+            upgrade_copy: None,
+            model_link: None,
+            migration_markdown: None,
+        });
+    }
+    let object = value.as_object()?;
+    let model = object
+        .get("model")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    Some(AppServerModelUpgradeInfo {
+        model: model.to_owned(),
+        upgrade_copy: optional_string(
+            object
+                .get("upgradeCopy")
+                .or_else(|| object.get("upgrade_copy")),
+        ),
+        model_link: optional_string(object.get("modelLink").or_else(|| object.get("model_link"))),
+        migration_markdown: optional_string(
+            object
+                .get("migrationMarkdown")
+                .or_else(|| object.get("migration_markdown")),
+        ),
+    })
+}
+
+fn availability_nux(value: Option<&Value>) -> Option<AppServerModelAvailabilityNux> {
+    let value = value?;
+    if value.is_null() {
+        return None;
+    }
+    let message = value
+        .as_object()
+        .and_then(|object| object.get("message"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    Some(AppServerModelAvailabilityNux {
+        message: message.to_owned(),
+    })
+}
+
+fn service_tiers(value: Option<&Value>) -> Vec<AppServerModelServiceTier> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let object = item.as_object()?;
+                    Some(AppServerModelServiceTier {
+                        id: required_string(object.get("id"))?,
+                        name: required_string(object.get("name"))?,
+                        description: required_string(object.get("description"))?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn required_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    required_string(value)
+}
+
+fn app_server_model_from_catalog_model(
+    model: &CatalogModel,
+    any_explicit_default: bool,
+) -> AppServerModel {
+    let upgrade_info = model_upgrade_info(model.extra.get("upgrade"));
+    let upgrade = upgrade_info.as_ref().map(|value| value.model.clone());
+    AppServerModel {
+        id: model.slug.clone(),
+        model: model.slug.clone(),
+        upgrade,
+        upgrade_info,
+        availability_nux: availability_nux(model.extra.get("availability_nux")),
+        display_name: model.display_name.clone(),
+        description: model.description.clone(),
+        hidden: catalog_model_is_hidden(model),
+        supported_reasoning_efforts: supported_reasoning_efforts(model),
+        default_reasoning_effort: string_extra(&model.extra, "default_reasoning_level")
+            .unwrap_or_else(|| "medium".to_owned()),
+        input_modalities: string_array_extra(&model.extra, "input_modalities")
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| vec!["text".to_owned(), "image".to_owned()]),
+        supports_personality: bool_extra(&model.extra, "supports_personality").unwrap_or(false),
+        additional_speed_tiers: string_array_extra(&model.extra, "additional_speed_tiers")
+            .unwrap_or_default(),
+        service_tiers: service_tiers(model.extra.get("service_tiers")),
+        default_service_tier: string_extra(&model.extra, "default_service_tier"),
+        is_default: if any_explicit_default {
+            catalog_model_is_default(model)
+        } else {
+            model.slug == MODEL_PRO
+        },
+    }
 }
 
 pub fn write_catalog_atomic(path: &Path, catalog: &Catalog) -> Result<()> {
@@ -354,8 +715,18 @@ mod tests {
             assert!(base.contains(
                 "When creating, editing, deleting, or renaming local text files, call apply_patch"
             ));
-            assert!(base.contains("must start with *** Begin Patch and end with *** End Patch"));
+            assert!(base.contains("first line must be *** Begin Patch"));
+            assert!(base.contains("final line must be *** End Patch"));
+            assert!(base.contains("empty context line is not a blank line"));
+            assert!(base.contains("single space character line"));
+            assert!(base.contains("Apply patch examples:"));
+            assert!(base.contains("Edit multiple files in one patch:"));
+            assert!(base.contains("*** Move to: src/new_name.rs"));
             assert!(messages.contains("Do not answer with file contents as prose"));
+            assert!(messages.contains("empty context line is not a blank line"));
+            assert!(messages.contains("single space character line"));
+            assert!(messages.contains("Edit multiple files in one patch:"));
+            assert!(messages.contains("*** Move to: src/new_name.rs"));
         }
     }
 
@@ -364,6 +735,76 @@ mod tests {
         let catalog = build_codeseex_catalog();
         let value = serde_json::to_value(catalog).expect("catalog to json");
         assert!(catalog_value_is_compatible(&value));
+    }
+
+    #[test]
+    fn app_server_model_list_uses_catalog_metadata() {
+        let response = app_server_model_list(AppServerModelListParams::default());
+
+        assert_eq!(response.next_cursor, None);
+        assert_eq!(response.data.len(), 2);
+        let pro = response
+            .data
+            .iter()
+            .find(|model| model.id == MODEL_PRO)
+            .expect("pro model");
+        assert_eq!(pro.model, MODEL_PRO);
+        assert_eq!(pro.display_name, "DeepSeek-V4 Pro");
+        assert!(!pro.hidden);
+        assert!(pro.is_default);
+        assert_eq!(pro.default_reasoning_effort, "medium");
+        assert_eq!(pro.input_modalities, vec!["text", "image"]);
+        assert_eq!(
+            pro.supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(pro.additional_speed_tiers, vec!["fast"]);
+        assert!(pro.service_tiers.is_empty());
+        assert_eq!(pro.upgrade, None);
+        assert_eq!(pro.availability_nux, None);
+    }
+
+    #[test]
+    fn app_server_model_list_filters_hidden_and_paginates() {
+        let mut catalog = build_codeseex_catalog();
+        catalog.models[0]
+            .extra
+            .insert("visibility".to_owned(), Value::String("hidden".to_owned()));
+
+        let visible = app_server_model_list_from_catalog(
+            &catalog,
+            AppServerModelListParams {
+                include_hidden: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(visible.data.len(), 1);
+        assert_eq!(visible.data[0].id, MODEL_PRO);
+
+        let first_page = app_server_model_list_from_catalog(
+            &catalog,
+            AppServerModelListParams {
+                include_hidden: Some(true),
+                limit: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(first_page.data.len(), 1);
+        assert_eq!(first_page.next_cursor, Some("1".to_owned()));
+
+        let second_page = app_server_model_list_from_catalog(
+            &catalog,
+            AppServerModelListParams {
+                include_hidden: Some(true),
+                cursor: first_page.next_cursor,
+                limit: Some(1),
+            },
+        );
+        assert_eq!(second_page.data.len(), 1);
+        assert_eq!(second_page.next_cursor, None);
     }
 
     #[test]

@@ -129,10 +129,14 @@ pub(crate) fn enabled_tool_ids(config: &AppConfig) -> Vec<String> {
 }
 
 pub(crate) fn tool_settings(config: &AppConfig) -> BTreeMap<String, String> {
-    UserConfig::read_from(&config.config_path())
+    let mut settings = UserConfig::read_from(&config.config_path())
         .ok()
         .map(|user_config| crate::config_payload::tool_settings_from_user_config(&user_config))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(api_key) = crate::secrets::vision_api_key(config) {
+        settings.insert(crate::tools::vision::API_KEY_KEY.to_owned(), api_key);
+    }
+    settings
 }
 
 pub(crate) fn builtin_tool_config_keys() -> HashSet<String> {

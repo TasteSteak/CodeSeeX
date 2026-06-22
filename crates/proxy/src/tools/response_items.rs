@@ -31,13 +31,14 @@ pub(crate) fn native_apply_patch_response_item_from_chat_call_with_id(
     call: &ChatToolCall,
     item_id: &str,
 ) -> Value {
+    let normalized = normalize_apply_patch_response_input_with_diagnostic(&call.arguments);
     json!({
         "id": item_id,
         "type": "custom_tool_call",
         "status": "completed",
         "call_id": call.id,
         "name": "apply_patch",
-        "input": normalize_apply_patch_response_input(&call.arguments)
+        "input": normalized.input
     })
 }
 
@@ -51,7 +52,19 @@ pub(crate) fn web_search_call_output_response_item(call: &ChatToolCall, output: 
 }
 
 pub(crate) fn normalize_patch_newlines(value: &str) -> String {
-    normalize_unified_hunk_headers(&value.replace("\r\n", "\n").replace('\r', "\n"))
+    normalize_patch_newlines_with_diagnostic(value).input
+}
+
+fn normalize_patch_newlines_with_diagnostic(value: &str) -> ApplyPatchInputNormalization {
+    let normalized =
+        normalize_unified_hunk_headers(&value.replace("\r\n", "\n").replace('\r', "\n"));
+    let (input, blank_context_lines_repaired) =
+        repair_update_hunk_blank_context_lines_with_count(&normalized);
+    ApplyPatchInputNormalization {
+        input_chars: input.chars().count(),
+        input,
+        blank_context_lines_repaired,
+    }
 }
 
 fn normalize_unified_hunk_headers(value: &str) -> String {
@@ -67,6 +80,74 @@ fn normalize_unified_hunk_headers(value: &str) -> String {
 
 pub(crate) fn normalize_patch_line(line: &str) -> String {
     normalize_unified_hunk_header(line).unwrap_or_else(|| line.to_owned())
+}
+
+#[derive(Debug, Default)]
+struct HunkBlankRepair {
+    blank_lines: Vec<usize>,
+    has_nonempty_unprefixed_line: bool,
+}
+
+fn repair_update_hunk_blank_context_lines_with_count(value: &str) -> (String, usize) {
+    let mut lines = value
+        .split('\n')
+        .map(str::to_owned)
+        .collect::<Vec<String>>();
+    let mut in_update_file = false;
+    let mut hunk_repair = None::<HunkBlankRepair>;
+    let mut repaired = 0;
+
+    for index in 0..lines.len() {
+        let line = &lines[index];
+        if line.starts_with("*** Update File: ") {
+            repaired += finish_hunk_blank_repair(&mut lines, &mut hunk_repair);
+            in_update_file = true;
+            continue;
+        }
+        if line.starts_with("*** Add File: ")
+            || line.starts_with("*** Delete File: ")
+            || line.starts_with("*** End Patch")
+        {
+            repaired += finish_hunk_blank_repair(&mut lines, &mut hunk_repair);
+            in_update_file = false;
+            continue;
+        }
+        if line.starts_with("*** Move to: ") {
+            repaired += finish_hunk_blank_repair(&mut lines, &mut hunk_repair);
+            continue;
+        }
+        if in_update_file && line.starts_with("@@") {
+            repaired += finish_hunk_blank_repair(&mut lines, &mut hunk_repair);
+            hunk_repair = Some(HunkBlankRepair::default());
+            continue;
+        }
+        if let Some(repair) = hunk_repair.as_mut() {
+            if line.is_empty() {
+                repair.blank_lines.push(index);
+            } else if !line.starts_with([' ', '+', '-']) {
+                repair.has_nonempty_unprefixed_line = true;
+            }
+        }
+    }
+    repaired += finish_hunk_blank_repair(&mut lines, &mut hunk_repair);
+    (lines.join("\n"), repaired)
+}
+
+fn finish_hunk_blank_repair(lines: &mut [String], repair: &mut Option<HunkBlankRepair>) -> usize {
+    let Some(repair) = repair.take() else {
+        return 0;
+    };
+    if repair.has_nonempty_unprefixed_line {
+        return 0;
+    }
+    let mut repaired = 0;
+    for index in repair.blank_lines {
+        if lines[index].is_empty() {
+            lines[index] = " ".to_owned();
+            repaired += 1;
+        }
+    }
+    repaired
 }
 
 fn normalize_unified_hunk_header(line: &str) -> Option<String> {
@@ -268,17 +349,32 @@ fn web_search_direct_url(value: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn normalize_apply_patch_response_input(arguments: &str) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApplyPatchInputNormalization {
+    pub(crate) input: String,
+    pub(crate) input_chars: usize,
+    pub(crate) blank_context_lines_repaired: usize,
+}
+
+pub(crate) fn normalize_apply_patch_response_input_with_diagnostic(
+    arguments: &str,
+) -> ApplyPatchInputNormalization {
     let Ok(value) = serde_json::from_str::<Value>(arguments) else {
-        return normalize_patch_newlines(arguments);
+        return normalize_patch_newlines_with_diagnostic(arguments);
     };
     if let Some(patch) = value.get("patch").and_then(Value::as_str) {
-        return normalize_patch_newlines(patch);
+        return normalize_patch_newlines_with_diagnostic(patch);
     }
     if let Some(input) = value.get("input").and_then(Value::as_str) {
-        return normalize_patch_newlines(input);
+        return normalize_patch_newlines_with_diagnostic(input);
     }
-    normalize_patch_newlines(arguments)
+    normalize_patch_newlines_with_diagnostic(arguments)
+}
+
+pub(crate) fn apply_patch_input_normalization_diagnostic(
+    arguments: &str,
+) -> ApplyPatchInputNormalization {
+    normalize_apply_patch_response_input_with_diagnostic(arguments)
 }
 
 #[cfg(test)]
@@ -331,6 +427,72 @@ mod tests {
             input,
             "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n old\n+new\n*** End Patch"
         );
+    }
+
+    #[test]
+    fn apply_patch_repairs_blank_context_lines_in_update_hunks() {
+        let input = normalize_patch_newlines(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n\n pub fn after() {}\n*** End Patch",
+        );
+
+        assert_eq!(
+            input,
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n \n pub fn after() {}\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn apply_patch_reports_blank_context_line_micro_repair_count() {
+        let normalized = normalize_apply_patch_response_input_with_diagnostic(
+            r#"{"patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n\n pub fn after() {}\n*** End Patch"}"#,
+        );
+
+        assert_eq!(normalized.blank_context_lines_repaired, 1);
+        assert!(normalized.input.contains("\n \n"));
+    }
+
+    #[test]
+    fn apply_patch_leaves_valid_update_hunk_unchanged() {
+        let input = normalize_patch_newlines(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n \n pub fn after() {}\n*** End Patch",
+        );
+
+        assert_eq!(
+            input,
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n \n pub fn after() {}\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn apply_patch_reports_no_micro_repair_for_valid_blank_context_line() {
+        let normalized = normalize_apply_patch_response_input_with_diagnostic(
+            r#"{"patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n \n pub fn after() {}\n*** End Patch"}"#,
+        );
+
+        assert_eq!(normalized.blank_context_lines_repaired, 0);
+        assert!(normalized.input.contains("\n \n"));
+    }
+
+    #[test]
+    fn apply_patch_does_not_repair_ambiguous_nonempty_unprefixed_hunks() {
+        let input = normalize_patch_newlines(
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n\npub fn after() {}\n*** End Patch",
+        );
+
+        assert_eq!(
+            input,
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n\npub fn after() {}\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn apply_patch_reports_no_micro_repair_for_ambiguous_hunk() {
+        let normalized = normalize_apply_patch_response_input_with_diagnostic(
+            r#"{"patch":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n\npub fn after() {}\n*** End Patch"}"#,
+        );
+
+        assert_eq!(normalized.blank_context_lines_repaired, 0);
+        assert!(normalized.input.contains("\n\npub fn after"));
     }
 
     #[test]

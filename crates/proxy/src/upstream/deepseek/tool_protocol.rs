@@ -58,6 +58,113 @@ pub(crate) struct DeepSeekToolContent {
     pub(crate) parse_failed: bool,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct DeepSeekChatToolProtocolAdaptation {
+    pub(crate) adapted_tool_names: Vec<String>,
+    pub(crate) blocked_channels: Vec<&'static str>,
+    pub(crate) parse_failed_channels: Vec<&'static str>,
+}
+
+impl DeepSeekChatToolProtocolAdaptation {
+    pub(crate) fn changed(&self) -> bool {
+        !self.adapted_tool_names.is_empty()
+            || !self.blocked_channels.is_empty()
+            || !self.parse_failed_channels.is_empty()
+    }
+}
+
+pub(crate) fn adapt_chat_tool_protocol(
+    chat: &mut Value,
+    allow_tool_calls: bool,
+) -> DeepSeekChatToolProtocolAdaptation {
+    let Some(message) = chat.pointer_mut("/choices/0/message") else {
+        return DeepSeekChatToolProtocolAdaptation::default();
+    };
+    let mut adaptation = DeepSeekChatToolProtocolAdaptation::default();
+    let mut calls = Vec::new();
+
+    adapt_message_channel(
+        message,
+        "content",
+        "content",
+        allow_tool_calls,
+        &mut calls,
+        &mut adaptation,
+    );
+    adapt_message_channel(
+        message,
+        "reasoning_content",
+        "reasoning",
+        allow_tool_calls,
+        &mut calls,
+        &mut adaptation,
+    );
+
+    if !calls.is_empty() {
+        let tool_calls = message
+            .get_mut("tool_calls")
+            .and_then(Value::as_array_mut)
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let mut output = tool_calls;
+        for call in calls {
+            adaptation.adapted_tool_names.push(call.name.clone());
+            output.push(chat_tool_call_to_value(call));
+        }
+        message["tool_calls"] = Value::Array(output);
+    }
+
+    adaptation
+}
+
+fn adapt_message_channel(
+    message: &mut Value,
+    field: &'static str,
+    channel: &'static str,
+    allow_tool_calls: bool,
+    calls: &mut Vec<ChatToolCall>,
+    adaptation: &mut DeepSeekChatToolProtocolAdaptation,
+) {
+    let Some(text) = message
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if !looks_like_dsml_protocol(&text) {
+        return;
+    }
+
+    let mut adapter = DeepSeekStreamToolAdapter::default();
+    let mut output = adapter.push(&text, allow_tool_calls);
+    let finish = adapter.finish(allow_tool_calls);
+    output.visible_text.push_str(&finish.visible_text);
+    output.tool_calls.extend(finish.tool_calls);
+    output.blocked |= finish.blocked;
+    output.parse_failed |= finish.parse_failed;
+
+    message[field] = Value::String(output.visible_text);
+    if output.blocked {
+        adaptation.blocked_channels.push(channel);
+    }
+    if output.parse_failed {
+        adaptation.parse_failed_channels.push(channel);
+    }
+    calls.extend(output.tool_calls);
+}
+
+fn chat_tool_call_to_value(call: ChatToolCall) -> Value {
+    serde_json::json!({
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": call.arguments
+        }
+    })
+}
+
 impl DeepSeekStreamToolAdapter {
     pub(crate) fn push(&mut self, content: &str, allow_tool_calls: bool) -> DeepSeekToolContent {
         self.buffer.push_str(content);
@@ -302,5 +409,73 @@ mod tests {
         let finish = adapter.finish(false);
         assert!(finish.visible_text.is_empty());
         assert!(finish.blocked);
+    }
+
+    #[test]
+    fn adapts_non_streaming_content_dsml_to_standard_tool_call() {
+        let mut chat = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": format!(
+                        "{}{} name=\"web_search\">{} name=\"mode\" string=\"true\">search{}{}{}",
+                        dsml_tag("tool_calls"),
+                        dsml_tag("invoke").trim_end_matches('>'),
+                        dsml_tag("parameter").trim_end_matches('>'),
+                        dsml_close("parameter"),
+                        dsml_close("invoke"),
+                        dsml_close("tool_calls")
+                    )
+                }
+            }]
+        });
+
+        let adaptation = adapt_chat_tool_protocol(&mut chat, true);
+
+        assert_eq!(adaptation.adapted_tool_names, vec!["web_search"]);
+        assert_eq!(
+            chat.pointer("/choices/0/message/content")
+                .and_then(Value::as_str),
+            Some("")
+        );
+        assert_eq!(
+            chat.pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(Value::as_str),
+            Some("web_search")
+        );
+    }
+
+    #[test]
+    fn blocks_non_streaming_reasoning_dsml_when_tools_are_not_allowed() {
+        let mut chat = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "final text",
+                    "reasoning_content": format!(
+                        "{}{} name=\"web_search\">{}{}",
+                        dsml_tag("tool_calls"),
+                        dsml_tag("invoke").trim_end_matches('>'),
+                        dsml_close("invoke"),
+                        dsml_close("tool_calls")
+                    )
+                }
+            }]
+        });
+
+        let adaptation = adapt_chat_tool_protocol(&mut chat, false);
+
+        assert_eq!(adaptation.blocked_channels, vec!["reasoning"]);
+        assert_eq!(
+            chat.pointer("/choices/0/message/content")
+                .and_then(Value::as_str),
+            Some("final text")
+        );
+        assert_eq!(
+            chat.pointer("/choices/0/message/reasoning_content")
+                .and_then(Value::as_str),
+            Some("")
+        );
+        assert!(chat.pointer("/choices/0/message/tool_calls").is_none());
     }
 }

@@ -31,4 +31,4 @@ uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_Threading"] }

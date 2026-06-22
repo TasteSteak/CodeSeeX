@@ -1,6 +1,6 @@
 use regex::RegexBuilder;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,6 +29,8 @@ const MAX_READ_LINES: usize = 220;
 const MAX_SEARCH_FILES: usize = 800;
 const MAX_SEARCH_RESULTS: usize = 80;
 const MAX_FILE_BYTES: u64 = 1_048_576;
+const SEARCH_LARGE_DIR_ENTRY_THRESHOLD: usize = 120;
+const MAX_DEFERRED_DIRS_REPORTED: usize = 8;
 
 #[cfg(test)]
 pub fn execute_tool(name: &str, arguments: &str) -> Value {
@@ -451,6 +453,7 @@ fn workspace_search(context: &ToolExecutionContext, args: &Value) -> Value {
     let regex = bool_arg(args, "regex", false);
     let include = string_list_arg(args, "include");
     let exclude = string_list_arg(args, "exclude");
+    let include_deferred_dirs = bool_arg(args, "include_deferred_dirs", true);
     let matcher = match SearchMatcher::new(query, case_sensitive, regex) {
         Ok(value) => value,
         Err(error) => {
@@ -464,6 +467,7 @@ fn workspace_search(context: &ToolExecutionContext, args: &Value) -> Value {
     let boundary = search_boundary(&root, &resolved.display_root);
     let mut results = Vec::new();
     let mut visited_files = 0_usize;
+    let mut deferred_dirs = VecDeque::<(PathBuf, String)>::new();
     search_path(
         &root,
         &relative_root,
@@ -474,20 +478,61 @@ fn workspace_search(context: &ToolExecutionContext, args: &Value) -> Value {
         &include,
         &exclude,
         &boundary,
+        true,
         &mut visited_files,
+        &mut deferred_dirs,
         &mut results,
     );
+    let deferred_dirs_discovered = deferred_dirs.len();
+    let mut deferred_dirs_searched = 0_usize;
+    while include_deferred_dirs
+        && results.len() < max_results
+        && visited_files < MAX_SEARCH_FILES
+        && !deferred_dirs.is_empty()
+    {
+        let Some((deferred_path, deferred_relative)) = deferred_dirs.pop_front() else {
+            break;
+        };
+        deferred_dirs_searched += 1;
+        search_path(
+            &deferred_path,
+            &deferred_relative,
+            query,
+            &matcher,
+            context_lines,
+            max_results,
+            &include,
+            &exclude,
+            &boundary,
+            false,
+            &mut visited_files,
+            &mut deferred_dirs,
+            &mut results,
+        );
+    }
+    let deferred_dirs_remaining = deferred_dirs.len();
+    let deferred_dirs_sample = deferred_dirs
+        .iter()
+        .take(MAX_DEFERRED_DIRS_REPORTED)
+        .map(|(_, relative)| relative.clone())
+        .collect::<Vec<_>>();
     json!({
         "ok": true,
         "query": query,
         "path": relative_root,
         "include": include,
         "exclude": exclude,
+        "include_deferred_dirs": include_deferred_dirs,
         "regex": regex,
         "case_sensitive": case_sensitive,
         "files_scanned": visited_files,
+        "search_mode": "source_first",
+        "deferred_dirs_discovered": deferred_dirs_discovered,
+        "deferred_dirs_searched": deferred_dirs_searched,
+        "deferred_dirs_remaining": deferred_dirs_remaining,
+        "deferred_dirs": deferred_dirs_sample,
         "matches": results,
-        "truncated": results.len() >= max_results || visited_files >= MAX_SEARCH_FILES
+        "truncated": results.len() >= max_results || visited_files >= MAX_SEARCH_FILES || deferred_dirs_remaining > 0
     })
 }
 
@@ -637,7 +682,9 @@ fn search_path(
     include: &[String],
     exclude: &[String],
     workspace_root: &Path,
+    defer_low_priority_dirs: bool,
     visited_files: &mut usize,
+    deferred_dirs: &mut VecDeque<(PathBuf, String)>,
     results: &mut Vec<Value>,
 ) {
     if results.len() >= max_results || *visited_files >= MAX_SEARCH_FILES {
@@ -674,6 +721,13 @@ fn search_path(
             } else {
                 format!("{relative}/{name_text}")
             };
+            if defer_low_priority_dirs
+                && file_type.is_dir()
+                && should_defer_search_dir(&entry.path(), &entry_relative, &name_text, include)
+            {
+                deferred_dirs.push_back((entry.path(), entry_relative));
+                continue;
+            }
             if !path_passes_globs(&entry_relative, &name_text, &[], exclude) {
                 continue;
             }
@@ -687,7 +741,9 @@ fn search_path(
                 include,
                 exclude,
                 workspace_root,
+                defer_low_priority_dirs,
                 visited_files,
+                deferred_dirs,
                 results,
             );
             if results.len() >= max_results || *visited_files >= MAX_SEARCH_FILES {
@@ -729,6 +785,35 @@ fn search_path(
             return;
         }
     }
+}
+
+fn should_defer_search_dir(path: &Path, relative: &str, name: &str, include: &[String]) -> bool {
+    if include
+        .iter()
+        .any(|pattern| pattern_references_path_segment(pattern, relative, name))
+    {
+        return false;
+    }
+    name.starts_with('.') || direct_entry_count_exceeds(path, SEARCH_LARGE_DIR_ENTRY_THRESHOLD)
+}
+
+fn pattern_references_path_segment(pattern: &str, relative: &str, name: &str) -> bool {
+    let pattern = pattern.trim().replace('\\', "/");
+    if pattern.is_empty() {
+        return false;
+    }
+    pattern == name
+        || pattern.starts_with(&format!("{name}/"))
+        || pattern.contains(&format!("/{name}/"))
+        || relative == pattern
+        || relative.starts_with(&format!("{pattern}/"))
+}
+
+fn direct_entry_count_exceeds(path: &Path, threshold: usize) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    entries.take(threshold + 1).count() > threshold
 }
 
 fn usize_arg(args: &Value, key: &str, fallback: usize, min: usize, max: usize) -> usize {

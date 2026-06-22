@@ -11,6 +11,7 @@ pub async fn post_chat_completions(
     client: &reqwest::Client,
     upstream: &UpstreamConfig,
     inbound_auth: Option<&str>,
+    local_access_token: Option<&str>,
     auth_context_payload: Option<&Value>,
     payload: Value,
 ) -> Result<reqwest::Response, reqwest::Error> {
@@ -23,7 +24,9 @@ pub async fn post_chat_completions(
     );
 
     let auth_payload = auth_context_payload.unwrap_or(&payload);
-    if let Some(auth) = resolve_authorization_header(upstream, inbound_auth, auth_payload) {
+    if let Some(auth) =
+        resolve_authorization_header(upstream, inbound_auth, local_access_token, auth_payload)
+    {
         if let Ok(value) = HeaderValue::from_str(&auth) {
             headers.insert(AUTHORIZATION, value);
         }
@@ -40,16 +43,22 @@ pub async fn post_chat_completions(
 fn resolve_authorization_header(
     upstream: &UpstreamConfig,
     inbound_auth: Option<&str>,
+    local_access_token: Option<&str>,
     payload: &Value,
 ) -> Option<String> {
-    resolve_authorization_header_with_direct_key(upstream, inbound_auth, payload, || {
-        read_codex_auth_api_key(false)
-    })
+    resolve_authorization_header_with_direct_key(
+        upstream,
+        inbound_auth,
+        local_access_token,
+        payload,
+        || read_codex_auth_api_key(false),
+    )
 }
 
 fn resolve_authorization_header_with_direct_key<F>(
     upstream: &UpstreamConfig,
     inbound_auth: Option<&str>,
+    local_access_token: Option<&str>,
     payload: &Value,
     direct_key: F,
 ) -> Option<String>
@@ -57,14 +66,24 @@ where
     F: FnOnce() -> Option<String>,
 {
     let can_use_inbound = !payload_looks_like_codex_app_request(payload);
-    let configured_auth = upstream.api_key.as_deref().and_then(format_bearer_header);
-    let inbound_auth = inbound_auth.and_then(format_bearer_header);
+    let configured_auth = upstream
+        .api_key
+        .as_deref()
+        .filter(|value| !local_access_token_matches(local_access_token, value))
+        .and_then(format_bearer_header);
+    let inbound_auth = inbound_auth
+        .filter(|value| !authorization_matches_local_access_token(local_access_token, value))
+        .and_then(format_bearer_header);
     if can_use_inbound {
         if let Some(auth) = inbound_auth {
             return Some(auth);
         }
     }
-    configured_auth.or_else(|| direct_key().and_then(|value| format_bearer_header(&value)))
+    configured_auth.or_else(|| {
+        direct_key()
+            .filter(|value| !local_access_token_matches(local_access_token, value))
+            .and_then(|value| format_bearer_header(&value))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +125,52 @@ fn format_bearer_header(value: &str) -> Option<String> {
     }
 }
 
+fn authorization_matches_local_access_token(local_access_token: Option<&str>, value: &str) -> bool {
+    let Some(token) = local_access_token else {
+        return false;
+    };
+    let Some(auth_token) = api_key_from_authorization(value) else {
+        return false;
+    };
+    constant_time_eq(auth_token.trim().as_bytes(), token.trim().as_bytes())
+}
+
+fn local_access_token_matches(local_access_token: Option<&str>, value: &str) -> bool {
+    let Some(token) = local_access_token else {
+        return false;
+    };
+    if constant_time_eq(value.trim().as_bytes(), token.trim().as_bytes()) {
+        return true;
+    }
+    api_key_from_authorization(value)
+        .map(|auth_token| constant_time_eq(auth_token.trim().as_bytes(), token.trim().as_bytes()))
+        .unwrap_or(false)
+}
+
+fn api_key_from_authorization(value: &str) -> Option<String> {
+    let normalized = format_bearer_header(value)?;
+    Some(
+        normalized
+            .trim_start_matches(|ch: char| ch.is_ascii_whitespace())
+            .strip_prefix("Bearer ")
+            .or_else(|| normalized.strip_prefix("bearer "))
+            .unwrap_or(&normalized)
+            .trim()
+            .to_owned(),
+    )
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +190,7 @@ mod tests {
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
+                None,
                 &serde_json::json!({
                     "client_metadata": {
                         "x-codex-installation-id": "codex-install"
@@ -144,6 +210,7 @@ mod tests {
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
+                None,
                 &serde_json::json!({ "input": "private smoke" }),
                 || None
             )
@@ -158,6 +225,7 @@ mod tests {
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(Some("configured-key")),
                 None,
+                None,
                 &serde_json::json!({}),
                 || None
             )
@@ -167,6 +235,7 @@ mod tests {
         assert_eq!(
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(Some("Bearer configured-key")),
+                None,
                 None,
                 &serde_json::json!({}),
                 || None
@@ -182,6 +251,7 @@ mod tests {
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
+                None,
                 &serde_json::json!({
                     "client_metadata": {
                         "x-codex-installation-id": "codex-install"
@@ -200,6 +270,7 @@ mod tests {
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(Some("configured-key")),
                 Some("Bearer inbound-key"),
+                None,
                 &serde_json::json!({
                     "client_metadata": {
                         "x-codex-installation-id": "codex-install"
@@ -218,6 +289,7 @@ mod tests {
             resolve_authorization_header_with_direct_key(
                 &upstream_with_key(Some("configured-key")),
                 Some("Bearer inbound-key"),
+                None,
                 &serde_json::json!({ "input": "private smoke" }),
                 || Some("direct-key".to_owned())
             )
@@ -240,5 +312,31 @@ mod tests {
         assert!(markers.prompt_cache_key);
         assert!(markers.metadata_installation_id);
         assert!(markers.has_any());
+    }
+
+    #[test]
+    fn local_access_token_is_not_forwarded_as_upstream_auth() {
+        assert_eq!(
+            resolve_authorization_header_with_direct_key(
+                &upstream_with_key(None),
+                Some("Bearer csx_local_token"),
+                Some("csx_local_token"),
+                &serde_json::json!({ "input": "private smoke" }),
+                || None
+            )
+            .as_deref(),
+            None
+        );
+        assert_eq!(
+            resolve_authorization_header_with_direct_key(
+                &upstream_with_key(Some("Bearer csx_local_token")),
+                None,
+                Some("csx_local_token"),
+                &serde_json::json!({ "input": "private smoke" }),
+                || Some("Bearer csx_local_token".to_owned())
+            )
+            .as_deref(),
+            None
+        );
     }
 }

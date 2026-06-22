@@ -6,6 +6,8 @@ CodeSeeX starts with a deliberately small local API.
 
 - `GET /health`: basic liveness.
 - `GET /api/status`: current data directory, proxy base URL, catalog path, model list, and upstream target.
+- `GET /api/models`: app-server-shaped model catalog for host UIs. Supports `limit`, `cursor`, and `includeHidden`.
+- `POST /api/app-server`: minimal JSON-RPC compatibility endpoint. Currently supports `model/list` for host model pickers.
 - `GET|POST /api/codex-adapter/generate`: generate catalog and return TOML snippet.
 
 ## Codex-Compatible

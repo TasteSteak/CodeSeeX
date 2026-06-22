@@ -258,7 +258,7 @@ fn set_vision_tool_setting(tools: &mut UserToolsConfig, key: &str, value: Option
             vision.generate_model = value;
         }
         crate::tools::vision::API_KEY_KEY => {
-            vision.api_key = value;
+            let _ = value;
         }
         _ => {}
     }
@@ -503,7 +503,7 @@ mod tests {
             Some("https://vision.example.com/v1/images/generations")
         );
         assert_eq!(vision.generate_model.as_deref(), Some("image-model"));
-        assert_eq!(vision.api_key.as_deref(), Some("visual-secret"));
+        assert!(vision.api_key.is_none());
     }
 
     #[test]
@@ -528,6 +528,7 @@ mod tests {
         assert!(text.contains("analyze_url = \"https://vision.example.com/v1\""));
         assert!(!text.contains("[tools.settings]"));
         assert!(!text.contains("VISION_ANALYZE_URL"));
+        assert!(!text.contains("visual-secret"));
     }
 
     #[test]

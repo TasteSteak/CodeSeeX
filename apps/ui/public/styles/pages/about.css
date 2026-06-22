@@ -1,45 +1,327 @@
-.workspace.view-about .about-page { width: min(1040px, 100%); }
-.about-native-panel { width: 100%; }
-.about-native-layout { display: grid; grid-template-columns: minmax(230px, 280px) minmax(0, 1fr); gap: 24px; align-items: stretch; padding: 22px; }
-.about-product-card { min-width: 0; min-height: 298px; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 18px; padding: 24px 20px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-app); text-align: center; box-shadow: var(--shadow-sm); transition: var(--theme-transition); }
-.about-product-main { min-width: 0; display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; }
-.about-product-icon { width: 64px; height: 64px; flex: none; margin-bottom: 16px; transition: var(--theme-transition); }
-.about-product-name { max-width: 100%; color: var(--text-main); font-size: 19px; font-weight: 750; letter-spacing: 0; overflow-wrap: anywhere; transition: var(--theme-transition); }
-.about-product-subtitle { margin-top: 3px; color: var(--text-muted); font-size: 12px; font-weight: 700; transition: var(--theme-transition); }
-.about-product-description { max-width: 220px; margin-top: 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; transition: var(--theme-transition); }
-.about-version-chip { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; margin-top: 16px; padding: 4px 9px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--ctrl-bg); color: var(--text-main); font-size: 12px; font-weight: 700; transition: var(--theme-transition); }
-.about-settings-stack { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
-.about-group { min-width: 0; }
-.about-group-title { margin: 0 0 7px 2px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; transition: var(--theme-transition); }
-.about-row-list { overflow: hidden; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-panel); box-shadow: var(--shadow-sm); transition: var(--theme-transition); }
-.about-row { min-height: 45px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 14px; border-bottom: 1px solid var(--border-color); transition: var(--theme-transition); }
-.about-row:last-child { border-bottom: 0; }
-.about-row-button { width: 100%; border-left: 0; border-right: 0; border-top: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; text-align: left; }
-.about-row-button:hover { background: var(--hover-bg); }
-.about-row-label { min-width: 0; color: var(--text-main); font-size: 13px; font-weight: 600; transition: var(--theme-transition); }
-.about-row-value { min-width: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; text-align: right; overflow-wrap: anywhere; transition: var(--theme-transition); }
-.about-inline-button { min-height: 30px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 10px; font-size: 12px; white-space: nowrap; }
-.about-resource-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.about-action-button { min-width: 0; min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-panel); color: var(--text-main); box-shadow: var(--shadow-sm); cursor: pointer; font-size: 13px; font-weight: 700; transition: var(--theme-transition); }
-.about-action-button:hover { background: var(--hover-bg); }
-.about-action-button:disabled { opacity: 0.58; cursor: not-allowed; }
-.about-action-button:disabled:hover { background: var(--bg-panel); }
-.about-product-action { width: 100%; margin-top: auto; }
-.about-product-action:disabled { opacity: 1; }
-.about-footer-note { margin: -4px 2px 0; color: var(--text-muted); font-size: 11px; line-height: 1.55; white-space: pre-line; transition: var(--theme-transition); }
-.about-status { min-height: 38px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg-app); color: var(--text-secondary); font-size: 13px; line-height: 1.4; border: 1px solid var(--border-color); transition: var(--theme-transition); }
-.about-status.warning { background: var(--danger-bg); color: var(--danger); border-color: rgba(239, 68, 68, 0.3); }
-.about-status a { color: #60a5fa; font-weight: 700; text-decoration: none; }
-.about-status a:hover { text-decoration: underline; }
+/* ==========================================================================
+   页面层：关于我们视图右翼紧凑化与卡片慢速动效精调视图 (about.css)
+   ========================================================================== */
 
-@media (max-width: 1024px) {
-  .about-native-layout { grid-template-columns: 1fr; gap: 18px; padding: 18px; }
-  .about-product-card { min-height: auto; }
-}
-
-@media (max-width: 720px) {
-  .about-native-layout { grid-template-columns: 1fr; gap: 16px; padding: 18px; }
-  .about-resource-actions { grid-template-columns: 1fr; }
-  .about-row { align-items: flex-start; flex-direction: column; gap: 8px; }
-  .about-row-value { text-align: left; }
-}
+   .workspace.view-about .about-page { 
+    width: min(1040px, 100%); 
+  }
+  
+  .about-native-panel { 
+    width: 100%; 
+  }
+  
+  .about-native-layout { 
+    display: grid; 
+    grid-template-columns: minmax(230px, 280px) minmax(0, 1fr); 
+    gap: 24px; 
+    align-items: stretch; 
+    padding: 22px; 
+  }
+  
+  /* ==========================================================================
+     产品卡片：完全依照要求，去悬停边框，背景慢速变深，图标保留抬升但速度更慢
+     ========================================================================== */
+  .about-product-card { 
+    min-width: 0; 
+    min-height: 298px; 
+    height: 100%; 
+    display: flex; 
+    flex-direction: column; 
+    align-items: center; 
+    justify-content: space-between; 
+    gap: 18px; 
+    padding: 24px 20px; 
+    border: 1px solid var(--border-color); 
+    border-radius: var(--radius-md); 
+    background: var(--bg-app); 
+    text-align: center; 
+    box-shadow: var(--shadow-sm); 
+    
+    /* 慢速变色设定：0.45 秒的柔和背景渐变过渡 */
+    transition: background-color 0.45s ease-in-out, box-shadow var(--theme-duration) var(--theme-easing); 
+  }
+  
+  /* 悬停时：边框绝对保持不变，背景缓慢变色变深 */
+  .about-product-card:hover { 
+    background: var(--hover-bg); 
+  }
+  
+  .about-product-main { 
+    min-width: 0; 
+    display: flex; 
+    flex: 1; 
+    flex-direction: column; 
+    align-items: center; 
+    justify-content: center; 
+  }
+  
+  /* 图标：保留高阶质感贝塞尔曲线，但将时间从 0.4s 延长至 0.65s，速度更慢、更丝滑 */
+  .about-product-icon { 
+    width: 64px; 
+    height: 64px; 
+    flex: none; 
+    margin-bottom: 16px; 
+    transition: transform 0.65s cubic-bezier(0.34, 1.56, 0.64, 1); 
+  }
+  
+  /* 联动悬浮交互：保留之前的微抬升与轻微放大设计 */
+  .about-product-card:hover .about-product-icon {
+    transform: translateY(-3px) scale(1.02);
+  }
+  
+  .about-product-name { 
+    max-width: 100%; 
+    color: var(--text-main); 
+    font-size: 19px; 
+    font-weight: 750; 
+    letter-spacing: 0; 
+    overflow-wrap: anywhere; 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-product-subtitle { 
+    margin-top: 3px; 
+    color: var(--text-muted); 
+    font-size: 12px; 
+    font-weight: 700; 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-product-description { 
+    max-width: 220px; 
+    margin-top: 12px; 
+    color: var(--text-secondary); 
+    font-size: 12px; 
+    line-height: 1.5; 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-version-chip { 
+    display: inline-flex; 
+    align-items: center; 
+    justify-content: center; 
+    min-height: 24px; 
+    margin-top: 16px; 
+    padding: 4px 9px; 
+    border: 1px solid var(--border-color); 
+    border-radius: var(--radius-sm); 
+    background: var(--ctrl-bg); 
+    color: var(--text-main); 
+    font-size: 12px; 
+    font-weight: 700; 
+    transition: var(--theme-transition); 
+  }
+  
+  /* ==========================================================================
+     右侧列表与核心操作轴（维持优化好的紧凑度与绝对单线对齐）
+     ========================================================================== */
+  .about-settings-stack { 
+    min-width: 0; 
+    display: flex; 
+    flex-direction: column; 
+    gap: 20px; 
+  }
+  
+  .about-group { 
+    min-width: 0; 
+  }
+  
+  .about-group-title { 
+    margin: 0 0 8px 2px; 
+    color: var(--text-muted); 
+    font-size: 11px; 
+    font-weight: 700; 
+    letter-spacing: 0.05em; 
+    text-transform: uppercase; 
+    transition: var(--theme-transition); 
+  }
+  
+  /* 列表容器 */
+  .about-row-list { 
+    overflow: hidden; 
+    border: 1px solid var(--border-color); 
+    border-radius: var(--radius-md); 
+    background: var(--bg-panel); 
+    box-shadow: var(--shadow-sm); 
+    transition: var(--theme-transition); 
+  }
+  
+  /* 规范的单向单像素线，消除粗细不一 */
+  .about-row { 
+    min-height: 40px; 
+    display: flex; 
+    align-items: center; 
+    justify-content: space-between; 
+    gap: 16px; 
+    padding: 9px 16px; 
+    border: 0;
+    border-bottom: 1px solid var(--border-color); 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-row:last-child { 
+    border-bottom: 0; 
+  }
+  
+  .about-row-button { 
+    width: 100%; 
+    border: 0; 
+    background: transparent; 
+    color: inherit; 
+    cursor: pointer; 
+    font: inherit; 
+    text-align: left; 
+  }
+  
+  .about-row-button:hover { 
+    background: var(--hover-bg); 
+  }
+  
+  .about-row-label { 
+    min-width: 0; 
+    color: var(--text-main); 
+    font-size: 13px; 
+    font-weight: 600; 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-row-value { 
+    min-width: 0; 
+    color: var(--text-secondary); 
+    font-size: 12px; 
+    font-weight: 600; 
+    text-align: right; 
+    overflow-wrap: anywhere; 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-inline-button { 
+    min-height: 28px; 
+    display: inline-flex; 
+    align-items: center; 
+    justify-content: center; 
+    gap: 7px; 
+    padding: 4px 10px; 
+    font-size: 12px; 
+    white-space: nowrap; 
+  }
+  
+  /* 操作轴网格 */
+  .about-resource-actions { 
+    display: grid; 
+    grid-template-columns: repeat(2, minmax(0, 1fr)); 
+    gap: 12px; 
+  }
+  
+  .about-action-button { 
+    min-width: 0; 
+    min-height: 40px; 
+    display: inline-flex; 
+    align-items: center; 
+    justify-content: center; 
+    gap: 8px; 
+    padding: 8px 12px; 
+    border: 1px solid var(--border-color); 
+    border-radius: var(--radius-sm); 
+    background: var(--bg-panel); 
+    color: var(--text-main); 
+    box-shadow: var(--shadow-sm); 
+    cursor: pointer; 
+    font-size: 13px; 
+    font-weight: 700; 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-action-button:hover { 
+    background: var(--hover-bg); 
+    border-color: var(--text-muted);
+  }
+  
+  .about-action-button:disabled { 
+    opacity: 0.58; 
+    cursor: not-allowed; 
+  }
+  
+  .about-action-button:disabled:hover { 
+    background: var(--bg-panel); 
+  }
+  
+  .about-product-action { 
+    width: 100%; 
+    margin-top: auto; 
+  }
+  
+  .about-product-action:disabled { 
+    opacity: 1; 
+  }
+  
+  /* 底栏状态栏与页脚 */
+  .about-status { 
+    min-height: 38px; 
+    padding: 10px 14px; 
+    border-radius: var(--radius-sm); 
+    background: var(--bg-app); 
+    color: var(--text-secondary); 
+    font-size: 13px; 
+    line-height: 1.45; 
+    border: 1px solid var(--border-color); 
+    transition: var(--theme-transition); 
+  }
+  
+  .about-status.warning { 
+    background: var(--danger-bg); 
+    color: var(--danger); 
+    border-color: rgba(239, 68, 68, 0.3); 
+  }
+  
+  .about-status a { 
+    color: #60a5fa; 
+    font-weight: 700; 
+    text-decoration: none; 
+  }
+  
+  .about-status a:hover { 
+    text-decoration: underline; 
+  }
+  
+  .about-footer-note { 
+    margin: -2px 2px 0; 
+    color: var(--text-muted); 
+    font-size: 11px; 
+    line-height: 1.55; 
+    white-space: pre-line; 
+    transition: var(--theme-transition); 
+  }
+  
+  /* ==========================================================================
+     多端屏幕响应式流式降级断点
+     ========================================================================== */
+  @media (max-width: 1024px) {
+    .about-native-layout { 
+      grid-template-columns: 1fr; 
+      gap: 20px; 
+      padding: 18px; 
+    }
+    .about-product-card { 
+      min-height: auto; 
+    }
+  }
+  
+  @media (max-width: 720px) {
+    .about-native-layout { 
+      grid-template-columns: 1fr; 
+      gap: 16px; 
+      padding: 18px; 
+    }
+    .about-resource-actions { 
+      grid-template-columns: 1fr; 
+    }
+    .about-row { 
+      align-items: flex-start; 
+      flex-direction: column; 
+      gap: 6px; 
+    }
+    .about-row-value { 
+      text-align: left; 
+    }
+  }

@@ -47,11 +47,42 @@ pub fn request_looks_like_codex_full_context(value: &Value) -> bool {
     if object.get("instructions").is_none() || object.get("tools").is_none() {
         return false;
     }
-    object
-        .get("input")
-        .and_then(Value::as_array)
-        .map(|items| items.len() > CODEX_FULL_CONTEXT_INPUT_ITEMS_THRESHOLD)
-        .unwrap_or(false)
+    let Some(items) = object.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+    if items.is_empty() {
+        return false;
+    }
+    request_has_codex_full_context_marker(object) || input_items_have_codex_replay_shape(items)
+}
+
+fn request_has_codex_full_context_marker(object: &serde_json::Map<String, Value>) -> bool {
+    object.get("client_metadata").is_some()
+        || object.get("prompt_cache_key").is_some()
+        || object
+            .get("metadata")
+            .and_then(Value::as_object)
+            .is_some_and(|metadata| metadata.get("x-codex-installation-id").is_some())
+}
+
+fn input_items_have_codex_replay_shape(items: &[Value]) -> bool {
+    if items.len() <= 1 {
+        return false;
+    }
+    items.iter().any(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("reasoning")
+                | Some("function_call")
+                | Some("function_call_output")
+                | Some("custom_tool_call")
+                | Some("custom_tool_call_output")
+                | Some("tool_search_call")
+                | Some("tool_search_output")
+                | Some("web_search_call")
+                | Some("web_search_call_output")
+        )
+    })
 }
 
 pub fn compile_responses_input_with_tool_outputs(
@@ -939,6 +970,30 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "hello");
         assert_eq!(messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn recognizes_short_codex_full_context_by_structure() {
+        let request = json!({
+            "instructions": "You are Codex.",
+            "tools": [{ "type": "function", "function": { "name": "apply_patch" } }],
+            "prompt_cache_key": "thread-short-full-context",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file_range",
+                    "arguments": "{\"path\":\"README.md\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "CodeSeeX"
+                }
+            ]
+        });
+
+        assert!(request_looks_like_codex_full_context(&request));
     }
 
     #[test]

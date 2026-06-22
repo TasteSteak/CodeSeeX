@@ -89,12 +89,14 @@ pub(crate) fn upstream_call_usage_breakdown_event(
     request: &Value,
     payload: &Value,
     usage: Option<&Value>,
+    duration_ms: Option<u64>,
     final_handoff: bool,
 ) -> Value {
     json!({
         "id": id,
         "phase": phase,
         "iteration": iteration,
+        "duration_ms": duration_ms,
         "final_handoff": final_handoff,
         "request": safe_request_shape(request),
         "payload": {

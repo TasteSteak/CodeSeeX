@@ -35,7 +35,7 @@ use crate::responses::usage::{merge_response_usage, response_usage_from_chat_usa
 use crate::runtime_config::RuntimeConfigChangeKind;
 use crate::text::compact_line;
 use crate::tool_passthrough::ToolContext;
-use crate::tools::chat_protocol::chat_tool_calls_to_assistant_message;
+use crate::tools::chat_protocol::{chat_tool_calls, chat_tool_calls_to_assistant_message};
 use crate::tools::coordinator::{complete_chat_with_tools, ToolLoopContext, ToolLoopResult};
 use crate::tools::diagnostics::{
     attach_tool_loop_warning, prepare_tool_loop_recovery_payload, ToolLoopDiagnostics,
@@ -53,11 +53,14 @@ use crate::tools::registry::{
     dedupe_tool_definitions, enabled_tool_ids, normalized_tool_choice, tool_settings,
 };
 use crate::tools::response_items::{
-    native_apply_patch_response_item_from_chat_call, proxy_visible_response_items,
-    web_search_call_output_response_item,
+    apply_patch_input_normalization_diagnostic, native_apply_patch_response_item_from_chat_call,
+    proxy_visible_response_items, web_search_call_output_response_item,
 };
 use crate::upstream::deepseek::{
-    should_adapt_tool_protocol, tool_protocol::DeepSeekStreamToolAdapter,
+    should_adapt_tool_protocol,
+    tool_protocol::{
+        adapt_chat_tool_protocol, DeepSeekChatToolProtocolAdaptation, DeepSeekStreamToolAdapter,
+    },
 };
 use crate::upstream::payload::{
     codex_service_request_kind, normalize_chat_payload, request_is_codex_service,
@@ -66,7 +69,7 @@ use crate::upstream::payload::{
 use crate::upstream::{codex_request_markers, CodexRequestMarkers};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Response, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -87,12 +90,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 const RESPONSES_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const WEB_SEARCH_SOURCE_PROBE_DEBOUNCE_MS: u64 = 5_000;
+const CODESEEX_V1_ACCESS_TOKEN_HEADER: &str = "x-codeseex-token";
 
 pub async fn serve(config: AppConfig) -> anyhow::Result<()> {
     serve_with_shutdown(config, std::future::pending::<()>(), || {}).await
@@ -340,23 +343,138 @@ fn app_router(state: ProxyState, config: &AppConfig) -> Router {
         manager_local_request_guard,
     ));
     let v1_router = Router::new()
-        .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/responses/compact", post(responses_compact))
-        .route("/v1/responses/{response_id}/cancel", post(cancel_response))
-        .route("/v1/responses", post(responses))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_headers(Any)
-                .allow_methods(Any),
-        );
+        .route("/v1/models", get(models).options(v1_options))
+        .route(
+            "/v1/chat/completions",
+            post(chat_completions).options(v1_options),
+        )
+        .route(
+            "/v1/responses/compact",
+            post(responses_compact).options(v1_options),
+        )
+        .route(
+            "/v1/responses/{response_id}/cancel",
+            post(cancel_response).options(v1_options),
+        )
+        .route("/v1/responses", post(responses).options(v1_options))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            v1_local_request_guard,
+        ));
     Router::new()
         .merge(manager_router)
         .merge(v1_router)
         .layer(DefaultBodyLimit::max(RESPONSES_BODY_LIMIT_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn v1_local_request_guard(
+    State(state): State<ProxyState>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let cors = v1_cors_context(request.headers());
+    if request.method() == Method::OPTIONS && v1_preflight_is_allowed(request.headers()) {
+        return v1_preflight_response(cors);
+    }
+    let access = ManagerAccessPolicy {
+        listener_host_is_local: authority_host_is_local(&state.active_config().host),
+    };
+    if v1_request_is_allowed(access, request.headers(), &state.v1_access_token) {
+        let mut response = next.run(request).await;
+        apply_v1_cors_headers(response.headers_mut(), cors);
+        return response;
+    }
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": {
+                "code": "v1_api_forbidden",
+                "message": "CodeSeeX /v1 only accepts local requests or requests with the local access token."
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn v1_options() -> axum::response::Response {
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Debug, Clone)]
+struct V1CorsContext {
+    origin: Option<HeaderValue>,
+    request_headers: Option<HeaderValue>,
+}
+
+fn v1_cors_context(headers: &HeaderMap) -> V1CorsContext {
+    V1CorsContext {
+        origin: headers.get(header::ORIGIN).cloned(),
+        request_headers: headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS).cloned(),
+    }
+}
+
+fn v1_preflight_is_allowed(headers: &HeaderMap) -> bool {
+    if headers.get(header::ORIGIN).is_none() {
+        return false;
+    }
+    let method_allowed = headers
+        .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("GET") || value.eq_ignore_ascii_case("POST"))
+        .unwrap_or(false);
+    if !method_allowed {
+        return false;
+    }
+    headers
+        .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|header| header.trim().to_ascii_lowercase())
+                .any(|header| {
+                    header == CODESEEX_V1_ACCESS_TOKEN_HEADER || header == "authorization"
+                })
+        })
+        .unwrap_or(false)
+}
+
+fn v1_preflight_response(cors: V1CorsContext) -> axum::response::Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    apply_v1_cors_headers(response.headers_mut(), cors);
+    response
+}
+
+fn apply_v1_cors_headers(headers: &mut HeaderMap, cors: V1CorsContext) {
+    let Some(origin) = cors.origin else {
+        return;
+    };
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET,POST,OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        cors.request_headers.unwrap_or_else(|| {
+            HeaderValue::from_static("authorization,content-type,x-codeseex-token")
+        }),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+    headers.append(header::VARY, HeaderValue::from_static("Origin"));
+    headers.append(
+        header::VARY,
+        HeaderValue::from_static("Access-Control-Request-Headers"),
+    );
+    headers.append(
+        header::VARY,
+        HeaderValue::from_static("Access-Control-Request-Method"),
+    );
 }
 
 async fn manager_local_request_guard(
@@ -402,6 +520,66 @@ fn manager_request_is_local(policy: ManagerAccessPolicy, headers: &HeaderMap) ->
         .map(origin_host_is_local)
         .unwrap_or(true);
     host_is_local && origin_is_local
+}
+
+fn v1_request_is_allowed(
+    policy: ManagerAccessPolicy,
+    headers: &HeaderMap,
+    access_token: &str,
+) -> bool {
+    if v1_access_token_matches(headers, access_token) {
+        return true;
+    }
+    manager_request_is_local(policy, headers)
+}
+
+fn v1_access_token_matches(headers: &HeaderMap, access_token: &str) -> bool {
+    if access_token.trim().is_empty() {
+        return false;
+    }
+    if headers
+        .get(CODESEEX_V1_ACCESS_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| constant_time_eq(value.trim().as_bytes(), access_token.as_bytes()))
+    {
+        return true;
+    }
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bearer_token)
+        .is_some_and(|value| constant_time_eq(value.as_bytes(), access_token.as_bytes()))
+}
+
+fn bearer_token(value: &str) -> Option<&str> {
+    let text = value.trim();
+    let (scheme, rest) = text.split_once(char::is_whitespace)?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| rest.trim())
+        .filter(|token| !token.is_empty())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn upstream_authorization_from_headers(headers: &HeaderMap, access_token: &str) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| match bearer_token(value) {
+            Some(token) => !constant_time_eq(token.as_bytes(), access_token.as_bytes()),
+            None => true,
+        })
+        .map(str::to_owned)
 }
 
 fn fetch_metadata_is_cross_site(headers: &HeaderMap) -> bool {
@@ -544,6 +722,132 @@ fn service_request_diagnostic(
         "input_items": shape.get("input_items").cloned().unwrap_or(Value::Null),
         "max_output_tokens": shape.get("max_output_tokens").cloned().unwrap_or(Value::Null)
     })
+}
+
+async fn record_cost_risk_diagnostic(
+    store: &Store,
+    id: &str,
+    endpoint: &str,
+    request: &Value,
+    upstream_payload: Option<&Value>,
+) {
+    const HIGH_TEXT_CHARS: u64 = 200_000;
+    const HIGH_INPUT_ITEMS: u64 = 80;
+    const HIGH_MESSAGE_TOKENS: u64 = 120_000;
+
+    let shape = request_shape_diagnostic(request);
+    let estimated_text_chars = shape
+        .get("estimated_text_chars")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let input_items = shape
+        .get("input_items")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let message_tokens = upstream_payload
+        .map(|payload| estimate_tokens_from_text(&payload.to_string()))
+        .unwrap_or(0);
+    let full_context = request_looks_like_codex_full_context(request);
+    let warnings = [
+        (
+            "high_estimated_text_chars",
+            estimated_text_chars > HIGH_TEXT_CHARS,
+        ),
+        ("high_input_items", input_items > HIGH_INPUT_ITEMS),
+        (
+            "high_upstream_message_tokens",
+            message_tokens > HIGH_MESSAGE_TOKENS,
+        ),
+        ("codex_full_context", full_context),
+    ]
+    .into_iter()
+    .filter_map(|(name, active)| active.then_some(name))
+    .collect::<Vec<_>>();
+    if warnings.is_empty() {
+        return;
+    }
+    let detail = json!({
+        "id": id,
+        "endpoint": endpoint,
+        "mode": "warn_only",
+        "warnings": warnings,
+        "estimated_text_chars": estimated_text_chars,
+        "input_items": input_items,
+        "estimated_upstream_message_tokens": message_tokens,
+        "codex_full_context": full_context
+    });
+    let _ = store
+        .record_event(
+            "warn",
+            "cost_risk_diagnostic",
+            "CodeSeeX observed a high token/cost risk request before upstream dispatch.",
+            Some(&detail),
+        )
+        .await;
+    let _ = store
+        .update_request_diagnostic(
+            id,
+            &json!({
+                "cost_risk_warning": detail
+            }),
+        )
+        .await;
+}
+
+async fn adapt_deepseek_chat_tool_protocol_for_non_streaming(
+    store: &Store,
+    request_id: &str,
+    config: &AppConfig,
+    upstream_model: &str,
+    chat: &mut Value,
+    allow_tool_calls: bool,
+    phase: &'static str,
+) {
+    if !should_adapt_tool_protocol(&config.upstream, upstream_model) {
+        return;
+    }
+    let adaptation = adapt_chat_tool_protocol(chat, allow_tool_calls);
+    record_deepseek_chat_tool_protocol_diagnostic(store, request_id, phase, &adaptation).await;
+}
+
+async fn record_deepseek_chat_tool_protocol_diagnostic(
+    store: &Store,
+    request_id: &str,
+    phase: &'static str,
+    adaptation: &DeepSeekChatToolProtocolAdaptation,
+) {
+    if !adaptation.changed() {
+        return;
+    }
+    let event_type = if !adaptation.adapted_tool_names.is_empty() {
+        "deepseek_tool_protocol_adapted"
+    } else if !adaptation.blocked_channels.is_empty() {
+        "deepseek_tool_protocol_blocked"
+    } else {
+        "deepseek_tool_protocol_parse_failed"
+    };
+    let _ = store
+        .record_event(
+            "debug",
+            event_type,
+            "DeepSeek tool protocol content was handled in a non-streaming response.",
+            Some(&json!({
+                "id": request_id,
+                "phase": phase,
+                "adapted_tool_names": adaptation.adapted_tool_names,
+                "blocked_channels": adaptation.blocked_channels,
+                "parse_failed_channels": adaptation.parse_failed_channels
+            })),
+        )
+        .await;
+}
+
+fn payload_tools_available(payload: &Value) -> bool {
+    payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| !tools.is_empty())
+        .unwrap_or(false)
 }
 
 fn upstream_tool_names(tools: &[Value]) -> Vec<String> {
@@ -772,11 +1076,16 @@ async fn chat_completions(
         &original_payload,
     )
     .await;
+    record_cost_risk_diagnostic(
+        &state.store,
+        &id,
+        "/v1/chat/completions",
+        &original_payload,
+        Some(&payload),
+    )
+    .await;
 
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let auth = upstream_authorization_from_headers(&headers, &state.v1_access_token);
     if let Some(auth) = auth.as_deref() {
         codeseex_core::codex_auth::remember_authorization_header(auth);
     }
@@ -785,6 +1094,7 @@ async fn chat_completions(
         &client,
         &config.upstream,
         auth.as_deref(),
+        Some(&state.v1_access_token),
         Some(&original_payload),
         payload.clone(),
     )
@@ -1391,6 +1701,7 @@ async fn responses(
         &input,
     )
     .await;
+    record_cost_risk_diagnostic(&state.store, &id, "/v1/responses", &input, Some(&payload)).await;
 
     if let Some(stop) = match state
         .store
@@ -1418,7 +1729,7 @@ async fn responses(
             .store
             .finish_request(
                 &id,
-                RequestStatus::Completed,
+                RequestStatus::Failed,
                 Some(&terminal_response),
                 Some(&detail),
             )
@@ -1485,7 +1796,7 @@ async fn responses(
             .store
             .finish_request(
                 &id,
-                RequestStatus::Completed,
+                RequestStatus::Failed,
                 Some(&terminal_response),
                 Some(&detail),
             )
@@ -1495,7 +1806,7 @@ async fn responses(
             .store
             .record_event(
                 "warn",
-                "request_completed",
+                "request_failed",
                 "CodeSeeX ended a repeated client tool handoff before another upstream call.",
                 Some(&request_completed_detail(
                     &id,
@@ -1527,18 +1838,17 @@ async fn responses(
         return json_response(terminal_response);
     }
 
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let auth = upstream_authorization_from_headers(&headers, &state.v1_access_token);
     if let Some(auth) = auth.as_deref() {
         codeseex_core::codex_auth::remember_authorization_header(auth);
     }
     let client = state.client();
+    let upstream_started = std::time::Instant::now();
     match crate::upstream::post_chat_completions(
         &client,
         &config.upstream,
         auth.as_deref(),
+        Some(&state.v1_access_token),
         Some(&input),
         payload.clone(),
     )
@@ -1655,7 +1965,17 @@ async fn responses(
                 });
             }
             match response.json::<Value>().await {
-                Ok(chat) => {
+                Ok(mut chat) => {
+                    adapt_deepseek_chat_tool_protocol_for_non_streaming(
+                        &state.store,
+                        &id,
+                        &config,
+                        upstream_model.as_str(),
+                        &mut chat,
+                        payload_tools_available(&payload),
+                        "non_streaming_initial",
+                    )
+                    .await;
                     let _ = state
                         .store
                         .record_event(
@@ -1669,6 +1989,7 @@ async fn responses(
                                 &input,
                                 &payload,
                                 chat.get("usage"),
+                                Some(upstream_started.elapsed().as_millis() as u64),
                                 false,
                             )),
                         )
@@ -1679,6 +2000,7 @@ async fn responses(
                         store: &state.store,
                         config: &config,
                         auth: auth.as_deref(),
+                        local_access_token: Some(&state.v1_access_token),
                         request_id: &id,
                         enabled_tools: &enabled_tools,
                         tool_context: &tool_execution_context,
@@ -1761,6 +2083,18 @@ async fn responses(
                         }
                         ToolLoopResult::ClientToolCalls(result) => {
                             client_tool_handoff = true;
+                            let tool_calls = chat_tool_calls(&result.chat);
+                            let partition = partition_tool_calls(
+                                tool_calls,
+                                &community_tools,
+                                &external_tool_context,
+                            );
+                            record_apply_patch_input_micro_repair_diagnostics(
+                                &state.store,
+                                &id,
+                                &partition.native,
+                            )
+                            .await;
                             let mut response = chat_completion_tool_calls_to_response(
                                 &config,
                                 &id,
@@ -2028,32 +2362,7 @@ fn client_handoff_guard_terminal_response(
     message: &str,
     usage: &Value,
 ) -> Value {
-    json!({
-        "id": id,
-        "object": "response",
-        "created_at": now_seconds(),
-        "model": model,
-        "status": "completed",
-        "error": Value::Null,
-        "incomplete_details": {
-            "reason": code,
-            "message": message
-        },
-        "parallel_tool_calls": true,
-        "output": [{
-            "id": format!("msg_{}", Uuid::new_v4().simple()),
-            "type": "message",
-            "status": "completed",
-            "role": "assistant",
-            "phase": "final_answer",
-            "content": [{
-                "type": "output_text",
-                "text": message,
-                "annotations": []
-            }]
-        }],
-        "usage": usage
-    })
+    failed_billable_response(id, model, code, message, usage)
 }
 
 fn client_handoff_guard_terminal_diagnostic(
@@ -2076,23 +2385,14 @@ fn client_handoff_guard_terminal_sse(
     sequence: &mut u64,
 ) -> Bytes {
     let response = client_handoff_guard_terminal_response(response_id, model, code, message, usage);
-    let mut bytes = Vec::new();
-    if let Some(item) = response
-        .get("output")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-    {
-        bytes.extend_from_slice(&message_item_sse_events(response_id, 0, item, sequence));
-    }
-    bytes.extend_from_slice(&sse_bytes(
-        "response.completed",
+    Bytes::from(sse_bytes(
+        "response.failed",
         json!({
-            "type": "response.completed",
+            "type": "response.failed",
             "response": response,
             "sequence_number": next_sequence(sequence)
         }),
-    ));
-    Bytes::from(bytes)
+    ))
 }
 
 fn usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
@@ -2565,6 +2865,42 @@ async fn record_client_tool_handoff_guard_stop(
         .await;
 }
 
+async fn record_apply_patch_input_micro_repair_diagnostics(
+    store: &Store,
+    response_id: &str,
+    calls: &[ChatToolCall],
+) {
+    for call in calls {
+        record_apply_patch_input_micro_repair_diagnostic(store, response_id, call).await;
+    }
+}
+
+async fn record_apply_patch_input_micro_repair_diagnostic(
+    store: &Store,
+    response_id: &str,
+    call: &ChatToolCall,
+) {
+    let diagnostic = apply_patch_input_normalization_diagnostic(&call.arguments);
+    if diagnostic.blank_context_lines_repaired == 0 {
+        return;
+    }
+    let _ = store
+        .record_event(
+            "info",
+            "apply_patch_input_micro_repair_diagnostic",
+            "CodeSeeX repaired blank apply_patch hunk context lines.",
+            Some(&json!({
+                "id": response_id,
+                "call_id": call.id,
+                "tool_name": call.name,
+                "repair_kind": "blank_update_hunk_context_line",
+                "blank_context_lines_repaired": diagnostic.blank_context_lines_repaired,
+                "input_chars": diagnostic.input_chars,
+            })),
+        )
+        .await;
+}
+
 fn show_thinking_enabled(config: &AppConfig) -> bool {
     UserConfig::read_from(&config.config_path())
         .ok()
@@ -2915,8 +3251,10 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 let mut provider_content_tool_adapter = DeepSeekStreamToolAdapter::default();
                 let mut provider_reasoning_tool_adapter = DeepSeekStreamToolAdapter::default();
                 let mut visible_tool_bridge = StreamingVisibleToolBridge::default();
+                let iteration_started = std::time::Instant::now();
                 let mut upstream = response.bytes_stream();
                 let mut iteration_usage = response_usage_from_chat_usage(None);
+                let mut iteration_usage_chunks = 0_u32;
 
                 macro_rules! close_reasoning_if_needed {
                     () => {{
@@ -3225,8 +3563,8 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         let Ok(parsed) = serde_json::from_str::<Value>(&data) else { continue };
                         if let Some(next_usage) = parsed.get("usage") {
                             let parsed_usage = response_usage_from_chat_usage(Some(next_usage));
-                            iteration_usage = merge_response_usage(&iteration_usage, &parsed_usage);
-                            usage = merge_response_usage(&usage, &parsed_usage);
+                            iteration_usage_chunks = iteration_usage_chunks.saturating_add(1);
+                            iteration_usage = parsed_usage;
                         }
                         let delta = parsed.pointer("/choices/0/delta").cloned().unwrap_or(Value::Null);
                         if let Some(reasoning) = delta
@@ -3341,6 +3679,23 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 }
 
                 stop_if_cancelled!("response cancelled after upstream stream");
+                usage = merge_response_usage(&usage, &iteration_usage);
+                if iteration_usage_chunks > 1 {
+                    let _ = state
+                        .store
+                        .record_event(
+                            "debug",
+                            "upstream_usage_chunk_diagnostic",
+                            "CodeSeeX observed multiple usage chunks in one streaming upstream iteration.",
+                            Some(&json!({
+                                "id": response_id,
+                                "iteration": iteration,
+                                "usage_chunks": iteration_usage_chunks,
+                                "merge_mode": "last_chunk_per_iteration"
+                            })),
+                        )
+                        .await;
+                }
                 let _ = state
                     .store
                     .record_event(
@@ -3354,6 +3709,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                             &original_request,
                             &current_payload,
                             Some(&iteration_usage),
+                            Some(iteration_started.elapsed().as_millis() as u64),
                             false,
                         )),
                     )
@@ -3603,7 +3959,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                             &usage,
                         );
                         let detail = client_handoff_guard_terminal_diagnostic(&stop);
-                        let _ = state.store.finish_request(&response_id, RequestStatus::Completed, Some(&terminal_response), Some(&detail)).await;
+                        let _ = state.store.finish_request(&response_id, RequestStatus::Failed, Some(&terminal_response), Some(&detail)).await;
                         yield client_handoff_guard_terminal_sse(
                             &response_id,
                             &model,
@@ -3632,6 +3988,12 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         return;
                     }
                     for call in &partition.native {
+                        record_apply_patch_input_micro_repair_diagnostic(
+                            &state.store,
+                            &response_id,
+                            call,
+                        )
+                        .await;
                         let (bytes, item) = native_apply_patch_client_tool_sse_events(
                             &response_id,
                             call,
@@ -4116,7 +4478,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                             &usage,
                         );
                         let detail = client_handoff_guard_terminal_diagnostic(&stop);
-                        let _ = state.store.finish_request(&response_id, RequestStatus::Completed, Some(&terminal_response), Some(&detail)).await;
+                        let _ = state.store.finish_request(&response_id, RequestStatus::Failed, Some(&terminal_response), Some(&detail)).await;
                         yield client_handoff_guard_terminal_sse(
                             &response_id,
                             &model,
@@ -4129,6 +4491,12 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         return;
                     }
                     for call in &partition.native {
+                        record_apply_patch_input_micro_repair_diagnostic(
+                            &state.store,
+                            &response_id,
+                            call,
+                        )
+                        .await;
                         let (bytes, item) = native_apply_patch_client_tool_sse_events(
                             &response_id,
                             call,
@@ -4220,6 +4588,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         &client,
                         &config.upstream,
                         auth.as_deref(),
+                        Some(&state.v1_access_token),
                         Some(&original_request),
                         current_payload.clone(),
                     ) => Some(result),
@@ -4317,6 +4686,7 @@ async fn recover_streaming_tool_loop_with_final_response(
         &client,
         &config.upstream,
         auth,
+        Some(&state.v1_access_token),
         Some(original_request),
         payload.clone(),
     )

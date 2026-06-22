@@ -21,6 +21,9 @@ use crate::tools::ownership::{
 use crate::tools::response_items::{
     proxy_visible_response_items, web_search_call_output_response_item,
 };
+use crate::upstream::deepseek::{
+    should_adapt_tool_protocol, tool_protocol::adapt_chat_tool_protocol,
+};
 use codeseex_core::AppConfig;
 use codeseex_store::{ClientToolHandoffCall, Store};
 use serde_json::{json, Value};
@@ -30,6 +33,7 @@ pub(crate) struct ToolLoopContext<'a> {
     pub(crate) store: &'a Store,
     pub(crate) config: &'a AppConfig,
     pub(crate) auth: Option<&'a str>,
+    pub(crate) local_access_token: Option<&'a str>,
     pub(crate) request_id: &'a str,
     pub(crate) enabled_tools: &'a [String],
     pub(crate) tool_context: &'a crate::tools::ToolExecutionContext,
@@ -76,6 +80,48 @@ pub(crate) struct ToolLoopResponse {
     pub(crate) chat: Value,
     pub(crate) response_items: Vec<Value>,
     pub(crate) usage: Value,
+}
+
+async fn adapt_non_streaming_deepseek_protocol(
+    context: &ToolLoopContext<'_>,
+    chat: &mut Value,
+    payload: &Value,
+    phase: &'static str,
+) {
+    if !should_adapt_tool_protocol(&context.config.upstream, context.upstream_model) {
+        return;
+    }
+    let allow_tool_calls = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| !tools.is_empty())
+        .unwrap_or(false);
+    let adaptation = adapt_chat_tool_protocol(chat, allow_tool_calls);
+    if !adaptation.changed() {
+        return;
+    }
+    let event_type = if !adaptation.adapted_tool_names.is_empty() {
+        "deepseek_tool_protocol_adapted"
+    } else if !adaptation.blocked_channels.is_empty() {
+        "deepseek_tool_protocol_blocked"
+    } else {
+        "deepseek_tool_protocol_parse_failed"
+    };
+    let _ = context
+        .store
+        .record_event(
+            "debug",
+            event_type,
+            "DeepSeek tool protocol content was handled in a non-streaming tool loop response.",
+            Some(&json!({
+                "id": context.request_id,
+                "phase": phase,
+                "adapted_tool_names": adaptation.adapted_tool_names,
+                "blocked_channels": adaptation.blocked_channels,
+                "parse_failed_channels": adaptation.parse_failed_channels
+            })),
+        )
+        .await;
 }
 
 pub(crate) async fn complete_chat_with_tools(
@@ -477,10 +523,12 @@ pub(crate) async fn complete_chat_with_tools(
             }));
         }
         completed_tool_iterations += 1;
+        let upstream_started = std::time::Instant::now();
         let response = match crate::upstream::post_chat_completions(
             context.client,
             &context.config.upstream,
             context.auth,
+            context.local_access_token,
             Some(context.original_request),
             payload.clone(),
         )
@@ -538,6 +586,7 @@ pub(crate) async fn complete_chat_with_tools(
             .json::<Value>()
             .await
             .map_err(|error| ToolLoopError::new(error.to_string(), &cumulative_usage))?;
+        adapt_non_streaming_deepseek_protocol(&context, &mut chat, &payload, "tool_loop").await;
         cumulative_usage = merge_response_usage(
             &cumulative_usage,
             &response_usage_from_chat_usage(chat.get("usage")),
@@ -555,6 +604,7 @@ pub(crate) async fn complete_chat_with_tools(
                     context.original_request,
                     &payload,
                     chat.get("usage"),
+                    Some(upstream_started.elapsed().as_millis() as u64),
                     false,
                 )),
             )
@@ -597,10 +647,12 @@ async fn recover_final_response_after_tool_loop_stop(
     prepare_tool_loop_recovery_payload(&mut payload, &stop.message)
         .map_err(|message| ToolLoopError::new(message, &cumulative_usage))?;
 
+    let upstream_started = std::time::Instant::now();
     let response = match crate::upstream::post_chat_completions(
         context.client,
         &context.config.upstream,
         context.auth,
+        context.local_access_token,
         Some(context.original_request),
         payload.clone(),
     )
@@ -654,10 +706,12 @@ async fn recover_final_response_after_tool_loop_stop(
             &cumulative_usage,
         ));
     }
-    let chat = response
+    let mut chat = response
         .json::<Value>()
         .await
         .map_err(|error| ToolLoopError::new(error.to_string(), &cumulative_usage))?;
+    adapt_non_streaming_deepseek_protocol(&context, &mut chat, &payload, "tool_loop_recovery")
+        .await;
     if !chat_tool_calls(&chat).is_empty() {
         return Err(ToolLoopError::new(
             "upstream returned tool calls during no-tool loop recovery",
@@ -681,6 +735,7 @@ async fn recover_final_response_after_tool_loop_stop(
                 context.original_request,
                 &payload,
                 chat.get("usage"),
+                Some(upstream_started.elapsed().as_millis() as u64),
                 false,
             )),
         )

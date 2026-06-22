@@ -295,6 +295,7 @@
   "usageFoldedHint": "目前先按既有記錄折疊展示；後續可由後端進一步聚合完整對話。",
   "usageConversationRecord": "完整對話",
   "usageIntermediateReply": "中間請求",
+  "usageServiceRequestTitle": "來自 Codex 的服務請求",
   "actualModel": "實際模型",
   "completedAt": "完成時間",
   "requestedModel": "請求模型",
@@ -328,7 +329,7 @@
   "usageStageOutputHint": "模型最終回覆產生的 tokens。",
   "usageStageTotal": "總計",
   "usageStageTotalHint": "估算費用：{cost}。",
-  "logCleanHint": "這裡只展開關鍵使用者級執行事件；用量明細放在用量資訊中。",
+  "logCleanHint": "請求、工具、上下文、協議和網絡事件的安全診斷時間線。",
   "aboutProductSubtitle": "Codex 橋接",
   "aboutProductDescription": "本地 Codex 橋接器，整合桌面管理程式、代理、catalog 與工具控制。",
   "aboutFooterNote": "通过本地桌面管理器连接 Codex 与已配置的模型服务\n请使用合规的 API 凭证与端点，并遵守相关服务提供方的使用条款"

@@ -1,26 +1,82 @@
-.metric-card {
-  background: var(--bg-panel);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  padding: 18px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  box-shadow: var(--shadow-sm);
-  transition: var(--theme-transition);
-}
-.metric-card:hover { box-shadow: var(--shadow-md); border-color: var(--text-muted); }
-.metric-label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; transition: var(--theme-transition); }
-.metric-value { font-size: 22px; font-weight: 700; color: var(--text-main); word-break: break-all; font-variant-numeric: tabular-nums; transition: var(--theme-transition); }
+/* ==========================================================================
+   组件层：标准公共面板与通用网格容器 (panels.css)
+   ========================================================================== */
 
-.panels-grid { display: grid; grid-template-columns: 1fr; gap: 24px; flex: 1; min-height: 0; overflow: hidden; }
-.panel { background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; box-shadow: var(--shadow-sm); overflow: hidden; min-height: 0; transition: var(--theme-transition); }
-.panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border-color); background: var(--hover-bg); transition: var(--theme-transition); }
-.panel-header h2 { font-size: 15px; font-weight: 600; }
-.panel-header p { margin-top: 5px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; transition: var(--theme-transition); }
-.dashboard-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-.icon-heading { display: inline-flex; align-items: center; gap: 8px; }
-.heading-icon { width: 16px; height: 16px; display: inline-block; flex: none; background: currentColor; }
-.heading-icon-bank-card { -webkit-mask: url("/assets/icons/bank-card.svg") center / contain no-repeat; mask: url("/assets/icons/bank-card.svg") center / contain no-repeat; }
-.heading-icon-toml { -webkit-mask: url("/assets/icons/toml.svg") center / contain no-repeat; mask: url("/assets/icons/toml.svg") center / contain no-repeat; }
-.panel-body { padding: 20px; flex: 1; min-height: 0; overflow-y: auto; }
+   .panels-grid { 
+    display: grid; 
+    grid-template-columns: 1fr; 
+    gap: 24px; 
+    flex: 1; 
+    min-height: 0; 
+    overflow: hidden; 
+  }
+  
+  .panel { 
+    background: var(--bg-panel); 
+    border: 1px solid var(--border-color); 
+    border-radius: var(--radius-md); 
+    display: flex; 
+    flex-direction: column; 
+    box-shadow: var(--shadow-sm); 
+    overflow: hidden; 
+    min-height: 0; 
+    transition: var(--theme-transition); 
+  }
+  
+  .panel-header { 
+    padding: 16px 20px; 
+    border-bottom: 1px solid var(--border-color); 
+    background: var(--hover-bg); 
+    transition: var(--theme-transition); 
+  }
+  
+  .panel-header h2 { 
+    font-size: 15px; 
+    font-weight: 600; 
+  }
+  
+  .panel-header p { 
+    margin-top: 5px; 
+    color: var(--text-secondary); 
+    font-size: 12px; 
+    line-height: 1.45; 
+    transition: var(--theme-transition); 
+  }
+  
+  .dashboard-card-header { 
+    display: flex; 
+    align-items: flex-start; 
+    justify-content: space-between; 
+    gap: 14px; 
+  }
+  
+  .icon-heading { 
+    display: inline-flex; 
+    align-items: center; 
+    gap: 8px; 
+  }
+  
+  .heading-icon { 
+    width: 16px; 
+    height: 16px; 
+    display: inline-block; 
+    flex: none; 
+    background: currentColor; 
+  }
+  
+  .heading-icon-bank-card { 
+    -webkit-mask: url("/assets/icons/bank-card.svg") center / contain no-repeat; 
+    mask: url("/assets/icons/bank-card.svg") center / contain no-repeat; 
+  }
+  
+  .heading-icon-toml { 
+    -webkit-mask: url("/assets/icons/toml.svg") center / contain no-repeat; 
+    mask: url("/assets/icons/toml.svg") center / contain no-repeat; 
+  }
+  
+  .panel-body { 
+    padding: 20px; 
+    flex: 1; 
+    min-height: 0; 
+    overflow-y: auto; 
+  }

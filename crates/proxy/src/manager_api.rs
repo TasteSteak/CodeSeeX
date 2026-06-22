@@ -13,6 +13,25 @@ use serde_json::{json, Value};
 struct EventsQuery {
     limit: Option<u32>,
     before: Option<String>,
+    cursor: Option<String>,
+    after: Option<String>,
+    audience: Option<String>,
+    category: Option<String>,
+    level: Option<String>,
+    request_id: Option<String>,
+    q: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageQuery {
+    limit: Option<u32>,
+    cursor: Option<String>,
+    since_revision: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageSessionQuery {
+    id: String,
 }
 
 pub(crate) fn router() -> Router<ProxyState> {
@@ -20,6 +39,9 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/health", get(health))
         .route("/api/status", get(api_status))
         .route("/api/usage", get(api_usage))
+        .route("/api/usage/session", get(api_usage_session))
+        .route("/api/models", get(api_models))
+        .route("/api/app-server", post(api_app_server))
         .route("/api/config", get(api_config).post(save_config))
         .route("/api/languages", get(api_languages))
         .route("/api/tools", get(api_tools))
@@ -27,6 +49,7 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/api/app-info", get(api_app_info))
         .route("/api/update-check", get(api_update_check))
         .route("/api/deepseek/balance", get(api_balance))
+        .route("/api/search-sources/health", get(search_sources_health))
         .route("/api/events", get(api_events))
         .route("/api/start", post(api_start))
         .route("/api/restart", post(api_restart))
@@ -36,8 +59,6 @@ pub(crate) fn router() -> Router<ProxyState> {
             "/api/codex-adapter/generate",
             post(generate_adapter).get(generate_adapter),
         );
-    #[cfg(any(debug_assertions, test))]
-    let router = router.route("/api/dev/seed-usage-template", post(seed_usage_template));
     router
 }
 
@@ -61,10 +82,54 @@ async fn api_status(State(state): State<ProxyState>) -> impl IntoResponse {
     )
 }
 
-async fn api_usage(State(state): State<ProxyState>) -> impl IntoResponse {
+async fn api_usage(
+    State(state): State<ProxyState>,
+    Query(query): Query<UsageQuery>,
+) -> impl IntoResponse {
+    let query = json!({
+        "limit": query.limit,
+        "cursor": query.cursor,
+        "since_revision": query.since_revision
+    });
     manager_json_response(
         ManagerRuntime::from_proxy_state(&state)
-            .handle_json("GET", "/api/usage", None, None)
+            .handle_json("GET", "/api/usage", Some(&query), None)
+            .await,
+    )
+}
+
+async fn api_usage_session(
+    State(state): State<ProxyState>,
+    Query(query): Query<UsageSessionQuery>,
+) -> impl IntoResponse {
+    let query = json!({
+        "id": query.id
+    });
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/usage/session", Some(&query), None)
+            .await,
+    )
+}
+
+async fn api_models(
+    State(state): State<ProxyState>,
+    Query(query): Query<Value>,
+) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/models", Some(&query), None)
+            .await,
+    )
+}
+
+async fn api_app_server(
+    State(state): State<ProxyState>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("POST", "/api/app-server", None, Some(&payload))
             .await,
     )
 }
@@ -134,7 +199,14 @@ async fn api_events(
 ) -> impl IntoResponse {
     let query = json!({
         "limit": query.limit,
-        "before": query.before
+        "before": query.before,
+        "cursor": query.cursor,
+        "after": query.after,
+        "audience": query.audience,
+        "category": query.category,
+        "level": query.level,
+        "request_id": query.request_id,
+        "q": query.q
     });
     manager_json_response(
         ManagerRuntime::from_proxy_state(&state)
@@ -143,13 +215,10 @@ async fn api_events(
     )
 }
 
-#[cfg(any(debug_assertions, test))]
-async fn seed_usage_template(State(state): State<ProxyState>) -> impl IntoResponse {
-    manager_json_response(
-        ManagerRuntime::from_proxy_state(&state)
-            .handle_json("POST", "/api/dev/seed-usage-template", None, None)
-            .await,
-    )
+async fn search_sources_health(State(state): State<ProxyState>) -> impl IntoResponse {
+    let proxy_mode = state.runtime_config.snapshot().config.network_proxy;
+    let diagnostic = crate::tools::web::warm_search_sources(proxy_mode).await;
+    Json(diagnostic)
 }
 
 async fn compatibility_action(state: ProxyState, path: &'static str) -> axum::response::Response {

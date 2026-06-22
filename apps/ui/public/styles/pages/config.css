@@ -1,28 +1,217 @@
-.config-section-title { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin: 20px 0 6px 0; letter-spacing: 0.5px; transition: var(--theme-transition); }
-.config-section-title:first-child { margin-top: 0; }
-.setting-item { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 0; }
-.setting-item > span, .setting-item > label { font-size: 14px; font-weight: 500; color: var(--text-main); transition: var(--theme-transition); }
-.setting-item > span:has(small), .setting-item > label:has(small) { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.setting-item > span small, .setting-item > label small, .setting-item small.muted { display: block; color: var(--text-muted); font-size: 12px; font-weight: 400; line-height: 1.45; }
-.setting-item > .inline-control { margin-left: auto; }
-.setting-divider { height: 1px; background-color: var(--border-color); margin: 0; transition: var(--theme-transition); }
+/* ==========================================================================
+   页面层：配置设置中心专有样式 - 像素线精准修正版 (config.css)
+   ========================================================================== */
 
-.setting-item-block { align-items: flex-start; flex-direction: column; width: 100%; }
+/* 小标题：精简上下外边距，提升信息紧凑度 */
+.config-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin: 16px 0 6px 0;
+    letter-spacing: 0.5px;
+    transition: var(--theme-transition);
+  }
 
-.compact-segmented-control { margin-left: auto; }
+  .config-section-title:first-child {
+    margin-top: 0;
+  }
 
-.config-tabs { margin-bottom: 0; }
-.config-panel > .panel-header { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.config-tabs label { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 148px; }
-.config-status-area { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
-.config-restart-text { color: var(--warn); font-weight: 600; transition: var(--theme-transition); }
-.tab-icon { width: 15px; height: 15px; display: inline-block; background: currentColor; }
-.tab-icon-client { -webkit-mask: url("/assets/icons/client.svg") center / contain no-repeat; mask: url("/assets/icons/client.svg") center / contain no-repeat; }
-.tab-icon-proxy { -webkit-mask: url("/assets/icons/proxy.svg") center / contain no-repeat; mask: url("/assets/icons/proxy.svg") center / contain no-repeat; }
-.tab-icon-experimental { -webkit-mask: url("/assets/icons/experimental.svg") center / contain no-repeat; mask: url("/assets/icons/experimental.svg") center / contain no-repeat; }
-.tab-icon-tools { -webkit-mask: url("/assets/icons/tools.svg") center / contain no-repeat; mask: url("/assets/icons/tools.svg") center / contain no-repeat; }
-.config-tab-panel { display: none; }
-.config-tab-panel.active { display: block; }
+  /* 设置行：压缩上下内边距，使长表单在首屏内展现更完整 */
+  .setting-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 0;
+  }
 
-.config-language-select { width: 180px; }
-.config-port-input { width: 120px; }
+  .setting-item > span,
+  .setting-item > label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-main);
+    transition: var(--theme-transition);
+  }
+
+  /* 带有二级提示说明的左侧文案 */
+  .setting-item > span:has(small),
+  .setting-item > label:has(small) {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .setting-item > span small,
+  .setting-item > label small,
+  .setting-item small.muted {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+  }
+
+  /* 强行让右侧所有独立表单控件靠右绝对对齐 */
+  .setting-item > .inline-control {
+    margin-left: auto;
+  }
+
+  /* 核心修正：高度彻底归零，完全收拢为边框管线，彻底根治缩放时粗细不一的硬伤 */
+  .setting-divider {
+    height: 0;
+    border: 0;
+    border-top: 1px solid var(--border-color);
+    margin: 0;
+    transition: var(--theme-transition);
+  }
+
+  /* 块级设置项（如计费费率区域） */
+  .setting-item-block {
+    align-items: flex-start;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .compact-segmented-control {
+    margin-left: auto;
+  }
+
+  /* ==========================================================================
+     设置页头部面板与标签栏重构
+     ========================================================================== */
+  .config-panel > .panel-header {
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .config-tabs {
+    margin-bottom: 0;
+    display: inline-flex;
+    flex: 1;
+    max-width: 640px;
+  }
+
+  .config-tabs label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-width: auto;
+    flex: 1;
+    padding: 6px 12px;
+  }
+
+  /* 重启提示区域设计 */
+  .config-status-area {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .config-restart-text {
+    color: var(--warn);
+    font-weight: 600;
+    font-size: 12px;
+    transition: var(--theme-transition);
+  }
+
+  .config-save-text {
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 12px;
+    transition: var(--theme-transition);
+  }
+
+  .config-save-text[data-state="draft"],
+  .config-save-text[data-state="pending"] {
+    color: var(--text-muted);
+  }
+
+  .config-save-text[data-state="saving"] {
+    color: var(--info);
+  }
+
+  .config-save-text[data-state="saved"],
+  .config-save-text[data-state="savedRestart"] {
+    color: var(--success);
+  }
+
+  .config-save-text[data-state="error"] {
+    color: var(--danger);
+  }
+
+  .tab-icon {
+    width: 15px;
+    height: 15px;
+    display: inline-block;
+    background: currentColor;
+  }
+
+  .tab-icon-client { -webkit-mask: url("/assets/icons/client.svg") center / contain no-repeat; mask: url("/assets/icons/client.svg") center / contain no-repeat; }
+  .tab-icon-proxy { -webkit-mask: url("/assets/icons/proxy.svg") center / contain no-repeat; mask: url("/assets/icons/proxy.svg") center / contain no-repeat; }
+  .tab-icon-experimental { -webkit-mask: url("/assets/icons/experimental.svg") center / contain no-repeat; mask: url("/assets/icons/experimental.svg") center / contain no-repeat; }
+  .tab-icon-tools { -webkit-mask: url("/assets/icons/tools.svg") center / contain no-repeat; mask: url("/assets/icons/tools.svg") center / contain no-repeat; }
+
+  .config-tab-panel {
+    display: none;
+  }
+
+  .config-tab-panel.active {
+    display: block;
+  }
+
+  /* ==========================================================================
+     表单右翼对齐微调
+     ========================================================================== */
+  .config-language-select {
+    width: 180px;
+  }
+
+  .config-port-input {
+    width: 120px;
+  }
+
+  /* ==========================================================================
+     小屏与移动端响应式降级
+     ========================================================================== */
+  @media (max-width: 768px) {
+    .config-panel > .panel-header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+    }
+    .config-tabs {
+      width: 100%;
+      max-width: 100%;
+    }
+    .config-tabs label {
+      font-size: 12px;
+      padding: 6px 8px;
+      gap: 4px;
+    }
+    .config-status-area {
+      justify-content: flex-start;
+    }
+    .setting-item {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .setting-item > .inline-control,
+    .setting-item > .segmented-control {
+      width: 100% !important;
+      margin-left: 0;
+    }
+    .config-language-select,
+    .config-port-input {
+      width: 100%;
+    }
+  }

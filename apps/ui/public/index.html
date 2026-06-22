@@ -14,6 +14,7 @@
       "/styles/layout/sidebar.css",
       "/styles/components/buttons.css",
       "/styles/components/panels.css",
+      "/styles/components/cards.css",
       "/styles/components/forms.css",
       "/styles/components/lists.css",
       "/styles/components/menus.css",
@@ -27,7 +28,10 @@
       "/styles/pages/about.css",
       "/styles/pages/usage.css",
     ].forEach((href) => {
-      document.write('<link rel="stylesheet" href="' + href + '?v=' + window.CODESEEX_ASSET_VERSION + '">');
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = href + "?v=" + window.CODESEEX_ASSET_VERSION;
+      document.head.appendChild(link);
     });
   </script>
 </head>
@@ -216,8 +220,52 @@
             <div class="panel-header">
               <div>
                 <h2 data-i18n="eventTrace">Event trace</h2>
-                <p data-i18n="logCleanHint">Only key user-level runtime events are expanded here; usage detail belongs in Usage.</p>
+                <p data-i18n="logCleanHint">Safe diagnostics timeline for requests, tools, context, protocol, and network events.</p>
               </div>
+              <label class="log-follow-toggle">
+                <input type="checkbox" id="logFollowToggle" checked>
+                <span data-i18n="logFollowLatest">Follow latest</span>
+              </label>
+            </div>
+            <div class="log-toolbar">
+              <label>
+                <span data-i18n="logFilterCategory">Category</span>
+                <select id="logCategoryFilter">
+                  <option value="all" data-i18n="logFilterAll">All</option>
+                  <option value="request" data-i18n="logCategoryRequest">Request</option>
+                  <option value="tool" data-i18n="logCategoryTool">Tool</option>
+                  <option value="protocol" data-i18n="logCategoryProtocol">Protocol</option>
+                  <option value="context" data-i18n="logCategoryContext">Context</option>
+                  <option value="web" data-i18n="logCategoryWeb">Web</option>
+                  <option value="security" data-i18n="logCategorySecurity">Security</option>
+                  <option value="system" data-i18n="logCategorySystem">System</option>
+                  <option value="error" data-i18n="logCategoryError">Error</option>
+                </select>
+              </label>
+              <label>
+                <span data-i18n="logFilterLevel">Level</span>
+                <select id="logLevelFilter">
+                  <option value="all" data-i18n="logFilterAll">All</option>
+                  <option value="error">ERROR</option>
+                  <option value="warn">WARN</option>
+                  <option value="info">INFO</option>
+                  <option value="debug">DEBUG</option>
+                </select>
+              </label>
+              <label class="log-filter-request">
+                <span data-i18n="logFilterRequest">Request</span>
+                <input id="logRequestFilter" type="search" autocomplete="off" data-i18n-placeholder="logFilterRequestPlaceholder" placeholder="response id">
+              </label>
+              <label class="log-filter-search">
+                <span data-i18n="logFilterSearch">Search</span>
+                <input id="logSearchInput" type="search" autocomplete="off" data-i18n-placeholder="logFilterSearchPlaceholder" placeholder="type, summary, risk">
+              </label>
+            </div>
+            <div class="log-list-header">
+              <span data-i18n="logColumnTime">Time</span>
+              <span data-i18n="logColumnLevel">Level</span>
+              <span data-i18n="logColumnCategory">Category</span>
+              <span data-i18n="logColumnEvent">Event</span>
             </div>
             <div class="panel-body">
               <div class="log-list selectable" id="logStream"></div>
@@ -239,6 +287,7 @@
                 <label for="config_tab_experimental"><span class="tab-icon tab-icon-experimental" aria-hidden="true"></span><span data-i18n="configTabExperimental">Experimental</span></label>
               </div>
               <div class="config-status-area">
+                <span class="config-save-text muted" id="configSaveStatus" hidden></span>
                 <span class="config-restart-text muted" id="restartRequiredBadge" hidden data-i18n="restartRequired">Some changes require restarting the proxy</span>
               </div>
             </div>

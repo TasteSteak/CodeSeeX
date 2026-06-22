@@ -44,10 +44,16 @@ fn version_parts(version: &str) -> Vec<u64> {
 
 pub(crate) fn config_version(config: &AppConfig) -> String {
     std::fs::metadata(config.config_path())
-        .and_then(|metadata| metadata.modified())
         .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().to_string())
+        .and_then(|metadata| {
+            let len = metadata.len();
+            metadata.modified().ok().and_then(|modified| {
+                modified
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| format!("{}-{}", duration.as_nanos(), len))
+            })
+        })
         .unwrap_or_else(|| "0".to_owned())
 }
 

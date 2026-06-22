@@ -1,34 +1,118 @@
-.layout-container { display: flex; flex: 1; min-height: 0; overflow: hidden; background: var(--bg-app); transition: var(--theme-transition); }
+/* ==========================================================================
+   布局层：全局工作区框架骨架与强效视图隔离策略 (app-shell.css)
+   ========================================================================== */
 
-.workspace { flex: 1; padding: 32px 40px; overflow: hidden; display: flex; flex-direction: column; gap: 24px; min-height: 0; background: var(--bg-app); transition: var(--theme-transition); }
-.page-header { display: flex; justify-content: space-between; align-items: flex-start; }
-.header-titles h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.5px; }
-.header-titles p { color: var(--text-secondary); font-size: 14px; transition: var(--theme-transition); }
-.header-actions { display: flex; gap: 12px; }
-
-.log-page, .config-page, .about-page, .usage-page { display: none; }
-.workspace.view-console .log-page, .workspace.view-console .config-page, .workspace.view-console .about-page, .workspace.view-console .usage-page, .workspace.view-logs .dashboard-panel, .workspace.view-config .dashboard-panel, .workspace.view-about .dashboard-panel, .workspace.view-usage .dashboard-panel { display: none; }
-.workspace.view-logs .log-page, .workspace.view-config .config-page, .workspace.view-about .about-page, .workspace.view-usage .usage-page { display: flex; }
-.workspace.view-console .panels-grid { align-items: start; overflow-y: auto; overscroll-behavior: contain; }
-.workspace.view-console .dashboard-panel { align-self: start; }
-.workspace.view-console .dashboard-panel > .panel, .workspace.view-console .dashboard-toml-card { flex-shrink: 0; }
-.workspace.view-console .dashboard-panel > .panel .panel-body { flex: none; overflow: visible; }
-.workspace.view-config .panels-grid, .workspace.view-about .panels-grid { grid-template-columns: 1fr; overflow-y: auto; }
-.workspace.view-logs .panels-grid { grid-template-columns: 1fr; grid-auto-rows: minmax(0, 1fr); overflow: hidden; }
-.workspace.view-usage .panels-grid { grid-template-columns: 1fr; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-.workspace.view-usage .usage-page { min-width: 0; }
-
-.page-stack { flex-direction: column; gap: 20px; min-height: 0; }
-
-@media (max-width: 1024px) {
-  .panels-grid { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 1120px) {
-  .workspace.view-usage { padding: 24px; }
-}
-
-@media (max-width: 860px) {
-  .workspace.view-usage { overflow-x: auto; }
-  .workspace.view-usage .usage-page { min-width: 760px; }
-}
+   .layout-container { 
+    display: flex; 
+    flex: 1; 
+    min-height: 0; 
+    overflow: hidden; 
+    background: var(--bg-app); 
+    transition: var(--theme-transition); 
+  }
+  
+  .workspace { 
+    flex: 1; 
+    padding: 32px 40px; 
+    overflow: hidden; 
+    display: flex; 
+    flex-direction: column; 
+    gap: 24px; 
+    min-height: 0; 
+    background: var(--bg-app); 
+    transition: var(--theme-transition); 
+  }
+  
+  .page-header { 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: flex-start; 
+    flex-shrink: 0; 
+  }
+  
+  .header-titles h1 { 
+    font-size: 24px; 
+    font-weight: 600; 
+    margin-bottom: 8px; 
+    letter-spacing: -0.5px; 
+  }
+  
+  .header-titles p { 
+    color: var(--text-secondary); 
+    font-size: 14px; 
+    transition: var(--theme-transition); 
+  }
+  
+  .header-actions { 
+    display: flex; 
+    gap: 12px; 
+  }
+  
+  .panels-grid { 
+    display: grid; 
+    grid-template-columns: 1fr; 
+    flex: 1; 
+    min-height: 0; 
+  }
+  
+  /* 强效隔离：默认完全隐藏所有业务视图，彻底杜绝跨文件 CSS 覆盖造成的重叠错位 */
+  .dashboard-panel, .log-page, .config-page, .about-page, .usage-page { 
+    display: none !important; 
+  }
+  
+  /* 开启激活主视图布局流：修复控制台内部小卡片间隙垂直方向拉伸机制 */
+  .workspace.view-console .dashboard-panel { 
+    display: flex !important; 
+    flex-direction: column; 
+    gap: 24px; 
+    align-self: start; 
+    width: 100%; 
+  }
+  
+  .workspace.view-usage .usage-page { display: flex !important; }
+  .workspace.view-logs .log-page { display: flex !important; }
+  .workspace.view-config .config-page { display: flex !important; }
+  .workspace.view-about .about-page { display: flex !important; }
+  
+  /* 页面级的视口滚动范围约束与自适应锚定机制 */
+  .workspace.view-console .panels-grid { 
+    align-items: start; 
+    overflow-y: auto; 
+    overscroll-behavior: contain; 
+  }
+  
+  .workspace.view-config .panels-grid, 
+  .workspace.view-about .panels-grid { 
+    grid-template-columns: 1fr; 
+    overflow-y: auto; 
+  }
+  
+  .workspace.view-logs .panels-grid { 
+    grid-template-columns: 1fr; 
+    grid-auto-rows: minmax(0, 1fr); 
+    overflow: hidden; 
+  }
+  
+  .workspace.view-usage .panels-grid { 
+    grid-template-columns: 1fr; 
+    grid-auto-rows: minmax(0, 1fr); 
+    overflow: hidden; 
+  }
+  
+  .workspace.view-usage .usage-page { 
+    grid-row: 1; 
+    min-width: 0; 
+    max-height: 100%; 
+  }
+  
+  .page-stack { 
+    flex-direction: column; 
+    gap: 20px; 
+    min-height: 0; 
+  }
+  
+  @media (max-width: 1024px) {
+    .panels-grid { 
+      grid-template-columns: 1fr; 
+    }
+  }

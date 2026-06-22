@@ -17,6 +17,9 @@ use super::{MAX_BYTES, MAX_TEXT_CHARS};
 
 const BROWSER_RENDER_TIMEOUT_SECS: u64 = 10;
 const MAX_BROWSER_STDERR_BYTES: usize = 16 * 1024;
+const BROWSER_RENDER_FLAG: &str = "CODESEEX_WEB_BROWSER_RENDER";
+const BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG: &str =
+    "CODESEEX_WEB_BROWSER_RENDER_UNSAFE_NO_INTERCEPTION";
 
 pub(super) async fn render_public_page(
     proxy_mode: NetworkProxyMode,
@@ -29,9 +32,10 @@ pub(super) async fn render_public_page(
             "stage": "open",
             "mode": "open",
             "renderer": "isolated_browser",
-            "error": "browser_renderer_disabled",
+            "error": browser_renderer_disabled_code(),
             "url": url.as_str(),
-            "requested_url": requested_url
+            "requested_url": requested_url,
+            "message": browser_renderer_disabled_message()
         });
     }
     if let Err(message) = validate_public_web_url(url) {
@@ -182,6 +186,7 @@ fn browser_diagnostics(
         "profile_isolated": true,
         "shared_cookies": false,
         "extensions_disabled": true,
+        "private_network_guard": "chromium_host_resolver_rules",
         "headless": true,
         "exit_status": output.status_code,
         "stdout_bytes": output.stdout.len(),
@@ -316,13 +321,16 @@ fn browser_args(url: &str, profile_dir: &Path, proxy_mode: NetworkProxyMode) -> 
         "--disable-crash-reporter".to_owned(),
         "--disable-sync".to_owned(),
         "--disable-notifications".to_owned(),
-        "--disable-features=Translate,MediaRouter".to_owned(),
+        "--deny-permission-prompts".to_owned(),
+        "--disable-local-file-accesses".to_owned(),
+        "--disable-features=Translate,MediaRouter,AutofillServerCommunication,OptimizationHints,InterestFeedContentSuggestions".to_owned(),
         "--autoplay-policy=user-gesture-required".to_owned(),
         "--no-first-run".to_owned(),
         "--no-default-browser-check".to_owned(),
         "--hide-scrollbars".to_owned(),
         "--mute-audio".to_owned(),
         "--blink-settings=imagesEnabled=false".to_owned(),
+        private_network_host_resolver_rules(),
         "--window-size=1280,900".to_owned(),
         format!("--user-data-dir={}", profile_dir.display()),
     ];
@@ -334,17 +342,78 @@ fn browser_args(url: &str, profile_dir: &Path, proxy_mode: NetworkProxyMode) -> 
     args
 }
 
+fn private_network_host_resolver_rules() -> String {
+    let rules = [
+        "MAP localhost ~NOTFOUND",
+        "MAP *.localhost ~NOTFOUND",
+        "MAP localhost.localdomain ~NOTFOUND",
+        "MAP 127.* ~NOTFOUND",
+        "MAP 0.* ~NOTFOUND",
+        "MAP 10.* ~NOTFOUND",
+        "MAP 172.16.* ~NOTFOUND",
+        "MAP 172.17.* ~NOTFOUND",
+        "MAP 172.18.* ~NOTFOUND",
+        "MAP 172.19.* ~NOTFOUND",
+        "MAP 172.20.* ~NOTFOUND",
+        "MAP 172.21.* ~NOTFOUND",
+        "MAP 172.22.* ~NOTFOUND",
+        "MAP 172.23.* ~NOTFOUND",
+        "MAP 172.24.* ~NOTFOUND",
+        "MAP 172.25.* ~NOTFOUND",
+        "MAP 172.26.* ~NOTFOUND",
+        "MAP 172.27.* ~NOTFOUND",
+        "MAP 172.28.* ~NOTFOUND",
+        "MAP 172.29.* ~NOTFOUND",
+        "MAP 172.30.* ~NOTFOUND",
+        "MAP 172.31.* ~NOTFOUND",
+        "MAP 192.168.* ~NOTFOUND",
+        "MAP 169.254.* ~NOTFOUND",
+        "MAP ::1 ~NOTFOUND",
+        "MAP fc00::* ~NOTFOUND",
+        "MAP fd00::* ~NOTFOUND",
+        "MAP fe80::* ~NOTFOUND",
+    ]
+    .join(",");
+    format!("--host-resolver-rules={rules}")
+}
+
 pub(super) fn render_enabled() -> bool {
-    if !env_flag("CODESEEX_WEB_BROWSER_RENDER") {
+    if !env_flag(BROWSER_RENDER_FLAG) {
         return false;
     }
     #[cfg(test)]
     {
         env_flag("CODESEEX_WEB_BROWSER_RENDER_TEST")
+            && (browser_request_interception_available()
+                || env_flag(BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG))
     }
     #[cfg(not(test))]
     {
-        true
+        browser_request_interception_available()
+            || env_flag(BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG)
+    }
+}
+
+fn browser_request_interception_available() -> bool {
+    false
+}
+
+fn browser_renderer_disabled_code() -> &'static str {
+    if env_flag(BROWSER_RENDER_FLAG)
+        && !browser_request_interception_available()
+        && !env_flag(BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG)
+    {
+        "browser_renderer_requires_request_interception"
+    } else {
+        "browser_renderer_disabled"
+    }
+}
+
+fn browser_renderer_disabled_message() -> &'static str {
+    if browser_renderer_disabled_code() == "browser_renderer_requires_request_interception" {
+        "The isolated browser renderer is disabled because the current dump-dom backend cannot revalidate redirects and subresource requests. Use the HTTP text fetcher, or enable only in development with CODESEEX_WEB_BROWSER_RENDER_UNSAFE_NO_INTERCEPTION=1."
+    } else {
+        "Browser rendering is disabled."
     }
 }
 
@@ -429,7 +498,17 @@ mod tests {
 
         assert!(args.iter().any(|arg| arg == "--headless=new"));
         assert!(args.iter().any(|arg| arg == "--disable-extensions"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--disable-local-file-accesses"));
+        assert!(args.iter().any(|arg| arg == "--deny-permission-prompts"));
         assert!(args.iter().any(|arg| arg.starts_with("--user-data-dir=")));
+        assert!(args.iter().any(|arg| {
+            arg.starts_with("--host-resolver-rules=")
+                && arg.contains("MAP localhost ~NOTFOUND")
+                && arg.contains("MAP 192.168.* ~NOTFOUND")
+                && arg.contains("MAP 10.* ~NOTFOUND")
+        }));
         assert!(args.iter().any(|arg| arg == "--dump-dom"));
         assert_eq!(args.last().map(String::as_str), Some("https://example.com"));
         assert!(!args.iter().any(|arg| arg == "--no-proxy-server"));
@@ -463,6 +542,7 @@ mod tests {
     fn browser_render_requires_explicit_enable_flag() {
         std::env::remove_var("CODESEEX_WEB_BROWSER_RENDER_TEST");
         std::env::remove_var("CODESEEX_WEB_BROWSER_RENDER");
+        std::env::remove_var(BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG);
         assert!(!render_enabled());
 
         std::env::set_var("CODESEEX_WEB_BROWSER_RENDER", "1");
@@ -471,11 +551,15 @@ mod tests {
 
         std::env::set_var("CODESEEX_WEB_BROWSER_RENDER", "true");
         std::env::set_var("CODESEEX_WEB_BROWSER_RENDER_TEST", "1");
+        assert!(!render_enabled());
+
+        std::env::set_var(BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG, "1");
         assert!(render_enabled());
 
         std::env::set_var("CODESEEX_WEB_BROWSER_RENDER", "false");
         assert!(!render_enabled());
         std::env::remove_var("CODESEEX_WEB_BROWSER_RENDER_TEST");
         std::env::remove_var("CODESEEX_WEB_BROWSER_RENDER");
+        std::env::remove_var(BROWSER_RENDER_UNSAFE_NO_INTERCEPTION_FLAG);
     }
 }

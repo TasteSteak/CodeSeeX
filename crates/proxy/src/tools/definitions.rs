@@ -1,3 +1,4 @@
+use codeseex_core::catalog::APPLY_PATCH_TOOL_PARAMETER_DESCRIPTION;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -72,7 +73,7 @@ fn codex_native_tool_definition(id: &str) -> Option<Value> {
                     "properties": {
                         "patch": {
                             "type": "string",
-                            "description": "One complete raw apply_patch document. The first line must be *** Begin Patch and the final line must be *** End Patch. Use standalone grammar lines for patch structure and hunk-prefixed data lines for file content. Operation headers are *** Add File: path, *** Update File: path, and *** Delete File: path; bare headers are invalid. For *** Add File: path, each file content line is encoded as + followed by content. Use @@ hunks for updates and omit content hunks for deletes. Standard unified hunk headers are accepted and normalized to native Codex @@ headers."
+                            "description": APPLY_PATCH_TOOL_PARAMETER_DESCRIPTION
                         }
                     },
                     "required": ["patch"],
@@ -187,7 +188,8 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
                         "max_results": { "type": "integer" },
                         "context_lines": { "type": "integer" },
                         "case_sensitive": { "type": "boolean" },
-                        "regex": { "type": "boolean", "description": "Treat query as a Rust regex pattern. Supports common regex syntax and inline flags like (?i), but not JavaScript-style lookaround or backreferences." }
+                        "regex": { "type": "boolean", "description": "Treat query as a Rust regex pattern. Supports common regex syntax and inline flags like (?i), but not JavaScript-style lookaround or backreferences." },
+                        "include_deferred_dirs": { "type": "boolean", "description": "When true (default), source-first search continues into low-priority directories such as .git, target, or very large directories until result/file limits are reached. Set false only when broad search speed matters more than exhaustive coverage." }
                     },
                     "required": ["query"],
                     "additionalProperties": false
