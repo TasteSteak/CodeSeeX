@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="CodeSeeX is a local Codex-native runtime for DeepSeek V4, built for real agent work rather than plain API forwarding.">
+    <title>CodeSeeX · Codex-native DeepSeek runtime</title>
+    <link rel="icon" href="assets/app.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="site-shell">
+      <header class="site-header">
+        <div class="header-inner">
+          <a class="brand" href="index.html" aria-label="CodeSeeX home">
+            <img src="assets/app.svg" alt="CodeSeeX">
+            <span>CodeSeeX</span>
+          </a>
+          <nav class="site-nav" aria-label="Primary navigation">
+            <a href="index.html" aria-current="page" data-i18n="nav.home">Home</a>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </nav>
+          <div class="header-actions">
+            <div class="language-switch" aria-label="Language">
+              <button type="button" data-language-choice="en_us" aria-pressed="true">EN</button>
+              <button type="button" data-language-choice="zh_cn" aria-pressed="false">中文</button>
+            </div>
+            <a class="button small" href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+          </div>
+        </div>
+      </header>
+
+      <main id="main">
+        <section class="hero">
+          <div class="hero-grid">
+            <div>
+              <span class="eyebrow" data-i18n="home.eyebrow">Version 0.5.1 · AGPL-3.0-only</span>
+              <h1 data-i18n="home.title">CodeSeeX is the DeepSeek runtime built for Codex agents.</h1>
+              <p class="hero-copy" data-i18n="home.copy">Run DeepSeek-compatible models through a local /v1 adapter that understands Codex tool handoffs, context replay, usage sessions, web search, diagnostics, and desktop operations.</p>
+              <div class="hero-actions">
+                <a class="button primary" href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="home.primaryCta">Download from Releases</a>
+                <a class="button" href="setup.html" data-i18n="home.secondaryCta">Setup guide</a>
+                <a class="button" href="https://github.com/TasteSteak/CodeSeeX" data-i18n="common.source">View source</a>
+              </div>
+              <div class="hero-points" aria-label="Product highlights">
+                <div class="metric">
+                  <strong data-i18n="home.metric1Title">Codex-native</strong>
+                  <span data-i18n="home.metric1Copy">Preserves request classes, client tools, model catalog, and Responses behavior.</span>
+                </div>
+                <div class="metric">
+                  <strong data-i18n="home.metric2Title">Operational</strong>
+                  <span data-i18n="home.metric2Copy">Usage, logs, source probes, handoff diagnostics, and desktop status in one manager.</span>
+                </div>
+                <div class="metric">
+                  <strong data-i18n="home.metric3Title">Bounded</strong>
+                  <span data-i18n="home.metric3Copy">Context replay, web pages, tool output, and diagnostics are compacted and scoped.</span>
+                </div>
+              </div>
+            </div>
+            <figure class="hero-visual" aria-label="CodeSeeX desktop screenshot">
+              <div class="window-bar" aria-hidden="true">
+                <span class="window-dot"></span>
+                <span class="window-dot"></span>
+                <span class="window-dot"></span>
+              </div>
+              <img src="assets/screenshots/release-dashboard.png" alt="CodeSeeX dashboard showing proxy status and adapter setup" data-i18n-alt="home.heroAlt">
+            </figure>
+          </div>
+        </section>
+
+        <section class="notice-strip" aria-label="Release facts">
+          <div class="notice-inner">
+            <div class="notice-item">
+              <strong data-i18n="home.notice1Title">Local adapter</strong>
+              <span data-i18n="home.notice1Copy">Codex talks to CodeSeeX at 127.0.0.1:8787/v1 by default.</span>
+            </div>
+            <div class="notice-item">
+              <strong data-i18n="home.notice2Title">DeepSeek V4</strong>
+              <span data-i18n="home.notice2Copy">Exposes deepseek-v4-pro and deepseek-v4-flash through a generated catalog.</span>
+            </div>
+            <div class="notice-item">
+              <strong data-i18n="home.notice3Title">Windows installer</strong>
+              <span data-i18n="home.notice3Copy">Use the NSIS installer for desktop install, update, and legacy migration.</span>
+            </div>
+            <div class="notice-item">
+              <strong data-i18n="home.notice4Title">Real screenshots</strong>
+              <span data-i18n="home.notice4Copy">This site uses current CodeSeeX and Codex release screens.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="home.whyTitle">Not a plain relay</span>
+              <h2 data-i18n="home.whyTitle">Not a plain relay</h2>
+            </div>
+            <p class="section-copy" data-i18n="home.whyCopy">Forwarding HTTP bodies is the easy part. CodeSeeX adds the agent runtime layer needed for long Codex sessions, tools, large repositories, service requests, and explainable usage.</p>
+          </div>
+          <div class="comparison">
+            <div class="panel">
+              <h3 data-i18n="home.relayTitle">Direct API relay</h3>
+              <ul>
+                <li data-i18n="home.relay1">Mostly maps endpoints and model names.</li>
+                <li data-i18n="home.relay2">Often treats all requests as normal chat.</li>
+                <li data-i18n="home.relay3">Leaves tool lifecycle and usage interpretation to the client.</li>
+              </ul>
+            </div>
+            <div class="panel">
+              <h3 data-i18n="home.runtimeTitle">CodeSeeX runtime</h3>
+              <ul>
+                <li data-i18n="home.runtime1">Classifies Codex user turns, service requests, compact state, and handoffs.</li>
+                <li data-i18n="home.runtime2">Adapts DeepSeek provider behavior at the protocol boundary.</li>
+                <li data-i18n="home.runtime3">Groups billable work into user sessions, phases, and diagnostics.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="home.capTitle">What the runtime owns</span>
+              <h2 data-i18n="home.capTitle">What the runtime owns</h2>
+            </div>
+            <p class="section-copy" data-i18n="home.capCopy">The desktop app is the control plane; the proxy is the execution boundary.</p>
+          </div>
+          <div class="grid-3">
+            <article class="feature">
+              <span class="feature-kicker">TOOLS</span>
+              <h3 data-i18n="home.cap1Title">Tool lifecycle</h3>
+              <p data-i18n="home.cap1Copy">Codex-native Apply Patch, hosted tools, deferred discovery, and bounded tool result replay.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">CONTEXT</span>
+              <h3 data-i18n="home.cap2Title">Context hygiene</h3>
+              <p data-i18n="home.cap2Copy">Full-context detection, compact summaries, binary redaction, and verified tool facts.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">BILLING</span>
+              <h3 data-i18n="home.cap3Title">Usage sessions</h3>
+              <p data-i18n="home.cap3Copy">Conversation-level cost, latency, cache hits, service requests, and model phases.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">LOGS</span>
+              <h3 data-i18n="home.cap4Title">Safe diagnostics</h3>
+              <p data-i18n="home.cap4Copy">Request, protocol, context, web search, and network events without default prompt exposure.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">SEARCH</span>
+              <h3 data-i18n="home.cap5Title">Web search</h3>
+              <p data-i18n="home.cap5Copy">Source health, fallback ordering, automatic evidence opening, and private target protection.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">VISION</span>
+              <h3 data-i18n="home.cap6Title">Vision module</h3>
+              <p data-i18n="home.cap6Copy">Optional image analysis and generation through configured OpenAI-compatible endpoints.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="home.galleryTitle">Built around the workflows you actually debug</span>
+              <h2 data-i18n="home.galleryTitle">Built around the workflows you actually debug</h2>
+            </div>
+            <p class="section-copy" data-i18n="home.galleryCopy">Usage, logs, tools, generated TOML, Codex sessions, and Vision are first-class product surfaces.</p>
+          </div>
+          <div class="screenshot-tabs">
+            <div class="tab-list" role="tablist" aria-label="Screenshots">
+              <button type="button" role="tab" aria-selected="true" data-screen-trigger="dashboard">
+                <strong data-i18n="home.tabDashboard">Dashboard</strong>
+                <span data-i18n="home.tabDashboardCopy">Proxy, balance, update, and adapter status.</span>
+              </button>
+              <button type="button" role="tab" aria-selected="false" data-screen-trigger="usage">
+                <strong data-i18n="home.tabUsage">Usage</strong>
+                <span data-i18n="home.tabUsageCopy">Session cards with phases and cache details.</span>
+              </button>
+              <button type="button" role="tab" aria-selected="false" data-screen-trigger="logs">
+                <strong data-i18n="home.tabLogs">Logs</strong>
+                <span data-i18n="home.tabLogsCopy">Safe operational event timeline.</span>
+              </button>
+              <button type="button" role="tab" aria-selected="false" data-screen-trigger="tools">
+                <strong data-i18n="home.tabTools">Tools</strong>
+                <span data-i18n="home.tabToolsCopy">Hosted tools, web search, and Vision settings.</span>
+              </button>
+            </div>
+            <div>
+              <figure class="screen-panel" data-screen-panel="dashboard">
+                <img src="assets/screenshots/release-dashboard.png" alt="CodeSeeX dashboard">
+              </figure>
+              <figure class="screen-panel" data-screen-panel="usage" hidden>
+                <img src="assets/screenshots/release-usage.png" alt="CodeSeeX usage sessions">
+              </figure>
+              <figure class="screen-panel" data-screen-panel="logs" hidden>
+                <img src="assets/screenshots/release-logs.png" alt="CodeSeeX diagnostic logs">
+              </figure>
+              <figure class="screen-panel" data-screen-panel="tools" hidden>
+                <img src="assets/screenshots/release-settings-tools.png" alt="CodeSeeX tool settings">
+              </figure>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="home.archTitle">A local boundary between Codex and upstream models</span>
+              <h2 data-i18n="home.archTitle">A local boundary between Codex and upstream models</h2>
+            </div>
+            <p class="section-copy" data-i18n="home.archCopy">CodeSeeX keeps Codex semantics visible while letting DeepSeek-compatible upstreams power the model work.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-node">
+              <strong data-i18n="home.archCodex">Codex Desktop</strong>
+              <span data-i18n="home.archCodexCopy">Responses requests, client tools, context, and model selection.</span>
+            </div>
+            <div class="diagram-node">
+              <strong data-i18n="home.archCodeSeeX">CodeSeeX local runtime</strong>
+              <span data-i18n="home.archCodeSeeXCopy">Protocol conversion, tool ownership, context hygiene, usage, diagnostics.</span>
+            </div>
+            <div class="diagram-node">
+              <strong data-i18n="home.archUpstream">DeepSeek-compatible upstream</strong>
+              <span data-i18n="home.archUpstreamCopy">Model execution through the configured OpenAI-compatible endpoint.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="cta-band">
+          <h2 data-i18n="home.ctaTitle">Ready to route Codex through DeepSeek with a real agent boundary?</h2>
+          <p data-i18n="home.ctaCopy">Start with the generated TOML, keep the manager open for observability, and use the docs when you need to reason about tools, state, or privacy.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="home.primaryCta">Download from Releases</a>
+            <a class="button" href="setup.html" data-i18n="home.secondaryCta">Setup guide</a>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <div class="footer-inner">
+          <div>
+            <a class="brand" href="index.html">
+              <img src="assets/app.svg" alt="CodeSeeX">
+              <span>CodeSeeX</span>
+            </a>
+            <p data-i18n="footer.tagline">A local Codex-native runtime for DeepSeek V4, built for real agent work rather than plain API forwarding.</p>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.docs">Documentation</strong>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.project">Project</strong>
+            <a href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="common.releases">GitHub Releases</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/README.md">README</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/CHANGELOG.md">CHANGELOG</a>
+          </div>
+        </div>
+        <div class="fine-print">
+          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.</span>
+          <span> © <span data-current-year></span> TasteSteak and CodeSeeX contributors. AGPL-3.0-only.</span>
+        </div>
+      </footer>
+    </div>
+    <script src="assets/i18n.js"></script>
+    <script src="assets/site.js"></script>
+  </body>
+</html>

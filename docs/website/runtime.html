@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="How CodeSeeX preserves Codex agent semantics while routing requests to DeepSeek-compatible upstreams.">
+    <title>Runtime · CodeSeeX</title>
+    <link rel="icon" href="assets/app.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="site-shell">
+      <header class="site-header">
+        <div class="header-inner">
+          <a class="brand" href="index.html" aria-label="CodeSeeX home">
+            <img src="assets/app.svg" alt="CodeSeeX">
+            <span>CodeSeeX</span>
+          </a>
+          <nav class="site-nav" aria-label="Primary navigation">
+            <a href="index.html" data-i18n="nav.home">Home</a>
+            <a href="runtime.html" aria-current="page" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </nav>
+          <div class="header-actions">
+            <div class="language-switch" aria-label="Language">
+              <button type="button" data-language-choice="en_us" aria-pressed="true">EN</button>
+              <button type="button" data-language-choice="zh_cn" aria-pressed="false">中文</button>
+            </div>
+            <a class="button small" href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+          </div>
+        </div>
+      </header>
+
+      <main id="main">
+        <section class="page-hero">
+          <div class="page-hero-grid">
+            <div>
+              <span class="eyebrow" data-i18n="runtime.eyebrow">Runtime architecture</span>
+              <h1 data-i18n="runtime.title">The hard part is preserving Codex agent semantics.</h1>
+              <p class="page-copy" data-i18n="runtime.copy">CodeSeeX classifies requests, adapts DeepSeek provider behavior, owns hosted tools, and keeps usage explainable without becoming a second transcript store.</p>
+            </div>
+            <ul class="summary-list">
+              <li data-i18n="runtime.summary1">Request classes stay distinct: user turns, service requests, compaction, handoff loops, and final responses.</li>
+              <li data-i18n="runtime.summary2">DeepSeek tool protocol is consumed at the provider boundary and converted into standard tool events.</li>
+              <li data-i18n="runtime.summary3">Usage and logs explain what happened without storing full prompts by default.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="runtime.layersTitle">Runtime layers</span>
+              <h2 data-i18n="runtime.layersTitle">Runtime layers</h2>
+            </div>
+            <p class="section-copy" data-i18n="runtime.layersCopy">Codex Desktop -> local adapter -> agent bridge -> provider adapter -> manager runtime.</p>
+          </div>
+          <div class="grid-4">
+            <article class="feature">
+              <span class="feature-kicker">/v1</span>
+              <h3 data-i18n="runtime.layer1Title">Codex-facing API</h3>
+              <p data-i18n="runtime.layer1Copy">OpenAI-compatible /v1 endpoints, generated catalog, and local capability boundary.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">BRIDGE</span>
+              <h3 data-i18n="runtime.layer2Title">Agent bridge</h3>
+              <p data-i18n="runtime.layer2Copy">Request classification, client tool handoff, context compilation, and replay controls.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">PROVIDER</span>
+              <h3 data-i18n="runtime.layer3Title">Provider adapter</h3>
+              <p data-i18n="runtime.layer3Copy">DeepSeek streaming, reasoning, DSML tool protocol parsing, and usage normalization.</p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">DESKTOP</span>
+              <h3 data-i18n="runtime.layer4Title">Manager runtime</h3>
+              <p data-i18n="runtime.layer4Copy">Status, logs, usage, settings, balance, update checks, and tray operations.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="runtime.contextTitle">Context and state boundaries</span>
+              <h2 data-i18n="runtime.contextTitle">Context and state boundaries</h2>
+            </div>
+            <p class="section-copy" data-i18n="runtime.contextCopy">Codex owns the conversation transcript. CodeSeeX keeps only current-process bridge state and bounded diagnostics needed to finish requests and explain runtime behavior.</p>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <ul class="check-list">
+                <li data-i18n="runtime.context1">Full-context requests are used for the current upstream call, not duplicated as durable conversation storage.</li>
+                <li data-i18n="runtime.context2">Tool facts are scoped evidence for CodeSeeX-owned execution, not a replacement for the Codex transcript.</li>
+                <li data-i18n="runtime.context3">Tool output, visible thinking, binary payloads, and compact material are bounded before replay.</li>
+              </ul>
+            </div>
+            <figure class="screen-panel">
+              <img src="assets/screenshots/release-usage.png" alt="CodeSeeX usage view">
+            </figure>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="grid-2">
+            <article class="panel">
+              <span class="eyebrow neutral" data-i18n="runtime.protocolTitle">Provider protocol handling</span>
+              <h2 data-i18n="runtime.protocolTitle">Provider protocol handling</h2>
+              <p data-i18n="runtime.protocolCopy">DeepSeek-specific protocol text is treated as provider protocol, not user-visible prose. When tools are available it becomes standard tool calls; otherwise it is consumed at the safety boundary.</p>
+            </article>
+            <article class="panel">
+              <span class="eyebrow neutral" data-i18n="runtime.usageTitle">Usage that follows user work</span>
+              <h2 data-i18n="runtime.usageTitle">Usage that follows user work</h2>
+              <p data-i18n="runtime.usageCopy">Billable upstream calls are grouped into user sessions with model iterations, tool phases, client handoffs, service requests, cache hits, misses, output, latency, and estimated cost.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section tight">
+          <div class="panel">
+            <span class="eyebrow neutral" data-i18n="runtime.logsTitle">Logs for causality, not raw dumps</span>
+            <h2 data-i18n="runtime.logsTitle">Logs for causality, not raw dumps</h2>
+            <p data-i18n="runtime.logsCopy">Safe diagnostic logs show categories, severity, request IDs, source probes, context warnings, and protocol events without exposing prompt payloads by default.</p>
+          </div>
+        </section>
+
+        <section class="cta-band">
+          <h2 data-i18n="home.ctaTitle">Ready to route Codex through DeepSeek with a real agent boundary?</h2>
+          <p data-i18n="home.ctaCopy">Start with the generated TOML, keep the manager open for observability, and use the docs when you need to reason about tools, state, or privacy.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="setup.html" data-i18n="home.secondaryCta">Setup guide</a>
+            <a class="button" href="https://github.com/TasteSteak/CodeSeeX/blob/main/docs/architecture.md" data-i18n="common.docs">Read docs</a>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <div class="footer-inner">
+          <div>
+            <a class="brand" href="index.html">
+              <img src="assets/app.svg" alt="CodeSeeX">
+              <span>CodeSeeX</span>
+            </a>
+            <p data-i18n="footer.tagline">A local Codex-native runtime for DeepSeek V4, built for real agent work rather than plain API forwarding.</p>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.docs">Documentation</strong>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.project">Project</strong>
+            <a href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="common.releases">GitHub Releases</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/README.md">README</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/CHANGELOG.md">CHANGELOG</a>
+          </div>
+        </div>
+        <div class="fine-print">
+          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.</span>
+          <span> © <span data-current-year></span> TasteSteak and CodeSeeX contributors. AGPL-3.0-only.</span>
+        </div>
+      </footer>
+    </div>
+    <script src="assets/i18n.js"></script>
+    <script src="assets/site.js"></script>
+  </body>
+</html>

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="CodeSeeX security and privacy boundaries for model requests, Vision, Web Search, logs, and community tools.">
+    <title>Security · CodeSeeX</title>
+    <link rel="icon" href="assets/app.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="site-shell">
+      <header class="site-header">
+        <div class="header-inner">
+          <a class="brand" href="index.html" aria-label="CodeSeeX home">
+            <img src="assets/app.svg" alt="CodeSeeX">
+            <span>CodeSeeX</span>
+          </a>
+          <nav class="site-nav" aria-label="Primary navigation">
+            <a href="index.html" data-i18n="nav.home">Home</a>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" aria-current="page" data-i18n="nav.security">Security</a>
+          </nav>
+          <div class="header-actions">
+            <div class="language-switch" aria-label="Language">
+              <button type="button" data-language-choice="en_us" aria-pressed="true">EN</button>
+              <button type="button" data-language-choice="zh_cn" aria-pressed="false">中文</button>
+            </div>
+            <a class="button small" href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+          </div>
+        </div>
+      </header>
+
+      <main id="main">
+        <section class="page-hero">
+          <div class="page-hero-grid">
+            <div>
+              <span class="eyebrow" data-i18n="security.eyebrow">Security and privacy</span>
+              <h1 data-i18n="security.title">Local bridge does not mean zero data leaves your machine.</h1>
+              <p class="page-copy" data-i18n="security.copy">CodeSeeX is local software, but model requests, web search, Vision endpoints, and community tools each have distinct trust boundaries.</p>
+            </div>
+            <div class="panel">
+              <div class="pill-row">
+                <span class="pill">Local /v1</span>
+                <span class="pill">DeepSeek upstream</span>
+                <span class="pill">Vision endpoints</span>
+                <span class="pill">Web Search</span>
+                <span class="pill">Community tools</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="risk-table" aria-label="Security boundaries">
+            <div class="risk-row">
+              <strong data-i18n="security.table1Title">Model requests</strong>
+              <p data-i18n="security.table1Data">Prompts and context are forwarded to the configured DeepSeek-compatible upstream.</p>
+              <span data-i18n="security.table1Control">Use your own credentials, review upstream terms, and keep generated config local.</span>
+            </div>
+            <div class="risk-row">
+              <strong data-i18n="security.table2Title">Vision</strong>
+              <p data-i18n="security.table2Data">Image pixels can be sent to the configured Vision endpoint.</p>
+              <span data-i18n="security.table2Control">Configure only endpoints you trust and treat Vision keys as local secrets.</span>
+            </div>
+            <div class="risk-row">
+              <strong data-i18n="security.table3Title">Web Search</strong>
+              <p data-i18n="security.table3Data">Search providers and opened evidence pages can receive network requests.</p>
+              <span data-i18n="security.table3Control">CodeSeeX blocks local/private targets and keeps result replay bounded.</span>
+            </div>
+            <div class="risk-row">
+              <strong data-i18n="security.table4Title">Community tools</strong>
+              <p data-i18n="security.table4Data">Enabled tools run local commands declared by their manifests.</p>
+              <span data-i18n="security.table4Control">They are disabled by default; enable only manifests you trust.</span>
+            </div>
+            <div class="risk-row">
+              <strong data-i18n="security.table5Title">Logs</strong>
+              <p data-i18n="security.table5Data">Default logs are compact and redacted; dev diagnostics can expose more request shape.</p>
+              <span data-i18n="security.table5Control">Use diagnostic mode only for debugging and clear diagnostic logs when done.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="grid-2">
+            <figure class="screen-panel">
+              <img src="assets/screenshots/release-codex-vision.png" alt="CodeSeeX Vision example in Codex">
+            </figure>
+            <article class="panel">
+              <span class="eyebrow neutral" data-i18n="security.docsTitle">Read the state boundary docs</span>
+              <h2 data-i18n="security.docsTitle">Read the state boundary docs</h2>
+              <p data-i18n="security.docsCopy">The state contract explains what CodeSeeX stores, what Codex owns, and why the runtime should not become a second transcript database.</p>
+              <div class="hero-actions">
+                <a class="button primary" href="https://github.com/TasteSteak/CodeSeeX/blob/main/docs/state-contract.md" data-i18n="common.docs">Read docs</a>
+                <a class="button" href="tools.html" data-i18n="nav.tools">Tools</a>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <div class="footer-inner">
+          <div>
+            <a class="brand" href="index.html">
+              <img src="assets/app.svg" alt="CodeSeeX">
+              <span>CodeSeeX</span>
+            </a>
+            <p data-i18n="footer.tagline">A local Codex-native runtime for DeepSeek V4, built for real agent work rather than plain API forwarding.</p>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.docs">Documentation</strong>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.project">Project</strong>
+            <a href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="common.releases">GitHub Releases</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/README.md">README</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/CHANGELOG.md">CHANGELOG</a>
+          </div>
+        </div>
+        <div class="fine-print">
+          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.</span>
+          <span> © <span data-current-year></span> TasteSteak and CodeSeeX contributors. AGPL-3.0-only.</span>
+        </div>
+      </footer>
+    </div>
+    <script src="assets/i18n.js"></script>
+    <script src="assets/site.js"></script>
+  </body>
+</html>

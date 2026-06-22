@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Install CodeSeeX, copy the generated Codex TOML, and route Codex through DeepSeek-compatible models.">
+    <title>Setup · CodeSeeX</title>
+    <link rel="icon" href="assets/app.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="site-shell">
+      <header class="site-header">
+        <div class="header-inner">
+          <a class="brand" href="index.html" aria-label="CodeSeeX home">
+            <img src="assets/app.svg" alt="CodeSeeX">
+            <span>CodeSeeX</span>
+          </a>
+          <nav class="site-nav" aria-label="Primary navigation">
+            <a href="index.html" data-i18n="nav.home">Home</a>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" aria-current="page" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </nav>
+          <div class="header-actions">
+            <div class="language-switch" aria-label="Language">
+              <button type="button" data-language-choice="en_us" aria-pressed="true">EN</button>
+              <button type="button" data-language-choice="zh_cn" aria-pressed="false">中文</button>
+            </div>
+            <a class="button small" href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+          </div>
+        </div>
+      </header>
+
+      <main id="main">
+        <section class="page-hero">
+          <div class="page-hero-grid">
+            <div>
+              <span class="eyebrow" data-i18n="setup.eyebrow">Setup</span>
+              <h1 data-i18n="setup.title">Install CodeSeeX, copy generated TOML, restart Codex.</h1>
+              <p class="page-copy" data-i18n="setup.copy">The generated adapter configuration is machine-specific. Prefer copying it from the desktop manager instead of hand-writing paths or ports.</p>
+            </div>
+            <figure class="screen-panel">
+              <img src="assets/screenshots/release-dashboard-toml.png" alt="CodeSeeX generated Codex TOML">
+            </figure>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="grid-4">
+            <article class="step">
+              <span class="step-number">1</span>
+              <h3 data-i18n="setup.step1Title">Install the desktop app</h3>
+              <p data-i18n="setup.step1Copy">On Windows, use the NSIS CodeSeeX_*_setup.exe installer from GitHub Releases for normal install and update.</p>
+            </article>
+            <article class="step">
+              <span class="step-number">2</span>
+              <h3 data-i18n="setup.step2Title">Start the local proxy</h3>
+              <p data-i18n="setup.step2Copy">Confirm the manager shows the local service running, usually on 127.0.0.1:8787.</p>
+            </article>
+            <article class="step">
+              <span class="step-number">3</span>
+              <h3 data-i18n="setup.step3Title">Copy the generated TOML</h3>
+              <p data-i18n="setup.step3Copy">Use the adapter card so model_catalog_json and base_url match the current machine.</p>
+            </article>
+            <article class="step">
+              <span class="step-number">4</span>
+              <h3 data-i18n="setup.step4Title">Restart Codex and select a model</h3>
+              <p data-i18n="setup.step4Copy">Choose deepseek-v4-pro for quality or deepseek-v4-flash for speed.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="setup.tomlTitle">Generated TOML example</span>
+              <h2 data-i18n="setup.tomlTitle">Generated TOML example</h2>
+            </div>
+            <p class="section-copy" data-i18n="setup.tomlCopy">This is a structure example only. Copy the real TOML from the CodeSeeX desktop manager because model_catalog_json, base_url, and local paths are machine-specific.</p>
+          </div>
+          <div class="code-panel">
+            <pre id="toml-example"><code>model_provider = "custom"
+model = "deepseek-v4-pro"
+disable_response_storage = true
+model_reasoning_effort = "xhigh"
+model_catalog_json = "&lt;generated path to model-catalog.json&gt;"
+
+[model_providers.custom]
+name = "DeepSeek"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "http://127.0.0.1:8787/v1"</code></pre>
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow neutral" data-i18n="setup.troubleTitle">Troubleshooting checklist</span>
+              <h2 data-i18n="setup.troubleTitle">Troubleshooting checklist</h2>
+            </div>
+            <p class="section-copy" data-i18n="setup.troubleCopy">Most setup failures are catalog path, port, proxy, or tool exposure issues.</p>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <ul class="check-list">
+                <li data-i18n="setup.trouble1">If models do not appear, confirm model_catalog_json points to an existing model-catalog.json.</li>
+                <li data-i18n="setup.trouble2">If requests fail, confirm Codex base_url points at CodeSeeX and the port is not occupied.</li>
+                <li data-i18n="setup.trouble3">If web search is weak, check source diagnostics and system proxy mode.</li>
+                <li data-i18n="setup.trouble4">If tools behave unexpectedly, confirm the tool is enabled and supported by the current Codex session.</li>
+              </ul>
+            </div>
+            <figure class="screen-panel">
+              <img src="assets/screenshots/release-codex.png" alt="Codex session through CodeSeeX">
+            </figure>
+          </div>
+        </section>
+
+        <section class="cta-band">
+          <h2 data-i18n="common.releases">GitHub Releases</h2>
+          <p data-i18n="home.notice3Copy">Use the NSIS installer for desktop install, update, and legacy migration.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="home.primaryCta">Download from Releases</a>
+            <a class="button" href="security.html" data-i18n="nav.security">Security</a>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <div class="footer-inner">
+          <div>
+            <a class="brand" href="index.html">
+              <img src="assets/app.svg" alt="CodeSeeX">
+              <span>CodeSeeX</span>
+            </a>
+            <p data-i18n="footer.tagline">A local Codex-native runtime for DeepSeek V4, built for real agent work rather than plain API forwarding.</p>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.docs">Documentation</strong>
+            <a href="runtime.html" data-i18n="nav.runtime">Runtime</a>
+            <a href="tools.html" data-i18n="nav.tools">Tools</a>
+            <a href="setup.html" data-i18n="nav.setup">Setup</a>
+            <a href="security.html" data-i18n="nav.security">Security</a>
+          </div>
+          <div class="footer-links">
+            <strong data-i18n="footer.project">Project</strong>
+            <a href="https://github.com/TasteSteak/CodeSeeX" data-i18n="nav.github">GitHub</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/releases" data-i18n="common.releases">GitHub Releases</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/README.md">README</a>
+            <a href="https://github.com/TasteSteak/CodeSeeX/blob/main/CHANGELOG.md">CHANGELOG</a>
+          </div>
+        </div>
+        <div class="fine-print">
+          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.</span>
+          <span> © <span data-current-year></span> TasteSteak and CodeSeeX contributors. AGPL-3.0-only.</span>
+        </div>
+      </footer>
+    </div>
+    <script src="assets/i18n.js"></script>
+    <script src="assets/site.js"></script>
+  </body>
+</html>
