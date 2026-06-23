@@ -76,15 +76,15 @@ pub fn available_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
             slug: MODEL_FLASH.to_owned(),
-            display_name: "DeepSeek-V4 Flash".to_owned(),
-            description: "DeepSeek-V4 Flash served through CodeSeeX.".to_owned(),
+            display_name: "DeepSeek V4 Flash".to_owned(),
+            description: "DeepSeek V4 Flash served through CodeSeeX.".to_owned(),
             context_window: DEFAULT_CONTEXT_WINDOW,
             effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
         },
         ModelInfo {
             slug: MODEL_PRO.to_owned(),
-            display_name: "DeepSeek-V4 Pro".to_owned(),
-            description: "DeepSeek-V4 Pro served through CodeSeeX.".to_owned(),
+            display_name: "DeepSeek V4 Pro".to_owned(),
+            description: "DeepSeek V4 Pro served through CodeSeeX.".to_owned(),
             context_window: DEFAULT_CONTEXT_WINDOW,
             effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
         },

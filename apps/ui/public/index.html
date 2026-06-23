@@ -5,35 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <script>
-    window.CODESEEX_ASSET_VERSION = Date.now().toString(36);
-    [
-      "/styles/foundation/theme.css",
-      "/styles/foundation/base.css",
-      "/styles/layout/app-shell.css",
-      "/styles/layout/sidebar.css",
-      "/styles/components/buttons.css",
-      "/styles/components/panels.css",
-      "/styles/components/cards.css",
-      "/styles/components/forms.css",
-      "/styles/components/lists.css",
-      "/styles/components/menus.css",
-      "/styles/components/overlays.css",
-      "/styles/components/toml.css",
-      "/styles/features/config/billing.css",
-      "/styles/features/config/tools.css",
-      "/styles/pages/dashboard.css",
-      "/styles/pages/config.css",
-      "/styles/pages/logs.css",
-      "/styles/pages/about.css",
-      "/styles/pages/usage.css",
-    ].forEach((href) => {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = href + "?v=" + window.CODESEEX_ASSET_VERSION;
-      document.head.appendChild(link);
-    });
-  </script>
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.5.1">
 </head>
 <body>
   <div class="layout-container">
@@ -171,6 +161,10 @@
               </div>
               <div class="config-toml-actions">
                 <span class="copy-status" id="configTomlCopyStatus" aria-live="polite"></span>
+                <button class="btn btn-secondary btn-icon-label" type="button" id="launchCodexButton">
+                  <span class="btn-icon btn-icon-codex" aria-hidden="true"></span>
+                  <span data-i18n="launchCodex">Launch Codex</span>
+                </button>
                 <button class="btn btn-secondary btn-icon-label" type="button" id="importCcsButton">
                   <span class="btn-icon btn-icon-import" aria-hidden="true"></span>
                   <span data-i18n="importToCcs">Import to CCS</span>
@@ -198,7 +192,7 @@
             <div class="panel-header">
               <div>
                 <h2 data-i18n="usageConversationRecords">Conversation records</h2>
-                <p data-i18n="usageFoldedHint">Current data is shown as folded records; backend conversation grouping can refine this later.</p>
+                <p data-i18n="usageFoldedHint">Each row is a user conversation or service request; expand to inspect model, tool, final reply, cache, and cost stages.</p>
               </div>
             </div>
             <div class="usage-grid-spec usage-list-header">

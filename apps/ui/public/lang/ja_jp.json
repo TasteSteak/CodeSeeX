@@ -292,7 +292,7 @@
   "dashboardStatusStopped": "Stopped",
   "dashboardPortPending": "Port {port}",
   "usageConversationRecords": "Conversation records",
-  "usageFoldedHint": "Current data is shown as folded records; backend conversation grouping can refine this later.",
+  "usageFoldedHint": "Each row is a user conversation or service request; expand to inspect model, tool, final reply, cache, and cost stages.",
   "usageConversationRecord": "Completed conversation",
   "usageIntermediateReply": "Intermediate request",
   "usageServiceRequestTitle": "Service request from Codex",

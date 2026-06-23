@@ -19,8 +19,8 @@ use crate::response_sse::{
 };
 use crate::responses::compaction::build_compaction_item;
 use crate::responses::context::{
-    build_response_context, chat_messages_to_values, estimate_tokens_from_messages,
-    estimate_tokens_from_text,
+    build_response_context, chat_messages_to_values, codex_full_context_relevant_tail_start,
+    estimate_tokens_from_messages, estimate_tokens_from_text,
 };
 use crate::responses::conversion::{
     chat_completion_to_response, chat_completion_tool_calls_to_response, final_chat_turn_message,
@@ -109,8 +109,8 @@ use response_lifecycle::{
     append_auto_compaction_if_safe, build_automatic_compaction, client_handoff_guard_calls,
     ensure_new_response_id, record_previous_response_resolution_warning,
     record_request_shape_diagnostic, record_runtime_context_storage_events,
-    resolve_previous_response_id, response_model_from_input, runtime_context_storage_diagnostic,
-    PreviousResponseResolution,
+    resolve_previous_response_id, resolve_prompt_cache_session_anchor, response_model_from_input,
+    runtime_context_storage_diagnostic, PreviousResponseResolution,
 };
 use router::app_router;
 use search_probe::spawn_default_web_search_source_probe_subscriber;
@@ -129,6 +129,7 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const RESPONSES_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const STORED_FULL_CONTEXT_TURN_CONTENT_CHARS: usize = 8 * 1024;
 
 pub async fn serve(config: AppConfig) -> anyhow::Result<()> {
     serve_with_shutdown(config, std::future::pending::<()>(), || {}).await
@@ -743,6 +744,8 @@ async fn responses(
     }
     let previous_resolution = if service_kind.is_service() {
         PreviousResponseResolution::suppressed_service(previous)
+    } else if let Some(anchor) = resolve_prompt_cache_session_anchor(&state, &input).await {
+        anchor
     } else {
         match resolve_previous_response_id(&state, previous).await {
             Ok(resolution) => resolution,
@@ -911,7 +914,7 @@ async fn responses(
             .await;
     }
     let current_turn_messages = if request_looks_like_codex_full_context(&input) {
-        Vec::new()
+        full_context_current_turn_messages(&built_context.current_messages)
     } else {
         chat_messages_to_values(&built_context.current_messages)
     };
@@ -1512,6 +1515,36 @@ async fn responses(
             )
         }
     }
+}
+
+fn full_context_current_turn_messages(messages: &[ChatMessage]) -> Vec<Value> {
+    let tail_start = codex_full_context_relevant_tail_start(messages);
+    let current_turn = messages
+        .get(tail_start..)
+        .unwrap_or_default()
+        .iter()
+        .cloned()
+        .map(compact_turn_message_for_runtime)
+        .collect::<Vec<_>>();
+    chat_messages_to_values(&current_turn)
+}
+
+fn compact_turn_message_for_runtime(mut message: ChatMessage) -> ChatMessage {
+    message.content = truncate_chars(&message.content, STORED_FULL_CONTEXT_TURN_CONTENT_CHARS);
+    message.reasoning_content = None;
+    message
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let prefix = text.chars().take(max_chars).collect::<String>();
+    format!(
+        "{prefix}...[truncated chars={} bytes={}]",
+        text.chars().count(),
+        text.len()
+    )
 }
 
 struct StreamingResponseParams {

@@ -10,6 +10,8 @@ const BUDGET_TOOL_CONTENT_CHARS: usize = 512 * 1024;
 const BUDGET_MESSAGE_CONTENT_CHARS: usize = 192 * 1024;
 const BUDGET_REASONING_CHARS: usize = 64 * 1024;
 const CODEX_FULL_CONTEXT_REPLAY_BUDGET_TOKENS: u64 = 96_000;
+const CODEX_FULL_CONTEXT_PROTECTED_USER_BYTES: u64 = 8 * 1024;
+const CODEX_FULL_CONTEXT_PROTECTED_USER_TOTAL_BYTES: u64 = 64 * 1024;
 
 pub(crate) struct BudgetedContextMessages {
     pub(crate) messages: Vec<ChatMessage>,
@@ -74,7 +76,8 @@ pub(crate) fn budget_messages_for_upstream(
         };
     }
 
-    let selected = select_budgeted_message_blocks(compacted, protected_start_index, max_bytes);
+    let selected =
+        select_budgeted_message_blocks(compacted, protected_start_index, max_bytes, mode);
     let final_bytes = messages_json_bytes(&selected.messages);
     let compacted_messages = count_changed_messages(&messages, &selected.messages);
     BudgetedContextMessages {
@@ -101,12 +104,16 @@ fn select_budgeted_message_blocks(
     messages: Vec<ChatMessage>,
     protected_start_index: usize,
     max_bytes: u64,
+    mode: BudgetMode,
 ) -> SelectedMessages {
     let mut selected_indexes = BTreeSet::new();
+    let protected_user_indexes =
+        protected_codex_full_context_user_indexes(&messages, mode, max_bytes);
     for (index, message) in messages.iter().enumerate() {
         if message.role == "system"
             || index >= protected_start_index
             || is_protected_context_message(message)
+            || protected_user_indexes.contains(&index)
         {
             selected_indexes.insert(index);
         }
@@ -239,6 +246,35 @@ fn is_protected_context_message(message: &ChatMessage) -> bool {
         || message.content.starts_with("CodeSeeX compacted")
 }
 
+fn protected_codex_full_context_user_indexes(
+    messages: &[ChatMessage],
+    mode: BudgetMode,
+    max_bytes: u64,
+) -> HashSet<usize> {
+    let mut indexes = HashSet::new();
+    if mode != BudgetMode::CodexFullContextReplay {
+        return indexes;
+    }
+
+    let total_cap = CODEX_FULL_CONTEXT_PROTECTED_USER_TOTAL_BYTES.min(max_bytes / 2);
+    let mut total_bytes = 0_u64;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message.role != "user" {
+            continue;
+        }
+        let bytes = chat_message_json_bytes(message);
+        if bytes > CODEX_FULL_CONTEXT_PROTECTED_USER_BYTES {
+            continue;
+        }
+        if total_bytes.saturating_add(bytes) > total_cap {
+            continue;
+        }
+        indexes.insert(index);
+        total_bytes = total_bytes.saturating_add(bytes);
+    }
+    indexes
+}
+
 fn compact_message_for_budget(message: &ChatMessage) -> ChatMessage {
     let mut next = message.clone();
     let content_limit = if next.role == "tool" {
@@ -268,18 +304,21 @@ fn truncate_for_budget(text: &str, max_chars: usize) -> String {
 }
 
 pub(crate) fn upstream_context_budget_bytes(mode: BudgetMode) -> u64 {
-    let effective_tokens = match mode {
+    match mode {
         BudgetMode::Standard => {
-            DEFAULT_CONTEXT_WINDOW.saturating_mul(u64::from(DEFAULT_EFFECTIVE_CONTEXT_PERCENT))
-                / 100
+            let effective_tokens = DEFAULT_CONTEXT_WINDOW
+                .saturating_mul(u64::from(DEFAULT_EFFECTIVE_CONTEXT_PERCENT))
+                / 100;
+            effective_tokens
+                .saturating_sub(RESERVED_OUTPUT_TOKENS)
+                .saturating_sub(RESERVED_TOOL_DEFINITION_TOKENS)
+                .saturating_mul(BYTES_PER_TOKEN_ESTIMATE)
+                .max(64 * 1024)
         }
-        BudgetMode::CodexFullContextReplay => CODEX_FULL_CONTEXT_REPLAY_BUDGET_TOKENS,
-    };
-    effective_tokens
-        .saturating_sub(RESERVED_OUTPUT_TOKENS)
-        .saturating_sub(RESERVED_TOOL_DEFINITION_TOKENS)
-        .saturating_mul(BYTES_PER_TOKEN_ESTIMATE)
-        .max(64 * 1024)
+        BudgetMode::CodexFullContextReplay => CODEX_FULL_CONTEXT_REPLAY_BUDGET_TOKENS
+            .saturating_mul(BYTES_PER_TOKEN_ESTIMATE)
+            .max(64 * 1024),
+    }
 }
 
 pub(crate) fn messages_json_bytes(messages: &[ChatMessage]) -> u64 {

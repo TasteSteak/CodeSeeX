@@ -489,6 +489,158 @@ async fn api_models_returns_app_server_model_list_shape() {
 }
 
 #[tokio::test]
+async fn codex_model_catalog_route_returns_injected_model_choices() {
+    let config = test_config(temp_workspace("codex-model-catalog"));
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/codex-model-catalog"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.json::<Value>().await.unwrap();
+    assert_eq!(body.get("status").and_then(Value::as_str), Some("ok"));
+    assert_eq!(
+        body.get("default_model").and_then(Value::as_str),
+        Some("deepseek-v4-pro")
+    );
+    assert_eq!(
+        body.get("models").and_then(Value::as_array).map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        body.pointer("/appServer/data/0/model")
+            .and_then(Value::as_str),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        body.pointer("/appServer/data/0/displayName")
+            .and_then(Value::as_str),
+        Some("DeepSeek V4 Flash")
+    );
+    assert_eq!(
+        body.pointer("/appServer/data/0/shortDisplayName")
+            .and_then(Value::as_str),
+        Some("Flash")
+    );
+    assert_eq!(
+        body.pointer("/appServer/data/1/model")
+            .and_then(Value::as_str),
+        Some("deepseek-v4-pro")
+    );
+    assert_eq!(
+        body.pointer("/appServer/data/1/displayName")
+            .and_then(Value::as_str),
+        Some("DeepSeek V4 Pro")
+    );
+    assert_eq!(
+        body.pointer("/appServer/data/1/shortDisplayName")
+            .and_then(Value::as_str),
+        Some("Pro")
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn renderer_inject_script_route_embeds_codex_app_model_patch() {
+    let config = test_config(temp_workspace("renderer-inject-script"));
+    let (data_dir, addr) = spawn_test_app(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/codeseex/renderer-inject.js"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/javascript; charset=utf-8")
+    );
+    let body = response.text().await.unwrap();
+    assert!(body.contains("deepseek-v4-pro"), "{body}");
+    assert!(body.contains("list-models-for-host"), "{body}");
+    assert!(body.contains("model-queries-"), "{body}");
+    assert!(body.contains("use-host-config:request-bridge"), "{body}");
+    assert!(body.contains("module && module.Vt"), "{body}");
+    assert!(body.contains("shortenSelectedModelButtonLabels"), "{body}");
+    assert!(body.contains("message.method"), "{body}");
+    assert!(body.contains("modelListResultLooksPatchable"), "{body}");
+    assert!(
+        body.contains("const initialDiagnostic = await refresh(\"initial\");"),
+        "{body}"
+    );
+    assert!(body.contains("return initialDiagnostic;"), "{body}");
+    assert!(body.contains("appServerPatch"), "{body}");
+    assert!(body.contains("patchStatsigDynamicConfig"), "{body}");
+    assert!(body.contains("available_models"), "{body}");
+    assert!(body.contains("107580212"), "{body}");
+    assert!(body.contains("dynamicConfigPatch"), "{body}");
+    assert!(!body.contains("Response.prototype.json"), "{body}");
+    assert!(!body.contains("window.dispatchEvent ="), "{body}");
+    assert!(!body.contains("MODEL_DYNAMIC_CONFIG_NAMES"), "{body}");
+    assert!(!body.contains("patchReactModelState"), "{body}");
+    assert!(!body.contains("patchObjectGraph"), "{body}");
+    assert!(!body.contains("Object.values(module)"), "{body}");
+    assert!(!body.contains("app-server-manager-signals-"), "{body}");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn codex_app_inject_reports_cdp_connection_failure() {
+    let config = test_config(temp_workspace("codex-app-inject-failure"));
+    let (data_dir, addr) = spawn_test_app(config).await;
+    let closed_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/codex-app/inject"))
+        .json(&json!({ "debugPort": closed_port }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.json::<Value>().await.unwrap();
+    assert_eq!(
+        body.get("error").and_then(Value::as_str),
+        Some("codex_app_inject_failed")
+    );
+    assert_eq!(
+        body.get("debug_port").and_then(Value::as_u64),
+        Some(closed_port as u64)
+    );
+
+    let events = reqwest::Client::new()
+        .get(format!(
+            "http://{addr}/api/events?level=error&q=codex_app_inject_failed"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        events.pointer("/events/0/type").and_then(Value::as_str),
+        Some("codex_app_inject_failed")
+    );
+    assert_eq!(
+        events
+            .pointer("/events/0/safe_detail/debug_port")
+            .and_then(Value::as_u64),
+        Some(closed_port as u64)
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
 async fn app_server_rpc_dispatches_model_list() {
     let config = test_config(temp_workspace("api-app-server-model-list"));
     let (data_dir, addr) = spawn_test_app(config).await;
@@ -3140,7 +3292,7 @@ async fn codex_full_context_request_is_budgeted_before_upstream() {
     assert!(serialized_messages.contains("latest full-context task"));
     assert!(!serialized_messages.contains("old full context item 0"));
     assert!(
-        serialized_messages.len() < 160_000,
+        serialized_messages.len() < 420_000,
         "messages too large: {}",
         serialized_messages.len()
     );
@@ -3162,6 +3314,269 @@ async fn codex_full_context_request_is_budgeted_before_upstream() {
             .pointer("/context/budget/triggered")
             .and_then(Value::as_bool),
         Some(true)
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("codex-model-switch-anchor");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_anchor_pro",
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "codex-thread-switch",
+            "instructions": "answer briefly",
+            "tools": [],
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "remember switch-anchor-marker" }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_anchor_flash",
+            "model": "deepseek-v4-flash",
+            "prompt_cache_key": "codex-thread-switch",
+            "instructions": "answer briefly",
+            "tools": [],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "client replay duplicate not in local chain" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old client replay assistant text" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "what did I ask you to remember?" }]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 2);
+    let second_messages = serde_json::to_string(&requests[1]["messages"]).unwrap();
+    assert!(second_messages.contains("remember switch-anchor-marker"));
+    assert!(second_messages.contains("what did I ask you to remember?"));
+    assert!(!second_messages.contains("client replay duplicate not in local chain"));
+    assert!(!second_messages.contains("old client replay assistant text"));
+
+    let chain = store
+        .response_context_chain("resp_anchor_flash", 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        chain
+            .last()
+            .and_then(|record| record.previous_response_id.as_deref()),
+        Some("resp_anchor_pro")
+    );
+    let (events, _) = store.recent_events(40, None).await.unwrap();
+    let request_started = events
+        .iter()
+        .find(|event| {
+            event.event_type == "request_started"
+                && event
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("id"))
+                    .and_then(Value::as_str)
+                    == Some("resp_anchor_flash")
+        })
+        .expect("request_started event should be recorded");
+    assert_eq!(
+        request_started
+            .detail
+            .as_ref()
+            .unwrap()
+            .pointer("/previous_response_resolution/kind")
+            .and_then(Value::as_str),
+        Some("inferred_prompt_cache_anchor")
+    );
+    let context_compiled = events
+        .iter()
+        .find(|event| {
+            event.event_type == "context_compile_diagnostic"
+                && event
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("id"))
+                    .and_then(Value::as_str)
+                    == Some("resp_anchor_flash")
+        })
+        .expect("context_compile_diagnostic event should be recorded");
+    assert_eq!(
+        context_compiled
+            .detail
+            .as_ref()
+            .unwrap()
+            .pointer("/context/codex_full_context_replay/strategy")
+            .and_then(Value::as_str),
+        Some("local_anchor_tail")
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn codex_model_switch_keeps_client_replay_when_local_root_is_not_complete() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("codex-model-switch-long-root");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let first_input = (0..24)
+        .map(|index| {
+            json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": format!("legacy thread item {index}") }]
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_long_root_pro",
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "codex-thread-long-root",
+            "instructions": "answer briefly",
+            "tools": [],
+            "input": first_input
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = client
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_long_root_flash",
+            "model": "deepseek-v4-flash",
+            "prompt_cache_key": "codex-thread-long-root",
+            "instructions": "answer briefly",
+            "tools": [],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "legacy thread item 0" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "legacy answer that only Codex replay still has" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue safely" }]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 2);
+    let second_messages = serde_json::to_string(&requests[1]["messages"]).unwrap();
+    assert!(second_messages.contains("legacy answer that only Codex replay still has"));
+    assert!(second_messages.contains("continue safely"));
+
+    let (events, _) = store.recent_events(80, None).await.unwrap();
+    let context_compiled = events
+        .iter()
+        .find(|event| {
+            event.event_type == "context_compile_diagnostic"
+                && event
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.get("id"))
+                    .and_then(Value::as_str)
+                    == Some("resp_long_root_flash")
+        })
+        .expect("context_compile_diagnostic event should be recorded");
+    assert_eq!(
+        context_compiled
+            .detail
+            .as_ref()
+            .unwrap()
+            .pointer("/context/codex_full_context_replay/strategy")
+            .and_then(Value::as_str),
+        Some("client_full_replay")
     );
 
     let _ = std::fs::remove_dir_all(data_dir);

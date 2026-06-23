@@ -19,6 +19,7 @@ pub(crate) use budget::{estimate_tokens_from_messages, estimate_tokens_from_text
 use budget::{messages_json_bytes, upstream_context_budget_bytes};
 
 const RECENT_TOOL_FACT_REQUEST_LIMIT: u32 = 200;
+const CODEX_FULL_CONTEXT_LOCAL_ROOT_ITEM_LIMIT: usize = 16;
 
 pub(crate) struct BuiltResponseContext {
     pub(crate) messages: Vec<ChatMessage>,
@@ -33,6 +34,57 @@ pub(crate) struct BuiltResponseContext {
 struct ResponseHistoryContext {
     messages: Vec<ChatMessage>,
     tool_facts: Vec<String>,
+    root_full_context_original_input_items: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexFullContextReplayStrategy {
+    NotCodexFullContext,
+    LocalAnchorTail,
+    ClientFullReplay,
+}
+
+impl CodexFullContextReplayStrategy {
+    fn select(
+        is_codex_full_context: bool,
+        has_local_anchor: bool,
+        root_full_context_original_input_items: Option<usize>,
+    ) -> Self {
+        if !is_codex_full_context {
+            return Self::NotCodexFullContext;
+        }
+        if has_local_anchor
+            && root_full_context_original_input_items
+                .map(|items| items <= CODEX_FULL_CONTEXT_LOCAL_ROOT_ITEM_LIMIT)
+                .unwrap_or(true)
+        {
+            return Self::LocalAnchorTail;
+        }
+        Self::ClientFullReplay
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NotCodexFullContext => "not_codex_full_context",
+            Self::LocalAnchorTail => "local_anchor_tail",
+            Self::ClientFullReplay => "client_full_replay",
+        }
+    }
+
+    fn uses_local_anchor_tail(self) -> bool {
+        self == Self::LocalAnchorTail
+    }
+
+    fn uses_client_full_replay(self) -> bool {
+        self == Self::ClientFullReplay
+    }
+
+    fn budget_mode(self) -> BudgetMode {
+        match self {
+            Self::ClientFullReplay => BudgetMode::CodexFullContextReplay,
+            Self::NotCodexFullContext | Self::LocalAnchorTail => BudgetMode::Standard,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -85,9 +137,13 @@ async fn response_history_context(
                     format!("{message}. Do not infer missing prior tool results or assistant conclusions; ask to retry or re-run verification if the missing context matters."),
                 )],
                 tool_facts: Vec::new(),
+                root_full_context_original_input_items: None,
             };
         }
     };
+    let root_full_context_original_input_items = chain
+        .first()
+        .and_then(|record| stored_full_context_original_input_items(&record.input));
     let mut messages = Vec::new();
     let mut tool_facts = Vec::new();
     let mut tool_fact_seen = HashSet::new();
@@ -167,6 +223,7 @@ async fn response_history_context(
     ResponseHistoryContext {
         messages,
         tool_facts,
+        root_full_context_original_input_items,
     }
 }
 
@@ -175,6 +232,16 @@ fn stored_input_is_codex_full_context(input: &Value) -> bool {
         .pointer("/_codeseex_runtime/mode")
         .and_then(Value::as_str)
         == Some("codex_full_context_not_stored")
+}
+
+fn stored_full_context_original_input_items(input: &Value) -> Option<usize> {
+    if !stored_input_is_codex_full_context(input) {
+        return None;
+    }
+    input
+        .pointer("/_codeseex_runtime/original_input_items")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 fn push_unique_facts(output: &mut Vec<String>, seen: &mut HashSet<String>, facts: &[String]) {
@@ -249,9 +316,45 @@ pub(crate) async fn build_response_context(
         &current_tool_call_ids,
     )
     .await;
-    let history_message_count = history_context.messages.len();
     let mut tool_facts = history_context.tool_facts.clone();
-    messages.extend(history_context.messages);
+    let current_valid_tool_call_ids = immediate_previous_tool_call_ids(state, previous).await;
+    let current_context = compile_responses_input_with_tool_outputs(
+        input.get("input").unwrap_or(&Value::Null),
+        &current_valid_tool_call_ids,
+    );
+    let current_image_refs =
+        collect_current_input_image_refs(input.get("input").unwrap_or(&Value::Null));
+    let original_current_message_count = current_context.messages.len();
+    let current_context_diagnostic = current_context.diagnostic.clone();
+    let original_current_messages = current_context.messages.clone();
+    let replaying_codex_full_context = request_looks_like_codex_full_context(input);
+    let codex_replay_tail_start = replaying_codex_full_context
+        .then(|| codex_full_context_relevant_tail_start(&original_current_messages));
+    let replay_strategy = CodexFullContextReplayStrategy::select(
+        replaying_codex_full_context,
+        previous.is_some(),
+        history_context.root_full_context_original_input_items,
+    );
+    let current_messages = if replay_strategy.uses_local_anchor_tail() {
+        let tail_start = codex_replay_tail_start.unwrap_or(0);
+        original_current_messages
+            .get(tail_start..)
+            .unwrap_or_default()
+            .to_vec()
+    } else {
+        original_current_messages.clone()
+    };
+    let current_message_count = current_messages.len();
+    let history_messages = if replay_strategy.uses_client_full_replay() {
+        filter_history_messages_for_codex_full_context(
+            history_context.messages,
+            &original_current_messages,
+        )
+    } else {
+        history_context.messages
+    };
+    let history_message_count = history_messages.len();
+    messages.extend(history_messages);
     let recovered_tool_facts =
         recover_current_web_search_facts(state, input.get("input").unwrap_or(&Value::Null)).await;
     if !recovered_tool_facts.is_empty() {
@@ -263,28 +366,14 @@ pub(crate) async fn build_response_context(
             tool_facts.extend(unique_recovered);
         }
     }
-    let current_valid_tool_call_ids = immediate_previous_tool_call_ids(state, previous).await;
-    let current_context = compile_responses_input_with_tool_outputs(
-        input.get("input").unwrap_or(&Value::Null),
-        &current_valid_tool_call_ids,
-    );
-    let current_image_refs =
-        collect_current_input_image_refs(input.get("input").unwrap_or(&Value::Null));
-    let current_message_count = current_context.messages.len();
-    let current_context_diagnostic = current_context.diagnostic.clone();
-    let current_messages = current_context.messages.clone();
     messages.extend(current_messages.clone());
     let pre_budget_message_count = messages.len();
     let current_start_index = instruction_message_count + history_message_count;
-    let budget_mode = if request_looks_like_codex_full_context(input) {
-        BudgetMode::CodexFullContextReplay
-    } else {
-        BudgetMode::Standard
-    };
+    let budget_mode = replay_strategy.budget_mode();
     let protected_start_index = match budget_mode {
         BudgetMode::Standard => current_start_index,
         BudgetMode::CodexFullContextReplay => {
-            current_start_index + codex_full_context_relevant_tail_start(&current_messages)
+            current_start_index + codex_replay_tail_start.unwrap_or(0)
         }
     };
     let budgeted = budget_messages_for_upstream(messages, protected_start_index, budget_mode);
@@ -298,6 +387,15 @@ pub(crate) async fn build_response_context(
         "budget": budgeted.diagnostic,
         "budget_mode": budget_mode.label(),
         "protected_start_index": protected_start_index,
+        "codex_full_context_replay": {
+            "detected": replaying_codex_full_context,
+            "strategy": replay_strategy.label(),
+            "original_current_messages": original_current_message_count,
+            "selected_current_messages": current_message_count,
+            "tail_start": codex_replay_tail_start,
+            "root_original_input_items": history_context.root_full_context_original_input_items,
+            "local_root_item_limit": CODEX_FULL_CONTEXT_LOCAL_ROOT_ITEM_LIMIT
+        },
         "current_input": current_context_diagnostic,
         "current_input_images": current_image_refs.len(),
         "recovered_tool_facts": recovered_tool_facts.len()
@@ -313,7 +411,7 @@ pub(crate) async fn build_response_context(
     }
 }
 
-fn codex_full_context_relevant_tail_start(messages: &[ChatMessage]) -> usize {
+pub(crate) fn codex_full_context_relevant_tail_start(messages: &[ChatMessage]) -> usize {
     if messages.is_empty() {
         return 0;
     }
@@ -345,6 +443,43 @@ fn codex_full_context_relevant_tail_start(messages: &[ChatMessage]) -> usize {
         (None, Some(tool)) => tool,
         (None, None) => messages.len().saturating_sub(1),
     }
+}
+
+fn filter_history_messages_for_codex_full_context(
+    history: Vec<ChatMessage>,
+    current: &[ChatMessage],
+) -> Vec<ChatMessage> {
+    history
+        .into_iter()
+        .filter(|message| !history_message_is_represented_in_current(message, current))
+        .collect()
+}
+
+fn history_message_is_represented_in_current(
+    history: &ChatMessage,
+    current: &[ChatMessage],
+) -> bool {
+    let content = normalized_replay_content(&history.content);
+    if content.is_empty() {
+        return false;
+    }
+    current.iter().any(|message| {
+        message.role == history.role
+            && message.tool_calls.is_none()
+            && history.tool_calls.is_none()
+            && replay_content_matches(&content, &normalized_replay_content(&message.content))
+    })
+}
+
+fn replay_content_matches(history: &str, current: &str) -> bool {
+    if current.is_empty() {
+        return false;
+    }
+    current == history || (history.chars().count() >= 24 && current.contains(history))
+}
+
+fn normalized_replay_content(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn collect_current_input_image_refs(input: &Value) -> Vec<String> {
@@ -1352,6 +1487,78 @@ mod tests {
             messages_json_bytes(&budgeted.messages)
                 <= upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay)
         );
+    }
+
+    #[test]
+    fn codex_full_context_budget_keeps_short_user_history() {
+        let mut messages = vec![ChatMessage::text("system", "instructions")];
+        for index in 0..20 {
+            messages.push(ChatMessage::text(
+                "user",
+                format!("user said marker-{index}"),
+            ));
+            messages.push(ChatMessage::text(
+                "assistant",
+                format!("assistant verbose reply {index} {}", "x".repeat(24_000)),
+            ));
+        }
+        let tail_start = messages.len();
+        messages.push(ChatMessage::text("user", "what did I say"));
+
+        let budgeted =
+            budget_messages_for_upstream(messages, tail_start, BudgetMode::CodexFullContextReplay);
+
+        assert_eq!(budgeted.diagnostic["mode"], "codex_full_context_replay");
+        assert_eq!(budgeted.diagnostic["triggered"], true);
+        assert!(budgeted
+            .messages
+            .iter()
+            .any(|message| message.content == "user said marker-0"));
+        assert!(budgeted
+            .messages
+            .iter()
+            .any(|message| message.content == "user said marker-19"));
+        assert!(budgeted
+            .messages
+            .iter()
+            .any(|message| message.content == "what did I say"));
+        assert!(
+            messages_json_bytes(&budgeted.messages)
+                <= upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay)
+        );
+    }
+
+    #[test]
+    fn codex_full_context_budget_does_not_trim_normal_replay() {
+        let mut messages = vec![ChatMessage::text("system", "instructions")];
+        for index in 0..10 {
+            messages.push(ChatMessage::text(
+                "user",
+                format!("user marker-{index} {}", "u".repeat(256)),
+            ));
+            messages.push(ChatMessage::text(
+                "assistant",
+                format!("assistant reply {index} {}", "a".repeat(8_000)),
+            ));
+        }
+        messages.push(ChatMessage::text("user", "what did I say"));
+        let initial_bytes = messages_json_bytes(&messages);
+        assert!(initial_bytes > 80 * 1024, "{initial_bytes}");
+        assert!(
+            initial_bytes < upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay),
+            "{initial_bytes}"
+        );
+
+        let tail_start = messages.len() - 1;
+        let budgeted =
+            budget_messages_for_upstream(messages, tail_start, BudgetMode::CodexFullContextReplay);
+
+        assert_eq!(budgeted.diagnostic["mode"], "codex_full_context_replay");
+        assert_eq!(budgeted.diagnostic["triggered"], false);
+        assert!(budgeted
+            .messages
+            .iter()
+            .any(|message| message.content.contains("user marker-0")));
     }
 
     #[test]

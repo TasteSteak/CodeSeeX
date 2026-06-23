@@ -65,6 +65,7 @@ const els = {
   configTomlCopyStatus: byId("configTomlCopyStatus"),
   configTomlStatus: byId("configTomlStatus"),
   copyTomlButton: byId("copyTomlButton"),
+  launchCodexButton: byId("launchCodexButton"),
   importCcsButton: byId("importCcsButton"),
   ccsApiKeyInput: byId("ccsApiKeyInput"),
   ccsKeyCancel: byId("ccsKeyCancel"),
@@ -234,7 +235,7 @@ async function loadI18n(targetLanguage) {
     systemLanguageHints = languageHintsFromManifest(manifest);
     const loadedLanguages = Array.isArray(manifest.languages) ? manifest.languages : [];
     languages = loadedLanguages.length > 0
-      ? loadedLanguages.map((language) => ({ id: normalizeLanguageId(language.id), name: language.name || language.id, url: language.url || "" })).filter((language) => language.id)
+      ? normalizeLanguageManifest(loadedLanguages)
       : [];
     renderLanguageOptions();
     const languageId = resolveLanguageId(targetLanguage);
@@ -269,6 +270,7 @@ function bind() {
   if (els.refreshBalanceButton) els.refreshBalanceButton.addEventListener("click", refreshBalance);
   if (els.rechargeBalanceButton) els.rechargeBalanceButton.addEventListener("click", openRechargePage);
   if (els.copyTomlButton) els.copyTomlButton.addEventListener("click", copyConfigToml);
+  if (els.launchCodexButton) els.launchCodexButton.addEventListener("click", launchCodexApp);
   if (els.importCcsButton) els.importCcsButton.addEventListener("click", importConfigToCcs);
   if (els.troubleshootButton) els.troubleshootButton.addEventListener("click", openTroubleshootModal);
   if (els.troubleshootClose) els.troubleshootClose.addEventListener("click", closeTroubleshootModal);
@@ -363,6 +365,9 @@ function bind() {
   document.querySelectorAll("[data-about-action]").forEach((button) => {
     button.addEventListener("click", () => handleAboutAction(button.dataset.aboutAction));
   });
+  if (els.aboutStatus) {
+    els.aboutStatus.addEventListener("click", handleAboutStatusClick);
+  }
 
   document.addEventListener("dragstart", (event) => event.preventDefault());
 }
@@ -977,14 +982,41 @@ async function apiJson(url, options = {}) {
   const response = await apiFetch(url, options);
   if (!response.ok) {
     const body = await response.text().catch(() => "");
+    const jsonBody = parseJsonOrNull(body);
     const preview = body ? " " + body.slice(0, 180).replace(/\s+/g, " ") : "";
     const error = new Error(`${url} failed: HTTP ${response.status}${preview}`);
     error.endpoint = String(url || "");
     error.targetUrl = response.codeseexTargetUrl || "";
     error.status = response.status;
+    error.responseBody = jsonBody;
+    error.serverMessage = jsonBody && typeof jsonBody.message === "string"
+      ? jsonBody.message
+      : jsonBody && typeof jsonBody.error === "string"
+        ? jsonBody.error
+        : "";
     throw error;
   }
   return response.json();
+}
+
+function parseJsonOrNull(value) {
+  try {
+    return JSON.parse(String(value || ""));
+  } catch {
+    return null;
+  }
+}
+
+function actionErrorMessage(fallback, error) {
+  const detail = error && error.serverMessage
+    ? error.serverMessage
+    : error && error.message
+      ? error.message
+      : "";
+  if (!detail) return fallback;
+  const compact = String(detail).replace(/\s+/g, " ").trim();
+  const suffix = compact.length > 220 ? compact.slice(0, 217) + "..." : compact;
+  return `${fallback} ${suffix}`;
 }
 
 function clientErrorDetail(endpoint, error) {
@@ -1056,7 +1088,7 @@ async function fetchLanguagePack(languageId) {
     const manifest = await apiFetch("/api/languages", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null);
     systemLanguageHints = languageHintsFromManifest(manifest);
     loadedLanguages = Array.isArray(manifest && manifest.languages)
-      ? manifest.languages.map((language) => ({ id: normalizeLanguageId(language.id), name: language.name || language.id, url: language.url || "" })).filter((language) => language.id)
+      ? normalizeLanguageManifest(manifest.languages)
       : [];
     languages = loadedLanguages;
   }
@@ -1211,6 +1243,7 @@ function renderButtons() {
   els.startButton.disabled = busy || latestRunning || latestStarting;
   els.restartButton.disabled = busy || !latestRunning;
   els.stopButton.disabled = busy || (!latestRunning && !latestStarting);
+  if (els.launchCodexButton) els.launchCodexButton.disabled = busy || !latestRunning;
   els.startButton.textContent = latestRunning ? t("started") : t("start");
   els.restartButton.textContent = t("restart");
   els.stopButton.textContent = t("stop");
@@ -1290,6 +1323,21 @@ async function importConfigToCcs() {
     setConfigTomlActionStatus(t("ccsImportStarted"), { timeout: 2200 });
   } catch {
     setConfigTomlActionStatus(t("ccsImportFailed"), { warning: true, timeout: 2600 });
+  }
+}
+
+async function launchCodexApp() {
+  if (busy) return;
+  setBusy(true, t("codexLaunchTitle"), t("codexLaunchDetail"));
+  try {
+    await apiJson("/api/codex-app/launch", { method: "POST" });
+    setConfigTomlActionStatus(t("codexLaunchStarted"), { timeout: 2600 });
+    await refresh({ forceLogs: true, force: true });
+  } catch (error) {
+    setConfigTomlActionStatus(actionErrorMessage(t("codexLaunchFailed"), error), { warning: true, timeout: 9000 });
+    await refresh({ forceLogs: true, force: true }).catch(() => {});
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -1582,7 +1630,7 @@ function renderUpdateAvailableMessage(data = {}) {
   const version = data.latest_version || data.current_version || "-";
   const prefix = t("updateAvailablePrefix");
   if (!url) return updateMessage("updateAvailable", data);
-  return `${escapeHtml(prefix)} <a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(version)}</a>`;
+  return `${escapeHtml(prefix)} <a href="${escapeHtml(url)}" data-update-link="true" target="_blank" rel="noopener">${escapeHtml(version)}</a>`;
 }
 
 function updateMessage(key, data = {}) {
@@ -3261,7 +3309,7 @@ function setView(viewName) {
 function handleAboutAction(action) {
   if (!appInfo) return setAboutStatus(t("appInfoLoading"), true);
   const urls = appInfo.urls || {};
-  if (action === "website") return openOrExplain(urls.website || urls.official, t("websiteUnavailable"));
+  if (action === "website") return openOrExplain(urls.website, t("websiteUnavailable"));
   if (action === "feedback") return openOrExplain(urls.feedback, t("feedbackUnavailable"));
   if (action === "source") return openOrExplain(urls.source, t("sourceUnavailable"));
   if (action === "license") return openOrExplain(urls.license, t("licenseUnavailable"));
@@ -3274,6 +3322,15 @@ async function handleUpdateCheck() {
   const update = await checkForUpdates();
   renderUpdateState();
   return update;
+}
+
+function handleAboutStatusClick(event) {
+  const link = event.target && event.target.closest ? event.target.closest("[data-update-link]") : null;
+  if (!link) return;
+  event.preventDefault();
+  openOrExplain(link.href, updateMessage("updateCheckFailed", latestUpdateCheck || {})).catch((error) => {
+    setAboutStatus(error && error.message ? error.message : String(error), true);
+  });
 }
 
 async function handleWindowAction(action) {
@@ -3550,6 +3607,24 @@ function renderLanguageOptions() {
     els.uiLanguage.appendChild(option);
   }
   els.uiLanguage.value = previous === SYSTEM_LANGUAGE || languages.some((language) => language.id === previous) ? previous : DEFAULT_LANGUAGE;
+}
+
+function normalizeLanguageManifest(items) {
+  const byId = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = normalizeLanguageId(item && item.id);
+    if (!id || byId.has(id)) continue;
+    byId.set(id, {
+      id,
+      name: (item && item.name) || id,
+      sortKey: String((item && (item.sort_key || item.sortKey)) || id),
+      url: (item && item.url) || "",
+    });
+  }
+  return Array.from(byId.values()).sort((left, right) => {
+    const bySortKey = left.sortKey.localeCompare(right.sortKey);
+    return bySortKey || left.id.localeCompare(right.id);
+  });
 }
 
 function languageHintsFromManifest(manifest) {

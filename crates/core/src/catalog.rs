@@ -111,6 +111,7 @@ pub struct AppServerModel {
     pub upgrade_info: Option<AppServerModelUpgradeInfo>,
     pub availability_nux: Option<AppServerModelAvailabilityNux>,
     pub display_name: String,
+    pub short_display_name: Option<String>,
     pub description: String,
     pub hidden: bool,
     pub supported_reasoning_efforts: Vec<AppServerReasoningEffortOption>,
@@ -389,6 +390,23 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
     required_string(value)
 }
 
+fn app_server_display_name(model: &CatalogModel) -> String {
+    model.display_name.replace("DeepSeek-V4", "DeepSeek V4")
+}
+
+fn app_server_short_display_name(model: &CatalogModel) -> Option<String> {
+    string_extra(&model.extra, "short_display_name")
+        .or_else(|| string_extra(&model.extra, "shortDisplayName"))
+        .or_else(|| match model.slug.as_str() {
+            MODEL_FLASH => Some("Flash".to_owned()),
+            MODEL_PRO => Some("Pro".to_owned()),
+            _ => app_server_display_name(model)
+                .strip_prefix("DeepSeek V4 ")
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned),
+        })
+}
+
 fn app_server_model_from_catalog_model(
     model: &CatalogModel,
     any_explicit_default: bool,
@@ -401,7 +419,8 @@ fn app_server_model_from_catalog_model(
         upgrade,
         upgrade_info,
         availability_nux: availability_nux(model.extra.get("availability_nux")),
-        display_name: model.display_name.clone(),
+        display_name: app_server_display_name(model),
+        short_display_name: app_server_short_display_name(model),
         description: model.description.clone(),
         hidden: catalog_model_is_hidden(model),
         supported_reasoning_efforts: supported_reasoning_efforts(model),
@@ -749,7 +768,8 @@ mod tests {
             .find(|model| model.id == MODEL_PRO)
             .expect("pro model");
         assert_eq!(pro.model, MODEL_PRO);
-        assert_eq!(pro.display_name, "DeepSeek-V4 Pro");
+        assert_eq!(pro.display_name, "DeepSeek V4 Pro");
+        assert_eq!(pro.short_display_name.as_deref(), Some("Pro"));
         assert!(!pro.hidden);
         assert!(pro.is_default);
         assert_eq!(pro.default_reasoning_effort, "medium");
@@ -765,6 +785,14 @@ mod tests {
         assert!(pro.service_tiers.is_empty());
         assert_eq!(pro.upgrade, None);
         assert_eq!(pro.availability_nux, None);
+
+        let flash = response
+            .data
+            .iter()
+            .find(|model| model.id == MODEL_FLASH)
+            .expect("flash model");
+        assert_eq!(flash.display_name, "DeepSeek V4 Flash");
+        assert_eq!(flash.short_display_name.as_deref(), Some("Flash"));
     }
 
     #[test]

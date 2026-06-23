@@ -8,6 +8,10 @@ CodeSeeX starts with a deliberately small local API.
 - `GET /api/status`: current data directory, proxy base URL, catalog path, model list, and upstream target.
 - `GET /api/models`: app-server-shaped model catalog for host UIs. Supports `limit`, `cursor`, and `includeHidden`.
 - `POST /api/app-server`: minimal JSON-RPC compatibility endpoint. Currently supports `model/list` for host model pickers.
+- `GET|POST /codex-model-catalog`: Codex App renderer bridge catalog used by the model picker injection path.
+- `GET /codeseex/renderer-inject.js`: generated renderer patch script with the current CodeSeeX model catalog embedded.
+- `POST /api/codex-app/inject`: inject the renderer patch into an already debug-enabled Codex App.
+- `POST /api/codex-app/launch`: launch Codex with remote debugging and inject the renderer patch.
 - `GET|POST /api/codex-adapter/generate`: generate catalog and return TOML snippet.
 
 ## Codex-Compatible

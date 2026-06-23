@@ -42,6 +42,19 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/api/usage/session", get(api_usage_session))
         .route("/api/models", get(api_models))
         .route("/api/app-server", post(api_app_server))
+        .route(
+            "/api/codex-app/inject",
+            post(api_codex_app_inject).get(api_codex_app_inject_get),
+        )
+        .route(
+            "/api/codex-app/launch",
+            post(api_codex_app_launch).get(api_codex_app_launch_get),
+        )
+        .route(
+            "/codex-model-catalog",
+            get(codex_model_catalog).post(codex_model_catalog),
+        )
+        .route("/codeseex/renderer-inject.js", get(renderer_inject_script))
         .route("/api/config", get(api_config).post(save_config))
         .route("/api/languages", get(api_languages))
         .route("/api/tools", get(api_tools))
@@ -132,6 +145,146 @@ async fn api_app_server(
             .handle_json("POST", "/api/app-server", None, Some(&payload))
             .await,
     )
+}
+
+async fn codex_model_catalog(State(state): State<ProxyState>) -> impl IntoResponse {
+    Json(crate::codex_app::codex_model_catalog_value(
+        &state.active_config(),
+    ))
+}
+
+async fn renderer_inject_script(State(state): State<ProxyState>) -> impl IntoResponse {
+    let catalog = crate::codex_app::codex_model_catalog_value(&state.active_config());
+    let script = crate::codex_app::renderer_inject_script(&catalog);
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        script,
+    )
+}
+
+async fn api_codex_app_inject_get(
+    State(state): State<ProxyState>,
+    Query(query): Query<Value>,
+) -> impl IntoResponse {
+    inject_codex_app_model_catalog(state, Some(query), None).await
+}
+
+async fn api_codex_app_inject(
+    State(state): State<ProxyState>,
+    Query(query): Query<Value>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    inject_codex_app_model_catalog(state, Some(query), body.map(|value| value.0)).await
+}
+
+async fn api_codex_app_launch_get(
+    State(state): State<ProxyState>,
+    Query(query): Query<Value>,
+) -> impl IntoResponse {
+    launch_codex_app_with_model_catalog(state, Some(query), None).await
+}
+
+async fn api_codex_app_launch(
+    State(state): State<ProxyState>,
+    Query(query): Query<Value>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    launch_codex_app_with_model_catalog(state, Some(query), body.map(|value| value.0)).await
+}
+
+async fn inject_codex_app_model_catalog(
+    state: ProxyState,
+    query: Option<Value>,
+    body: Option<Value>,
+) -> axum::response::Response {
+    let debug_port = debug_port_from_values(query.as_ref(), body.as_ref())
+        .unwrap_or_else(crate::codex_app::default_debug_port);
+    let catalog = crate::codex_app::codex_model_catalog_value(&state.active_config());
+    match crate::codex_app::inject_model_catalog(debug_port, catalog).await {
+        Ok(value) => {
+            let _ = state
+                .store
+                .record_event(
+                    "info",
+                    "codex_app_inject_succeeded",
+                    "Codex App renderer model catalog injection succeeded.",
+                    Some(&value),
+                )
+                .await;
+            (StatusCode::OK, Json(value)).into_response()
+        }
+        Err(error) => {
+            let response = json!({
+                "ok": false,
+                "error": "codex_app_inject_failed",
+                "debug_port": debug_port,
+                "message": error.to_string()
+            });
+            let _ = state
+                .store
+                .record_event(
+                    "error",
+                    "codex_app_inject_failed",
+                    "Codex App renderer model catalog injection failed.",
+                    Some(&response),
+                )
+                .await;
+            (StatusCode::BAD_GATEWAY, Json(response)).into_response()
+        }
+    }
+}
+
+async fn launch_codex_app_with_model_catalog(
+    state: ProxyState,
+    query: Option<Value>,
+    body: Option<Value>,
+) -> axum::response::Response {
+    let debug_port = debug_port_from_values(query.as_ref(), body.as_ref())
+        .unwrap_or_else(crate::codex_app::default_debug_port);
+    let catalog = crate::codex_app::codex_model_catalog_value(&state.active_config());
+    match crate::codex_app::launch_and_inject_model_catalog(debug_port, catalog).await {
+        Ok(value) => {
+            let _ = state
+                .store
+                .record_event(
+                    "info",
+                    "codex_app_launch_succeeded",
+                    "Codex App launched and renderer model catalog injection succeeded.",
+                    Some(&value),
+                )
+                .await;
+            (StatusCode::OK, Json(value)).into_response()
+        }
+        Err(error) => {
+            let response = json!({
+                "ok": false,
+                "error": "codex_app_launch_failed",
+                "debug_port": debug_port,
+                "message": error.to_string()
+            });
+            let _ = state
+                .store
+                .record_event(
+                    "error",
+                    "codex_app_launch_failed",
+                    "Codex App launch with renderer model catalog injection failed.",
+                    Some(&response),
+                )
+                .await;
+            (StatusCode::BAD_GATEWAY, Json(response)).into_response()
+        }
+    }
+}
+
+fn debug_port_from_values(query: Option<&Value>, body: Option<&Value>) -> Option<u16> {
+    crate::codex_app::debug_port_from_values(query, body)
 }
 
 async fn api_config(State(state): State<ProxyState>) -> impl IntoResponse {

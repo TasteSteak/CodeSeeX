@@ -71,6 +71,16 @@ impl PreviousResponseResolution {
         }
     }
 
+    pub(super) fn inferred_prompt_cache_anchor(previous: &str) -> Self {
+        Self {
+            requested: None,
+            resolved: Some(previous.to_owned()),
+            kind: "inferred_prompt_cache_anchor",
+            status: Some("completed"),
+            warning: None,
+        }
+    }
+
     fn missing(previous: &str) -> Self {
         Self {
             requested: Some(previous.to_owned()),
@@ -144,6 +154,38 @@ pub(super) async fn resolve_previous_response_id(
             error.to_string(),
         )),
     }
+}
+
+pub(super) async fn resolve_prompt_cache_session_anchor(
+    state: &ProxyState,
+    input: &Value,
+) -> Option<PreviousResponseResolution> {
+    if !request_looks_like_codex_full_context(input) {
+        return None;
+    }
+    if input
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return None;
+    }
+    let prompt_cache_key = input
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let anchor = state
+        .store
+        .latest_completed_final_response_for_prompt_cache_key(prompt_cache_key)
+        .await
+        .ok()
+        .flatten()?;
+    Some(PreviousResponseResolution::inferred_prompt_cache_anchor(
+        &anchor,
+    ))
 }
 
 pub(super) async fn record_previous_response_resolution_warning(

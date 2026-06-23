@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 use std::env;
 use std::fs;
 
+const CODESEEX_WEBSITE_URL: &str = "https://tastesteak.github.io/CodeSeeX/";
+const CODESEEX_REPOSITORY_URL: &str = "https://github.com/TasteSteak/CodeSeeX";
+
 #[derive(Clone)]
 pub struct ManagerRuntime {
     runtime_config: RuntimeConfigService,
@@ -59,6 +62,11 @@ impl ManagerRuntime {
             ("GET", "/api/usage/session") => self.usage_session(query).await,
             ("GET", "/api/models") => ok(self.model_list_value(query)),
             ("POST", "/api/app-server") => ok(self.app_server_rpc(body.unwrap_or(&Value::Null))),
+            ("GET", "/codex-model-catalog") | ("POST", "/codex-model-catalog") => {
+                ok(self.codex_model_catalog())
+            }
+            ("POST", "/api/codex-app/inject") => self.inject_codex_app(query, body).await,
+            ("POST", "/api/codex-app/launch") => self.launch_codex_app(query, body).await,
             ("GET", "/api/config") => ok(self.config_payload()),
             ("POST", "/api/config") => {
                 self.save_config(body.cloned().unwrap_or_else(|| json!({})))
@@ -126,6 +134,124 @@ impl ManagerRuntime {
                     "message": "Missing app server method."
                 }
             }),
+        }
+    }
+
+    pub fn codex_model_catalog(&self) -> Value {
+        crate::codex_app::codex_model_catalog_value(&self.active_config())
+    }
+
+    async fn inject_codex_app(
+        &self,
+        query: Option<&Value>,
+        body: Option<&Value>,
+    ) -> ManagerJsonResponse {
+        let debug_port = crate::codex_app::debug_port_from_values(query, body)
+            .unwrap_or_else(crate::codex_app::default_debug_port);
+        let catalog = self.codex_model_catalog();
+        match crate::codex_app::inject_model_catalog(debug_port, catalog).await {
+            Ok(value) if codex_app_injection_effective(&value) => {
+                let _ = self
+                    .store
+                    .record_event(
+                        "info",
+                        "codex_app_inject_succeeded",
+                        "Codex App renderer model catalog injection succeeded.",
+                        Some(&value),
+                    )
+                    .await;
+                ok(value)
+            }
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("error".to_owned(), json!("codex_app_inject_incomplete"));
+                }
+                let _ = self
+                    .store
+                    .record_event(
+                        "warn",
+                        "codex_app_inject_incomplete",
+                        "Codex App renderer script ran but did not patch the app-server model list path.",
+                        Some(&value),
+                    )
+                    .await;
+                status(502, value)
+            }
+            Err(error) => {
+                let body = json!({
+                    "ok": false,
+                    "error": "codex_app_inject_failed",
+                    "debug_port": debug_port,
+                    "message": error.to_string()
+                });
+                let _ = self
+                    .store
+                    .record_event(
+                        "error",
+                        "codex_app_inject_failed",
+                        "Codex App renderer model catalog injection failed.",
+                        Some(&body),
+                    )
+                    .await;
+                status(502, body)
+            }
+        }
+    }
+
+    async fn launch_codex_app(
+        &self,
+        query: Option<&Value>,
+        body: Option<&Value>,
+    ) -> ManagerJsonResponse {
+        let debug_port = crate::codex_app::debug_port_from_values(query, body)
+            .unwrap_or_else(crate::codex_app::default_debug_port);
+        let catalog = self.codex_model_catalog();
+        match crate::codex_app::launch_and_inject_model_catalog(debug_port, catalog).await {
+            Ok(value) if codex_app_injection_effective(&value) => {
+                let _ = self
+                    .store
+                    .record_event(
+                        "info",
+                        "codex_app_launch_succeeded",
+                        "Codex App launched and renderer model catalog injection succeeded.",
+                        Some(&value),
+                    )
+                    .await;
+                ok(value)
+            }
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("error".to_owned(), json!("codex_app_launch_incomplete"));
+                }
+                let _ = self
+                    .store
+                    .record_event(
+                        "warn",
+                        "codex_app_launch_incomplete",
+                        "Codex App launched or was reachable, but the renderer model-list patch did not install.",
+                        Some(&value),
+                    )
+                    .await;
+                status(502, value)
+            }
+            Err(error) => {
+                let body = json!({
+                    "ok": false,
+                    "error": "codex_app_launch_failed",
+                    "debug_port": debug_port,
+                    "message": error.to_string()
+                });
+                let _ = self
+                    .store
+                    .record_event(
+                        "error",
+                        "codex_app_launch_failed",
+                        "Codex App launch with renderer model catalog injection failed.",
+                        Some(&body),
+                    )
+                    .await;
+                status(502, body)
+            }
         }
     }
 
@@ -787,6 +913,10 @@ fn take_legacy_vision_key(config: &mut UserConfig) -> Option<String> {
     value
 }
 
+fn codex_app_injection_effective(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+}
+
 fn ok(body: Value) -> ManagerJsonResponse {
     status(200, body)
 }
@@ -834,7 +964,7 @@ fn languages() -> Value {
         "system": "system",
         "system_locale": std::env::var("LANG").ok(),
         "languages": [
-            { "id": "en_us", "name": "English", "url": "/lang/en_us.json" },
+            { "id": "en_us", "name": "English - US", "url": "/lang/en_us.json" },
             { "id": "zh_cn", "name": "简体中文 - 中国大陆", "url": "/lang/zh_cn.json" },
             { "id": "zh_tw", "name": "繁體中文 - 台灣", "url": "/lang/zh_tw.json" },
             { "id": "zh_hk", "name": "繁體中文 - 香港", "url": "/lang/zh_hk.json" },
@@ -855,12 +985,13 @@ fn app_info() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "license": "AGPL-3.0-only",
         "description": "Local Codex and DeepSeek bridge with a lightweight Tauri manager.",
-        "repository": "https://github.com/TasteSteak/CodeSeeX",
+        "repository": CODESEEX_REPOSITORY_URL,
         "urls": {
-            "source": "https://github.com/TasteSteak/CodeSeeX",
-            "feedback": "https://github.com/TasteSteak/CodeSeeX/issues",
-            "license": "https://github.com/TasteSteak/CodeSeeX/blob/main/LICENSE",
-            "releases": "https://github.com/TasteSteak/CodeSeeX/releases"
+            "website": CODESEEX_WEBSITE_URL,
+            "source": CODESEEX_REPOSITORY_URL,
+            "feedback": format!("{CODESEEX_REPOSITORY_URL}/issues"),
+            "license": format!("{CODESEEX_REPOSITORY_URL}/blob/main/LICENSE"),
+            "releases": format!("{CODESEEX_REPOSITORY_URL}/releases")
         }
     })
 }
@@ -1251,6 +1382,10 @@ mod tests {
         assert_eq!(
             info.get("product_name").and_then(Value::as_str),
             Some("CodeSeeX")
+        );
+        assert_eq!(
+            info.pointer("/urls/website").and_then(Value::as_str),
+            Some(CODESEEX_WEBSITE_URL)
         );
     }
 }

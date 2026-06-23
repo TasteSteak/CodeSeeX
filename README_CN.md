@@ -1,9 +1,15 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.5.0" src="https://img.shields.io/badge/version-0.5.0-1f6feb">
+  <img alt="Version 0.5.1" src="https://img.shields.io/badge/version-0.5.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
+</p>
+
+<p align="center">
+  <a href="docs/website/index.html">官方网站</a>
+  ·
+  <a href="README.md">English</a>
 </p>
 
 <p align="center">
@@ -11,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img alt="CodeSeeX desktop manager" src="docs/img/1.png" width="860">
+  <img alt="CodeSeeX desktop manager dashboard" src="docs/img/release-dashboard.png" width="860">
 </p>
 
 <p align="center">
@@ -26,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.5.0`
+当前版本：`0.5.1`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -81,19 +87,58 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 
 ## 截图
 
-<p align="center">
-  <img alt="CodeSeeX dashboard and balance view" src="docs/img/legacy-dashboard-balance.png" width="860">
-</p>
+以下截图使用英文界面样本数据，均来自真实 CodeSeeX / Codex 界面。
 
-<p align="center">
-  <img alt="CodeSeeX usage view" src="docs/img/legacy-usage.png" width="860">
-</p>
+### 可观测性
 
-下面的 Adapter 设置截图来自较早的桌面布局。实际使用时请以当前 CodeSeeX 应用生成的 TOML 为准。
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Usage Sessions</strong><br>
+      按对话聚合费用、延迟、缓存命中率、服务请求和可展开阶段。<br><br>
+      <img alt="CodeSeeX usage sessions with cache hit details" src="docs/img/release-usage.png" width="100%">
+    </td>
+    <td width="50%">
+      <strong>安全诊断日志</strong><br>
+      请求、工具、上下文、协议和网络事件；默认不暴露 prompt payload。<br><br>
+      <img alt="CodeSeeX safe diagnostic logs timeline" src="docs/img/release-logs.png" width="100%">
+    </td>
+  </tr>
+</table>
 
-<p align="center">
-  <img alt="CodeSeeX adapter settings view" src="docs/img/legacy-config-toml.png" width="860">
-</p>
+### Agent 配置
+
+<table>
+  <tr>
+    <td width="50%">
+      <strong>工具设置</strong><br>
+      内置 workspace 工具、Web Search、Vision endpoint 和工具专用凭据。<br><br>
+      <img alt="CodeSeeX tool settings for hosted tools and Vision" src="docs/img/release-settings-tools.png" width="100%">
+    </td>
+    <td width="50%">
+      <strong>生成的 Codex TOML</strong><br>
+      机器相关的 `model_catalog_json`、本地 `/v1` endpoint 和 DeepSeek 模型设置。<br><br>
+      <img alt="CodeSeeX generated Codex TOML configuration" src="docs/img/release-dashboard-toml.png" width="100%">
+    </td>
+  </tr>
+</table>
+
+### Codex 体验
+
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Codex 会话</strong><br>
+      由 CodeSeeX 路由到 DeepSeek 的 Codex 会话，保留 thinking 与工具工作流能力。<br><br>
+      <img alt="Codex session using CodeSeeX and DeepSeek" src="docs/img/release-codex.png" width="100%">
+    </td>
+    <td width="50%">
+      <strong>Vision 示例</strong><br>
+      在 Codex 中通过 CodeSeeX 工具 runtime 使用可选 Vision 模块。<br><br>
+      <img alt="CodeSeeX Vision example in Codex" src="docs/img/release-codex-vision.png" width="100%">
+    </td>
+  </tr>
+</table>
 
 ## 快速开始
 
@@ -269,7 +314,7 @@ Windows helper scripts 会在可用时加载 MSVC Build Tools、导入 `.env`，
 
 ## 文档
 
-- Release notes 发布在 [GitHub Releases](https://github.com/TasteSteak/CodeSeeX/releases) 页面。
+- [CHANGELOG.md](CHANGELOG.md) 记录发布说明；打包版本发布在 [GitHub Releases](https://github.com/TasteSteak/CodeSeeX/releases) 页面。
 - [docs/architecture.md](docs/architecture.md)：Runtime 架构。
 - [docs/installer-migration.md](docs/installer-migration.md)：安装器和旧版迁移行为。
 - [docs/state-contract.md](docs/state-contract.md)：runtime/log 状态边界。

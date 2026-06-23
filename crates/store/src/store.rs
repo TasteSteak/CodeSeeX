@@ -651,6 +651,28 @@ impl Store {
         Ok(inner.requests.get(id).map(|request| request.status))
     }
 
+    pub async fn latest_completed_final_response_for_prompt_cache_key(
+        &self,
+        prompt_cache_key: &str,
+    ) -> Result<Option<String>> {
+        let prompt_cache_key = prompt_cache_key.trim();
+        if prompt_cache_key.is_empty() {
+            return Ok(None);
+        }
+        let inner = self.lock_inner()?;
+        Ok(inner
+            .request_order
+            .iter()
+            .rev()
+            .filter_map(|id| inner.requests.get(id))
+            .find(|request| {
+                request.status == RequestStatus::Completed
+                    && request_is_completed_final_turn(request)
+                    && request_prompt_cache_key(request).as_deref() == Some(prompt_cache_key)
+            })
+            .map(|request| request.id.clone()))
+    }
+
     pub async fn append_request_tool_fact(&self, id: &str, fact: &str) -> Result<()> {
         let mut inner = self.lock_inner()?;
         let Some(request) = inner.requests.get_mut(id) else {
@@ -2363,6 +2385,17 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                 "total_tokens",
             ],
         ),
+        "codex_app_inject_succeeded"
+        | "codex_app_inject_failed"
+        | "codex_app_launch_succeeded"
+        | "codex_app_launch_failed" => {
+            copy_log_fields(
+                object,
+                &mut output,
+                &["ok", "status", "error", "debug_port", "message", "attempt"],
+            );
+            copy_structured_log_fields(object, &mut output, &["target", "launch", "models"]);
+        }
         "service_request_diagnostic" => {
             copy_log_fields(
                 object,
@@ -2419,6 +2452,7 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                             "tool_facts",
                             "recovered_tool_facts",
                             "current_input",
+                            "codex_full_context_replay",
                             "budget_mode",
                             "protected_start_index",
                             "budget",
@@ -2526,6 +2560,7 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                             "tool_facts",
                             "recovered_tool_facts",
                             "current_input",
+                            "codex_full_context_replay",
                             "budget_mode",
                             "protected_start_index",
                             "budget",
@@ -3697,13 +3732,17 @@ fn usage_full_context_key(request: &StoredRequest) -> Option<String> {
 }
 
 fn usage_prompt_cache_key(request: &StoredRequest) -> Option<String> {
+    request_prompt_cache_key(request).map(|value| stable_hash_hex(value.as_bytes()))
+}
+
+fn request_prompt_cache_key(request: &StoredRequest) -> Option<String> {
     request
         .input
         .get("prompt_cache_key")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| stable_hash_hex(value.as_bytes()))
+        .map(str::to_owned)
 }
 
 fn usage_non_final_session_key(request: &StoredRequest) -> String {

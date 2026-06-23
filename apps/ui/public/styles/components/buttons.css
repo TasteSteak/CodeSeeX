@@ -9,6 +9,7 @@
 .btn-icon-label { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .btn-icon { width: 14px; height: 14px; flex: none; background: currentColor; }
 .btn-icon-copy { -webkit-mask: url("/assets/icons/copy.svg") center / contain no-repeat; mask: url("/assets/icons/copy.svg") center / contain no-repeat; }
+.btn-icon-codex { -webkit-mask: url("/assets/icons/codex.svg") center / contain no-repeat; mask: url("/assets/icons/codex.svg") center / contain no-repeat; }
 .btn-icon-github { -webkit-mask: url("/assets/icons/github.svg") center / contain no-repeat; mask: url("/assets/icons/github.svg") center / contain no-repeat; }
 .btn-icon-import { -webkit-mask: url("/assets/icons/import.svg") center / contain no-repeat; mask: url("/assets/icons/import.svg") center / contain no-repeat; }
 .btn-icon-heartbeat { -webkit-mask: url("/assets/icons/heartbeat.svg") center / contain no-repeat; mask: url("/assets/icons/heartbeat.svg") center / contain no-repeat; }
