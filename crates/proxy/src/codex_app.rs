@@ -1191,10 +1191,18 @@ fn packaged_app_user_model_id_from_path(path: &std::path::Path) -> Option<String
     path.components()
         .rev()
         .filter_map(|component| component.as_os_str().to_str())
-        .find_map(|name| {
-            codex_package_parts(name)
-                .map(|(identity, _version, publisher_id)| format!("{identity}_{publisher_id}!App"))
+        .find_map(packaged_app_user_model_id_from_component)
+        .or_else(|| {
+            path.to_string_lossy()
+                .split(['\\', '/'])
+                .rev()
+                .find_map(packaged_app_user_model_id_from_component)
         })
+}
+
+fn packaged_app_user_model_id_from_component(name: &str) -> Option<String> {
+    codex_package_parts(name)
+        .map(|(identity, _version, publisher_id)| format!("{identity}_{publisher_id}!App"))
 }
 
 fn codex_package_parts(package_name: &str) -> Option<(&str, &str, &str)> {

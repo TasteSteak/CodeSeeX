@@ -7560,11 +7560,21 @@ async fn codex_shaped_client_handoff_avoids_proxy_tool_and_context_pollution() {
         .response_context_chain("resp_codex_handoff_no_pollution", 1)
         .await
         .expect("parent context chain");
+    let parent_turn_messages = &parent_chain[0].turn_messages;
     assert_eq!(
-        parent_chain[0].turn_messages.len(),
-        1,
-        "full-context parent should retain only appended assistant tool calls"
+        parent_turn_messages.len(),
+        2,
+        "full-context parent should retain a bounded user anchor and appended assistant tool call"
     );
+    assert!(parent_turn_messages
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("user")));
+    assert!(parent_turn_messages
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant")));
+    assert!(parent_turn_messages
+        .iter()
+        .all(|message| message.get("role").and_then(Value::as_str) != Some("tool")));
 
     let tool_call = first_body["output"]
         .as_array()
@@ -7647,10 +7657,13 @@ async fn codex_shaped_client_handoff_avoids_proxy_tool_and_context_pollution() {
             .count()
     );
     let second_messages = requests[1]["messages"].as_array().expect("messages");
-    assert_eq!(second_messages.len(), 4, "{}", requests[1]);
+    assert_eq!(second_messages.len(), 5, "{}", requests[1]);
     assert!(!serde_json::to_string(&requests[1])
         .unwrap()
         .contains("prior compact context item 0"));
+    assert!(serde_json::to_string(&requests[1])
+        .unwrap()
+        .contains("prior compact context item 94"));
     let tool_message = second_messages
         .iter()
         .find(|message| {
