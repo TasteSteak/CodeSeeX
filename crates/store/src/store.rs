@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use codeseex_core::context::{content_to_text, request_looks_like_codex_full_context};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ const MAX_USAGE_SEGMENT_SUMMARY_CHARS: usize = 180;
 const MAX_CLIENT_HANDOFF_GUARD_TURNS: usize = 128;
 const MAX_CLIENT_HANDOFF_PENDING_CALLS: usize = 512;
 const MAX_CLIENT_HANDOFF_FAILURES: u32 = 3;
-const MAX_CLIENT_HANDOFF_SIGNATURE_REPEATS: u32 = 3;
+const CLIENT_HANDOFF_SIGNATURE_REPEAT_DIAGNOSTIC_THRESHOLD: u32 = 3;
 const CLIENT_HANDOFF_VOLUME_DIAGNOSTIC_THRESHOLD: u32 = 48;
 const IN_PROGRESS_TTL_SECONDS: i64 = 6 * 60 * 60;
 const LOG_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
@@ -250,6 +250,8 @@ pub struct UsageSessionSummary {
 pub struct UsageBillingBucket {
     pub model: String,
     pub requested_model: String,
+    pub billing_period: String,
+    pub billing_multiplier: f64,
     pub cached_input_tokens: u64,
     pub cache_miss_input_tokens: u64,
     pub output_tokens: u64,
@@ -941,7 +943,7 @@ impl Store {
         state.cumulative_total_tokens = state.cumulative_total_tokens.saturating_add(usage_total);
         state.updated_at = Some(Utc::now());
 
-        let mut stop = None;
+        let mut repeated_signature_diagnostic = None;
         let mut pending_calls = Vec::new();
         let request_key = request_id.to_owned();
         for call in calls {
@@ -964,17 +966,17 @@ impl Store {
                     arguments_hash: arguments_hash.clone(),
                 },
             ));
-            if repeat_count >= MAX_CLIENT_HANDOFF_SIGNATURE_REPEATS && stop.is_none() {
-                stop = Some(client_handoff_guard_stop(
-                    "repeated_signature",
-                    &turn_key,
-                    Some(&call.name),
-                    Some(&arguments_hash),
-                    None,
-                    state,
-                    repeat_count,
-                    0,
-                ));
+            if repeat_count >= CLIENT_HANDOFF_SIGNATURE_REPEAT_DIAGNOSTIC_THRESHOLD
+                && repeated_signature_diagnostic.is_none()
+            {
+                repeated_signature_diagnostic = Some(json!({
+                    "client_tool_handoff_repeated_signature": {
+                        "tool_name": call.name,
+                        "arguments_hash": arguments_hash,
+                        "count": repeat_count,
+                        "diagnostic_threshold": CLIENT_HANDOFF_SIGNATURE_REPEAT_DIAGNOSTIC_THRESHOLD
+                    }
+                }));
             }
         }
         let volume_diagnostic =
@@ -990,10 +992,17 @@ impl Store {
                     }
                 })
             });
-        if let Some(stop) = stop.clone() {
-            state.stopped = Some(stop);
-        }
         let _ = state;
+        if let Some(diagnostic) = repeated_signature_diagnostic {
+            if let Some(request) = inner.requests.get_mut(request_id) {
+                request.diagnostic = Some(merge_request_diagnostic(
+                    request.diagnostic.as_ref(),
+                    &diagnostic,
+                ));
+                request.updated_at = Utc::now();
+                bump_usage_revision(&mut inner);
+            }
+        }
         if let Some(diagnostic) = volume_diagnostic {
             if let Some(request) = inner.requests.get_mut(request_id) {
                 request.diagnostic = Some(merge_request_diagnostic(
@@ -1004,19 +1013,14 @@ impl Store {
                 bump_usage_revision(&mut inner);
             }
         }
-        if stop.is_none() {
-            for (key, pending) in pending_calls {
-                inner
-                    .client_handoff_guard
-                    .pending_by_key
-                    .insert(key, pending);
-            }
-        }
-        if let Some(stop) = stop.as_ref() {
-            mark_request_guard_stopped(&mut inner, request_id, stop);
+        for (key, pending) in pending_calls {
+            inner
+                .client_handoff_guard
+                .pending_by_key
+                .insert(key, pending);
         }
         bump_usage_revision(&mut inner);
-        Ok(stop)
+        Ok(None)
     }
 
     pub async fn client_tool_handoff_guard_preflight(
@@ -3332,7 +3336,7 @@ fn usage_session_is_before_cursor(session: &UsageSession, cursor: Option<&str>) 
 }
 
 fn usage_billing_buckets(inner: &StoreInner) -> Vec<UsageBillingBucket> {
-    let mut buckets = HashMap::<(String, String), UsageBillingBucket>::new();
+    let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
     for turn in inner
         .request_order
         .iter()
@@ -3340,61 +3344,157 @@ fn usage_billing_buckets(inner: &StoreInner) -> Vec<UsageBillingBucket> {
         .filter(|request| request_is_completed_billable_request(request))
         .filter_map(turn_from_request)
     {
-        let key = (turn.model.clone(), turn.requested_model.clone());
-        let bucket = buckets.entry(key).or_insert_with(|| UsageBillingBucket {
-            model: turn.model.clone(),
-            requested_model: turn.requested_model.clone(),
-            cached_input_tokens: 0,
-            cache_miss_input_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-        });
-        bucket.cached_input_tokens = bucket
-            .cached_input_tokens
-            .saturating_add(turn.cached_input_tokens);
-        bucket.cache_miss_input_tokens = bucket
-            .cache_miss_input_tokens
-            .saturating_add(turn.cache_miss_input_tokens);
-        bucket.output_tokens = bucket.output_tokens.saturating_add(turn.output_tokens);
-        bucket.total_tokens = bucket.total_tokens.saturating_add(turn.total_tokens);
+        add_usage_billing_bucket(&mut buckets, &turn);
     }
+    sorted_usage_billing_buckets(buckets)
+}
+
+fn usage_billing_buckets_from_rows(rows: &[UsageSessionRow]) -> Vec<UsageBillingBucket> {
+    let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
+    for row in rows {
+        add_usage_billing_bucket(&mut buckets, row);
+    }
+    sorted_usage_billing_buckets(buckets)
+}
+
+trait UsageBillingSource {
+    fn model(&self) -> &str;
+    fn requested_model(&self) -> &str;
+    fn completed_at(&self) -> &str;
+    fn cached_input_tokens(&self) -> u64;
+    fn cache_miss_input_tokens(&self) -> u64;
+    fn output_tokens(&self) -> u64;
+    fn total_tokens(&self) -> u64;
+}
+
+impl UsageBillingSource for RequestTurn {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn requested_model(&self) -> &str {
+        &self.requested_model
+    }
+
+    fn completed_at(&self) -> &str {
+        &self.completed_at
+    }
+
+    fn cached_input_tokens(&self) -> u64 {
+        self.cached_input_tokens
+    }
+
+    fn cache_miss_input_tokens(&self) -> u64 {
+        self.cache_miss_input_tokens
+    }
+
+    fn output_tokens(&self) -> u64 {
+        self.output_tokens
+    }
+
+    fn total_tokens(&self) -> u64 {
+        self.total_tokens
+    }
+}
+
+impl UsageBillingSource for UsageSessionRow {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn requested_model(&self) -> &str {
+        &self.requested_model
+    }
+
+    fn completed_at(&self) -> &str {
+        &self.completed_at
+    }
+
+    fn cached_input_tokens(&self) -> u64 {
+        self.cached_input_tokens
+    }
+
+    fn cache_miss_input_tokens(&self) -> u64 {
+        self.cache_miss_input_tokens
+    }
+
+    fn output_tokens(&self) -> u64 {
+        self.output_tokens
+    }
+
+    fn total_tokens(&self) -> u64 {
+        self.total_tokens
+    }
+}
+
+fn add_usage_billing_bucket<T: UsageBillingSource>(
+    buckets: &mut HashMap<(String, String, String), UsageBillingBucket>,
+    item: &T,
+) {
+    let period = usage_billing_period(item.completed_at());
+    let key = (
+        item.model().to_owned(),
+        item.requested_model().to_owned(),
+        period.name.to_owned(),
+    );
+    let bucket = buckets.entry(key).or_insert_with(|| UsageBillingBucket {
+        model: item.model().to_owned(),
+        requested_model: item.requested_model().to_owned(),
+        billing_period: period.name.to_owned(),
+        billing_multiplier: period.multiplier,
+        cached_input_tokens: 0,
+        cache_miss_input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+    });
+    bucket.cached_input_tokens = bucket
+        .cached_input_tokens
+        .saturating_add(item.cached_input_tokens());
+    bucket.cache_miss_input_tokens = bucket
+        .cache_miss_input_tokens
+        .saturating_add(item.cache_miss_input_tokens());
+    bucket.output_tokens = bucket.output_tokens.saturating_add(item.output_tokens());
+    bucket.total_tokens = bucket.total_tokens.saturating_add(item.total_tokens());
+}
+
+fn sorted_usage_billing_buckets(
+    buckets: HashMap<(String, String, String), UsageBillingBucket>,
+) -> Vec<UsageBillingBucket> {
     let mut buckets = buckets.into_values().collect::<Vec<_>>();
     buckets.sort_by(|left, right| {
         left.model
             .cmp(&right.model)
             .then(left.requested_model.cmp(&right.requested_model))
+            .then(left.billing_period.cmp(&right.billing_period))
     });
     buckets
 }
 
-fn usage_billing_buckets_from_rows(rows: &[UsageSessionRow]) -> Vec<UsageBillingBucket> {
-    let mut buckets = HashMap::<(String, String), UsageBillingBucket>::new();
-    for row in rows {
-        let key = (row.model.clone(), row.requested_model.clone());
-        let bucket = buckets.entry(key).or_insert_with(|| UsageBillingBucket {
-            model: row.model.clone(),
-            requested_model: row.requested_model.clone(),
-            cached_input_tokens: 0,
-            cache_miss_input_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-        });
-        bucket.cached_input_tokens = bucket
-            .cached_input_tokens
-            .saturating_add(row.cached_input_tokens);
-        bucket.cache_miss_input_tokens = bucket
-            .cache_miss_input_tokens
-            .saturating_add(row.cache_miss_input_tokens);
-        bucket.output_tokens = bucket.output_tokens.saturating_add(row.output_tokens);
-        bucket.total_tokens = bucket.total_tokens.saturating_add(row.total_tokens);
+#[derive(Debug, Clone, Copy)]
+struct UsageBillingPeriod {
+    name: &'static str,
+    multiplier: f64,
+}
+
+fn usage_billing_period(completed_at: &str) -> UsageBillingPeriod {
+    let is_peak = DateTime::parse_from_rfc3339(completed_at)
+        .map(|value| {
+            let beijing = value.with_timezone(&Utc) + Duration::hours(8);
+            let minutes = beijing.hour() * 60 + beijing.minute();
+            (9 * 60..12 * 60).contains(&minutes) || (14 * 60..18 * 60).contains(&minutes)
+        })
+        .unwrap_or(false);
+    if is_peak {
+        UsageBillingPeriod {
+            name: "peak",
+            multiplier: 2.0,
+        }
+    } else {
+        UsageBillingPeriod {
+            name: "off_peak",
+            multiplier: 1.0,
+        }
     }
-    let mut buckets = buckets.into_values().collect::<Vec<_>>();
-    buckets.sort_by(|left, right| {
-        left.model
-            .cmp(&right.model)
-            .then(left.requested_model.cmp(&right.requested_model))
-    });
-    buckets
 }
 
 fn usage_sessions_from_inner(
@@ -5283,7 +5383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_handoff_guard_stops_repeated_signatures() {
+    async fn client_handoff_guard_warns_repeated_signatures_without_stopping() {
         let dir = temp_dir("client-handoff-guard-signatures");
         let store = Store::open(&dir).await.expect("open store");
         let input = json!({
@@ -5291,14 +5391,13 @@ mod tests {
             "prompt_cache_key": "thread-b",
             "input": "run the same client tool"
         });
-        let mut stop = None;
         for index in 0..3 {
             let request_id = format!("resp_repeat_{index}");
             store
                 .checkpoint_request(&request_id, None, Some("deepseek-v4-pro"), &input)
                 .await
                 .expect("checkpoint");
-            stop = store
+            let stop = store
                 .record_client_tool_handoff_calls(
                     &request_id,
                     &input,
@@ -5311,12 +5410,29 @@ mod tests {
                 )
                 .await
                 .expect("record handoff");
+            assert!(
+                stop.is_none(),
+                "repeating the same successful-capable handoff must not stop before output"
+            );
         }
-        let stop = stop.expect("third repeated signature should stop");
-        assert_eq!(stop.reason, "repeated_signature");
-        assert_eq!(stop.tool_name.as_deref(), Some("shell_command"));
-        assert_eq!(stop.repeated_signature_count, 3);
-        assert_eq!(stop.cumulative_total_tokens, 66);
+        let inner = store.lock_inner().expect("lock store");
+        let diagnostic = inner
+            .requests
+            .get("resp_repeat_2")
+            .and_then(|request| request.diagnostic.as_ref())
+            .expect("third repeated signature should keep a diagnostic");
+        assert_eq!(
+            diagnostic["client_tool_handoff_repeated_signature"]["tool_name"],
+            json!("shell_command")
+        );
+        assert_eq!(
+            diagnostic["client_tool_handoff_repeated_signature"]["count"],
+            json!(3)
+        );
+        assert!(
+            diagnostic["client_tool_handoff_guard_stopped"].is_null(),
+            "signature repeats alone should not mark the turn stopped"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5431,18 +5547,33 @@ mod tests {
                     &[ClientToolHandoffCall {
                         call_id: format!("call_shell_{index}"),
                         name: "shell_command".to_owned(),
-                        arguments: "{\"command\":\"date\"}".to_owned(),
+                        arguments: format!("{{\"command\":\"failing-command-{index}\"}}"),
                     }],
                     Some(&json!({ "input_tokens": 10, "output_tokens": 1, "total_tokens": 11 })),
                 )
                 .await
                 .expect("record handoff");
+            assert!(stop.is_none());
+            let followup_input = json!({
+                "model": "deepseek-v4-pro",
+                "prompt_cache_key": "guard-thread",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": format!("call_shell_{index}"),
+                    "output": "Error: shell execution failed"
+                }]
+            });
+            let followup_id = format!("resp_followup_{index}");
+            let stop = store
+                .settle_client_tool_handoff_outputs(&followup_id, &followup_input)
+                .await
+                .expect("settle output");
             if index < 2 {
                 assert!(stop.is_none());
             } else {
                 assert_eq!(
                     stop.as_ref().map(|stop| stop.reason.as_str()),
-                    Some("repeated_signature")
+                    Some("consecutive_failures")
                 );
             }
         }
@@ -5452,7 +5583,7 @@ mod tests {
             .await
             .expect("preflight")
             .expect("stopped turn should be remembered");
-        assert_eq!(stop.reason, "repeated_signature");
+        assert_eq!(stop.reason, "consecutive_failures");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -6348,6 +6479,63 @@ mod tests {
             .any(|detail| detail.value == "resp_usage_page"));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn usage_billing_buckets_split_peak_and_off_peak_periods() {
+        let rows = vec![
+            UsageSessionRow {
+                id: "resp_peak".to_owned(),
+                kind: "final_reply".to_owned(),
+                label: "usage_final_reply".to_owned(),
+                hint: String::new(),
+                model: "deepseek-v4-pro".to_owned(),
+                requested_model: "deepseek-v4-pro".to_owned(),
+                reasoning_effort: String::new(),
+                lifecycle: "final_turn".to_owned(),
+                status: "completed".to_owned(),
+                billable: true,
+                completed_at: "2026-07-02T01:30:00Z".to_owned(),
+                cached_input_tokens: 100,
+                cache_miss_input_tokens: 10,
+                output_tokens: 1,
+                total_tokens: 111,
+                request_ms: 1000,
+            },
+            UsageSessionRow {
+                id: "resp_off_peak".to_owned(),
+                kind: "final_reply".to_owned(),
+                label: "usage_final_reply".to_owned(),
+                hint: String::new(),
+                model: "deepseek-v4-pro".to_owned(),
+                requested_model: "deepseek-v4-pro".to_owned(),
+                reasoning_effort: String::new(),
+                lifecycle: "final_turn".to_owned(),
+                status: "completed".to_owned(),
+                billable: true,
+                completed_at: "2026-07-02T10:00:00Z".to_owned(),
+                cached_input_tokens: 200,
+                cache_miss_input_tokens: 20,
+                output_tokens: 2,
+                total_tokens: 222,
+                request_ms: 1000,
+            },
+        ];
+
+        let buckets = usage_billing_buckets_from_rows(&rows);
+        let peak = buckets
+            .iter()
+            .find(|bucket| bucket.billing_period == "peak")
+            .expect("peak bucket");
+        assert_eq!(peak.billing_multiplier, 2.0);
+        assert_eq!(peak.cached_input_tokens, 100);
+
+        let off_peak = buckets
+            .iter()
+            .find(|bucket| bucket.billing_period == "off_peak")
+            .expect("off-peak bucket");
+        assert_eq!(off_peak.billing_multiplier, 1.0);
+        assert_eq!(off_peak.cached_input_tokens, 200);
     }
 
     #[tokio::test]

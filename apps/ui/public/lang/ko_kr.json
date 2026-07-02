@@ -27,6 +27,8 @@
   "billingFlashHint": "Fast, low-cost requests",
   "billingMode": "과금 모드 요율 설정",
   "billingOutput": "출력",
+  "billingPeakValleyHint": "베이징 시간 피크 요금을 사용합니다. 09:00-12:00 및 14:00-18:00은 2배로 추정합니다.",
+  "billingPeakValleyMode": "피크 / 오프피크 과금",
   "billingPro": "Pro",
   "billingProBadge": "Deep",
   "billingProHint": "Agent and complex coding tasks",

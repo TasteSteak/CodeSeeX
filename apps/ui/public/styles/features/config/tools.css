@@ -36,6 +36,25 @@
   max-width: 100%;
   margin-left: auto;
 }
+.tool-card-body .inline-control.tool-field-wide,
+.tool-card-body .tool-secret-field.tool-field-wide {
+  flex-basis: min(620px, 64%);
+  width: min(620px, 64%);
+  min-width: min(340px, 100%);
+}
+.tool-card-body .inline-control.tool-field-compact,
+.tool-card-body .tool-secret-field.tool-field-compact {
+  flex-basis: min(280px, 34%);
+  width: min(280px, 34%);
+  min-width: min(180px, 100%);
+}
+.tool-card-body .tool-secret-field > .inline-control {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: 0;
+}
 .tool-card-body textarea.inline-control { min-height: 84px; resize: vertical; }
 .tool-card-body .segmented-control { flex: 0 1 auto; max-width: 100%; min-width: 0; margin-left: auto; flex-wrap: wrap; }
 .tool-card-body .segmented-control label { min-width: 0; white-space: normal; line-height: 1.15; }

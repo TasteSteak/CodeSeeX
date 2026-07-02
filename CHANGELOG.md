@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.5.2 - 2026-07-02
+
+CodeSeeX 0.5.2 is a focused release for long-running agent stability, DeepSeek peak/off-peak cost estimates, and several desktop UI polish fixes.
+
+### Highlights
+
+- Fixed an issue where long-running agent tasks could be interrupted after repeated client tool handoffs.
+- Added DeepSeek peak/off-peak billing estimates, enabled by default in settings.
+- Improved Vision tool configuration layout so URL and API key fields are wider while model fields stay compact.
+- Fixed right-click "Select all" so it only selects the active page or the current input field.
+
+### Added
+
+- Added a `BILLING_PEAK_VALLEY_ENABLED` setting for peak/off-peak cost estimates.
+- Added usage billing buckets split by model and billing period for more accurate cost display.
+- Added optional tool config field width metadata for built-in and community tools.
+
+### Changed
+
+- Usage cost estimates now apply Beijing-time peak pricing for 09:00-12:00 and 14:00-18:00 when peak/off-peak billing is enabled.
+- The billing setting UI now includes the peak/off-peak toggle with the same divider and switch styling as other settings.
+- Tool config inputs now use shared width rules for URL, endpoint, API key, token, secret, and model fields.
+- Update notice dots are now dismissed only for the current app run instead of being permanently hidden for the version.
+
+### Fixed
+
+- Fixed Issue #14 by changing repeated client handoff signatures from a hard stop into diagnostics, preserving complex agent workflows.
+- Fixed the peak/off-peak billing switch not rendering as a visible toggle.
+- Fixed missing divider spacing between peak/off-peak billing and billing rate settings.
+- Fixed password-style tool config inputs being visually shortened by nested width constraints.
+- Fixed right-click "Select all" selecting hidden pages or the whole workspace.
+
+### Compatibility Notes
+
+- Peak/off-peak billing only affects CodeSeeX cost estimates. It does not change upstream billing behavior.
+- Existing billing rate values are preserved. New installs and unset configs enable peak/off-peak estimates by default.
+- Community tools remain compatible; width metadata is optional.
+
 ## 0.5.1 - 2026-06-23
 
 CodeSeeX 0.5.1 is a stability and experience update for the 0.5 Rust/Tauri line. It focuses on UI polish, optional Codex App model switching, improved Web Search behavior, and refreshed release documentation.

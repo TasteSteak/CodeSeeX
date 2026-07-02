@@ -75,7 +75,8 @@ pub(crate) fn user_config_from_payload(
         }
     }
 
-    if payload.get("BILLING_FLASH_CACHED_INPUT_CNY").is_some()
+    if payload.get("BILLING_PEAK_VALLEY_ENABLED").is_some()
+        || payload.get("BILLING_FLASH_CACHED_INPUT_CNY").is_some()
         || payload.get("BILLING_FLASH_CACHE_MISS_INPUT_CNY").is_some()
         || payload.get("BILLING_FLASH_OUTPUT_CNY").is_some()
         || payload.get("BILLING_PRO_CACHED_INPUT_CNY").is_some()
@@ -85,6 +86,9 @@ pub(crate) fn user_config_from_payload(
         let billing = config
             .billing
             .get_or_insert_with(UserBillingConfig::default);
+        if payload.get("BILLING_PEAK_VALLEY_ENABLED").is_some() {
+            billing.peak_valley_enabled = value_bool(payload, "BILLING_PEAK_VALLEY_ENABLED");
+        }
         if payload.get("BILLING_FLASH_CACHED_INPUT_CNY").is_some() {
             billing.flash_cached_input_cny = value_f64(payload, "BILLING_FLASH_CACHED_INPUT_CNY");
         }
@@ -556,6 +560,23 @@ mod tests {
             .as_ref()
             .and_then(|tools| tools.web_search.as_ref())
             .is_none());
+    }
+
+    #[test]
+    fn payload_persists_peak_valley_billing_mode() {
+        let config = user_config_from_payload(
+            &json!({ "BILLING_PEAK_VALLEY_ENABLED": "false" }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+
+        assert_eq!(
+            config
+                .billing
+                .as_ref()
+                .and_then(|billing| billing.peak_valley_enabled),
+            Some(false)
+        );
     }
 
     #[test]

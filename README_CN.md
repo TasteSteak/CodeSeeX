@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.5.1" src="https://img.shields.io/badge/version-0.5.1-1f6feb">
+  <img alt="Version 0.5.2" src="https://img.shields.io/badge/version-0.5.2-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.5.1`
+当前版本：`0.5.2`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游

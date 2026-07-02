@@ -27,6 +27,8 @@
   "billingFlashHint": "Fast, low-cost requests",
   "billingMode": "Billing rates",
   "billingOutput": "Output",
+  "billingPeakValleyHint": "Use Beijing-time peak pricing: 09:00-12:00 and 14:00-18:00 are estimated at 2x.",
+  "billingPeakValleyMode": "Peak / off-peak billing",
   "billingPro": "Pro",
   "billingProBadge": "Deep",
   "billingProHint": "Agent and complex coding tasks",

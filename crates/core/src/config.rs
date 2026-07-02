@@ -86,6 +86,7 @@ pub struct UserUiConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserBillingConfig {
+    pub peak_valley_enabled: Option<bool>,
     pub flash_cached_input_cny: Option<f64>,
     pub flash_cache_miss_input_cny: Option<f64>,
     pub flash_output_cny: Option<f64>,

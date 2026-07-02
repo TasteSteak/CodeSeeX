@@ -287,6 +287,14 @@ mod tests {
             Some("https://vision.example.com/v1")
         );
         assert_eq!(
+            vision.pointer("/config/0/width").and_then(Value::as_str),
+            Some("wide")
+        );
+        assert_eq!(
+            vision.pointer("/config/1/width").and_then(Value::as_str),
+            Some("compact")
+        );
+        assert_eq!(
             vision.pointer("/config/2/key").and_then(Value::as_str),
             Some("VISION_GENERATE_URL")
         );
@@ -297,6 +305,10 @@ mod tests {
         assert_eq!(
             vision.pointer("/config/4/type").and_then(Value::as_str),
             Some("password")
+        );
+        assert_eq!(
+            vision.pointer("/config/4/width").and_then(Value::as_str),
+            Some("wide")
         );
     }
 }

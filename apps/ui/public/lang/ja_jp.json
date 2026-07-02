@@ -27,6 +27,8 @@
   "billingFlashHint": "Fast, low-cost requests",
   "billingMode": "課金モード レート設定",
   "billingOutput": "出力",
+  "billingPeakValleyHint": "北京時間のピーク料金を使用します。09:00-12:00 と 14:00-18:00 は 2 倍で見積もります。",
+  "billingPeakValleyMode": "ピーク / オフピーク課金",
   "billingPro": "Pro",
   "billingProBadge": "Deep",
   "billingProHint": "Agent and complex coding tasks",

@@ -27,6 +27,8 @@
   "billingFlashHint": "快速响应 / 低成本请求",
   "billingMode": "计费模式费率设置",
   "billingOutput": "输出",
+  "billingPeakValleyHint": "按北京时间峰时估算：09:00-12:00、14:00-18:00 按 2 倍计算。",
+  "billingPeakValleyMode": "峰谷计费模式",
   "billingPro": "Pro",
   "billingProBadge": "Deep",
   "billingProHint": "Agent 与复杂代码任务",

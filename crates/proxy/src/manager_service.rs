@@ -413,6 +413,7 @@ impl ManagerRuntime {
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
             "UI_CLOSE_BEHAVIOR": ui.and_then(|value| value.close_behavior.as_deref()).unwrap_or("exit"),
             "LOG_RETENTION_DAYS": ui.and_then(|value| value.log_retention_days).unwrap_or(7).to_string(),
+            "BILLING_PEAK_VALLEY_ENABLED": billing.and_then(|value| value.peak_valley_enabled).unwrap_or(true).to_string(),
             "BILLING_FLASH_CACHED_INPUT_CNY": billing.and_then(|value| value.flash_cached_input_cny).unwrap_or(0.02).to_string(),
             "BILLING_FLASH_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.flash_cache_miss_input_cny).unwrap_or(1.0).to_string(),
             "BILLING_FLASH_OUTPUT_CNY": billing.and_then(|value| value.flash_output_cny).unwrap_or(2.0).to_string(),

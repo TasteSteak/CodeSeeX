@@ -20,6 +20,7 @@ const TOOL_ASSET_PREFIX: &str = "/tool-assets";
 
 const RESERVED_CONFIG_KEYS: &[&str] = &[
     "AUTO_START",
+    "BILLING_PEAK_VALLEY_ENABLED",
     "BILLING_FLASH_CACHED_INPUT_CNY",
     "BILLING_FLASH_CACHE_MISS_INPUT_CNY",
     "BILLING_FLASH_OUTPUT_CNY",
@@ -682,6 +683,15 @@ fn normalize_config_fields(value: Option<&Value>) -> Result<Vec<Value>, ()> {
         copy_short_string(source, &mut normalized, "descriptionKey", MAX_NAME_LEN);
         copy_short_string(source, &mut normalized, "placeholder", MAX_NAME_LEN);
         copy_short_string(source, &mut normalized, "placeholderKey", MAX_NAME_LEN);
+        if let Some(width) = source
+            .get("width")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .filter(|value| matches!(value.as_str(), "wide" | "compact"))
+        {
+            normalized.insert("width".to_owned(), Value::String(width));
+        }
         if let Some(default_value) = source.get("defaultValue").and_then(value_to_setting_string) {
             normalized.insert("defaultValue".to_owned(), Value::String(default_value));
         }

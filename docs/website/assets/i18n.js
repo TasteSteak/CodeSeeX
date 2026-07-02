@@ -15,7 +15,7 @@ window.CodeSeeXWebsiteI18n = {
     "footer.project": "Project",
     "footer.notice": "Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.",
 
-    "home.eyebrow": "Version 0.5.1 · AGPL-3.0-only",
+    "home.eyebrow": "Version 0.5.2 · AGPL-3.0-only",
     "home.title": "CodeSeeX is the DeepSeek runtime built for Codex agents.",
     "home.copy": "Run DeepSeek-compatible models through a local /v1 adapter that understands Codex tool handoffs, context replay, usage sessions, web search, diagnostics, and desktop operations.",
     "home.primaryCta": "Download from Releases",
@@ -186,7 +186,7 @@ window.CodeSeeXWebsiteI18n = {
     "footer.project": "项目",
     "footer.notice": "非官方项目，和 Codex、OpenAI、DeepSeek、Vision 及搜索服务商均无隶属关系。请使用你自己的凭据，并遵守相关服务条款。",
 
-    "home.eyebrow": "版本 0.5.1 · AGPL-3.0-only",
+    "home.eyebrow": "版本 0.5.2 · AGPL-3.0-only",
     "home.title": "CodeSeeX 是为 Codex Agent 构建的 DeepSeek Runtime。",
     "home.copy": "通过本地 /v1 适配器使用 DeepSeek 兼容模型，同时保留 Codex 工具交接、上下文回放、用量会话、网络搜索、诊断日志和桌面管理能力。",
     "home.primaryCta": "从 Releases 下载",

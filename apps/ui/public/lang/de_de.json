@@ -27,6 +27,8 @@
   "billingFlashHint": "Schnelle, kostengünstige Anfragen",
   "billingMode": "Abrechnungsmodus Tarif",
   "billingOutput": "Ausgabe",
+  "billingPeakValleyHint": "Verwendet Spitzenpreise nach Beijing-Zeit: 09:00-12:00 und 14:00-18:00 werden mit 2x geschätzt.",
+  "billingPeakValleyMode": "Peak-/Off-Peak-Abrechnung",
   "billingPro": "Pro",
   "billingProBadge": "Deep",
   "billingProHint": "Agent- und komplexe Codeaufgaben",

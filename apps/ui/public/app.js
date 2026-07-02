@@ -23,12 +23,12 @@ const CONFIG_CHANGED_EVENT = "codeseex-config-changed";
 const RUNTIME_STATUS_STARTING = "starting";
 const RUNTIME_STATUS_STOPPING = "stopping";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
-const UPDATE_NOTICE_STORAGE_KEY = "version";
 const DEFAULT_TEMPERATURE_PRESET = "default";
 const DEFAULT_BILLING_RATES_CNY = Object.freeze({
   flash: Object.freeze({ cached: 0.02, cacheMiss: 1, output: 2 }),
   pro: Object.freeze({ cached: 0.025, cacheMiss: 3, output: 6 }),
 });
+const BILLING_PEAK_MULTIPLIER = 2;
 const RESTART_REQUIRED_KEYS = new Set([
   "NETWORK_PROXY_MODE",
   "PROXY_PORT",
@@ -55,6 +55,7 @@ const els = {
   billingFlashCachedInput: byId("BILLING_FLASH_CACHED_INPUT_CNY"),
   billingFlashCacheMissInput: byId("BILLING_FLASH_CACHE_MISS_INPUT_CNY"),
   billingFlashOutput: byId("BILLING_FLASH_OUTPUT_CNY"),
+  billingPeakValleyEnabled: byId("BILLING_PEAK_VALLEY_ENABLED"),
   billingProCachedInput: byId("BILLING_PRO_CACHED_INPUT_CNY"),
   billingProCacheMissInput: byId("BILLING_PRO_CACHE_MISS_INPUT_CNY"),
   billingProOutput: byId("BILLING_PRO_OUTPUT_CNY"),
@@ -185,6 +186,7 @@ let lastLogRenderSignature = "";
 let latestAdapter = null;
 let latestStatus = null;
 let latestUpdateCheck = null;
+let updateNoticeSeenVersion = "";
 let latestConfigVersion = "";
 let externalConfigSyncTimer = null;
 let configTomlStatusTimer = null;
@@ -318,7 +320,7 @@ function bind() {
     els.toolConfigList.addEventListener("focusout", handleConfigInput);
   }
 
-  [els.showThinking, els.autoStart, els.deepseekOfficialV1Compat, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
+  [els.showThinking, els.autoStart, els.deepseekOfficialV1Compat, els.billingPeakValleyEnabled, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
@@ -435,15 +437,28 @@ function selectContextText() {
     editable.select();
     return;
   }
-  const target = contextMenuTarget && contextMenuTarget.closest
-    ? contextMenuTarget.closest(".selectable") || document.querySelector(".workspace")
-    : document.querySelector(".workspace");
+  const target = contextSelectionRoot(contextMenuTarget);
   if (!target) return;
   const range = document.createRange();
   range.selectNodeContents(target);
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+}
+
+function contextSelectionRoot(target) {
+  const pageSelector = ".dashboard-panel, .usage-page, .log-page, .config-page, .about-page";
+  const clickedPage = target && target.closest ? target.closest(pageSelector) : null;
+  if (clickedPage && isVisibleElement(clickedPage)) return clickedPage;
+  const activePage = Array.from(document.querySelectorAll(`.workspace ${pageSelector}`)).find(isVisibleElement);
+  if (activePage && isVisibleElement(activePage)) return activePage;
+  return els.workspace || document.querySelector(".workspace");
+}
+
+function isVisibleElement(element) {
+  if (!(element instanceof Element)) return false;
+  const style = window.getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
 }
 
 async function copySelectedText() {
@@ -1615,13 +1630,13 @@ function updateNoticeVersion(data = latestUpdateCheck) {
 
 function isUpdateNoticeSeen(data = latestUpdateCheck) {
   const version = updateNoticeVersion(data);
-  return Boolean(version && localStorage.getItem(UPDATE_NOTICE_STORAGE_KEY) === version);
+  return Boolean(version && updateNoticeSeenVersion === version);
 }
 
 function markUpdateNoticeSeen() {
   const version = updateNoticeVersion();
   if (!version) return;
-  localStorage.setItem(UPDATE_NOTICE_STORAGE_KEY, version);
+  updateNoticeSeenVersion = version;
   renderUpdateState({ silent: true });
 }
 
@@ -1665,6 +1680,7 @@ function renderTools(tools, config) {
       description: field.description,
       defaultValue: field.defaultValue,
       configured: Boolean(field.configured),
+      width: field.width,
       options: (field.options || []).map((option) => option.value),
     })),
   })));
@@ -1810,7 +1826,7 @@ function renderToolField(field) {
     item.appendChild(renderPasswordField(field));
   } else {
     const input = document.createElement("input");
-    input.className = "inline-control";
+    input.className = `inline-control ${toolFieldWidthClass(field)}`.trim();
     input.name = field.key;
     input.type = field.type === "number" ? "number" : "text";
     input.value = field.value || field.defaultValue || "";
@@ -1860,7 +1876,7 @@ function renderSegmentedField(field) {
 
 function renderSelectField(field) {
   const select = document.createElement("select");
-  select.className = "inline-control";
+  select.className = `inline-control ${toolFieldWidthClass(field)}`.trim();
   select.name = field.key;
   const value = field.value || field.defaultValue || "";
   for (const option of Array.isArray(field.options) ? field.options : []) {
@@ -1889,7 +1905,7 @@ function renderBooleanField(field) {
 
 function renderTextAreaField(field) {
   const textarea = document.createElement("textarea");
-  textarea.className = "inline-control";
+  textarea.className = `inline-control ${toolFieldWidthClass(field)}`.trim();
   textarea.name = field.key;
   textarea.rows = 3;
   textarea.value = field.value || field.defaultValue || "";
@@ -1899,7 +1915,7 @@ function renderTextAreaField(field) {
 
 function renderPasswordField(field) {
   const wrap = document.createElement("div");
-  wrap.className = "tool-secret-field";
+  wrap.className = `tool-secret-field ${toolFieldWidthClass(field)}`.trim();
   const input = document.createElement("input");
   input.className = "inline-control";
   input.name = field.key;
@@ -1925,6 +1941,17 @@ function renderPasswordField(field) {
     wrap.appendChild(clearLabel);
   }
   return wrap;
+}
+
+function toolFieldWidthClass(field) {
+  const width = String(field && field.width || "").trim().toLowerCase();
+  if (width === "wide" || width === "compact") return `tool-field-${width}`;
+  const key = String(field && field.key || "").toLowerCase();
+  const type = String(field && field.type || "").toLowerCase();
+  if (type === "password" || /(api[_-]?key|token|secret|password|credential)/.test(key)) return "tool-field-wide";
+  if (/(url|uri|endpoint|base[_-]?url|host|proxy|path)/.test(key)) return "tool-field-wide";
+  if (/(^|[_-])model($|[_-])/.test(key)) return "tool-field-compact";
+  return "";
 }
 
 function rebuildToolConfigControlCache() {
@@ -3385,6 +3412,7 @@ function codexConfigPathHint() {
 
 function handleConfigInput(event) {
   if (!lastSavedConfig) return;
+  refreshUsageForBillingConfigInput(event);
   const nextPayload = buildConfigPayload();
   const next = normalizeConfigPayload(nextPayload);
   if (shouldKeepConfigAsDraft(event)) {
@@ -3402,6 +3430,14 @@ function handleConfigInput(event) {
   pendingConfig = nextPayload;
   renderConfigSaveState("pending");
   scheduleConfigSave(configAutosaveDelayForEvent(event));
+}
+
+function refreshUsageForBillingConfigInput(event) {
+  const target = event && event.target;
+  const id = target && String(target.id || "");
+  if (!id.startsWith("BILLING_")) return;
+  lastUsageSignature = "";
+  if (latestUsageRuntime) renderUsage(latestUsageRuntime);
 }
 
 function scheduleConfigSave(delay = CONFIG_AUTOSAVE_DELAY_MS) {
@@ -3452,6 +3488,7 @@ function buildConfigPayload() {
     DEEPSEEK_BASE_URL: normalizeDeepSeekBaseUrl(els.deepseekBaseUrl ? els.deepseekBaseUrl.value : ""),
     PROXY_PORT: normalizePort(els.proxyPort ? els.proxyPort.value : "", 8787),
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
+    BILLING_PEAK_VALLEY_ENABLED: els.billingPeakValleyEnabled && els.billingPeakValleyEnabled.checked ? "true" : "false",
     BILLING_FLASH_CACHED_INPUT_CNY: normalizeRateInput(els.billingFlashCachedInput ? els.billingFlashCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cached),
     BILLING_FLASH_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingFlashCacheMissInput ? els.billingFlashCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cacheMiss),
     BILLING_FLASH_OUTPUT_CNY: normalizeRateInput(els.billingFlashOutput ? els.billingFlashOutput.value : "", DEFAULT_BILLING_RATES_CNY.flash.output),
@@ -3725,6 +3762,7 @@ function billingInputs() {
 }
 
 function setBillingInputValues(config = {}) {
+  if (els.billingPeakValleyEnabled) els.billingPeakValleyEnabled.checked = config.BILLING_PEAK_VALLEY_ENABLED !== "false";
   setInputValue(els.billingFlashCachedInput, config.BILLING_FLASH_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.cached);
   setInputValue(els.billingFlashCacheMissInput, config.BILLING_FLASH_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.cacheMiss);
   setInputValue(els.billingFlashOutput, config.BILLING_FLASH_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.output);
@@ -3740,9 +3778,14 @@ function setInputValue(input, value, fallback) {
 
 function currentBillingSignature() {
   return stableStringify({
+    peakValleyEnabled: currentPeakValleyBillingEnabled(),
     flash: currentBillingRates("deepseek-v4-flash"),
     pro: currentBillingRates("deepseek-v4-pro"),
   });
+}
+
+function currentPeakValleyBillingEnabled() {
+  return !els.billingPeakValleyEnabled || els.billingPeakValleyEnabled.checked !== false;
 }
 
 function currentBillingRates(model) {
@@ -3819,7 +3862,23 @@ function costForTokens(tokens) {
   const cached = Number(tokens.cached_input_tokens || tokens.cachedInputTokens || 0);
   const cacheMiss = Number(tokens.cache_miss_input_tokens || tokens.cacheMissInputTokens || 0);
   const output = Number(tokens.output_tokens || tokens.outputTokens || 0);
-  return (cached * rates.cached + cacheMiss * rates.cacheMiss + output * rates.output) / 1000000;
+  const multiplier = currentPeakValleyBillingEnabled() ? billingMultiplierForTokens(tokens) : 1;
+  return ((cached * rates.cached + cacheMiss * rates.cacheMiss + output * rates.output) / 1000000) * multiplier;
+}
+
+function billingMultiplierForTokens(tokens) {
+  const explicit = Number(tokens && (tokens.billing_multiplier || tokens.billingMultiplier));
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  return isDeepSeekBillingPeakTime(tokens && (tokens.completed_at || tokens.completedAt)) ? BILLING_PEAK_MULTIPLIER : 1;
+}
+
+function isDeepSeekBillingPeakTime(timestamp) {
+  if (!timestamp) return false;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return false;
+  const beijingMinutes = (date.getUTCHours() + 8) % 24 * 60 + date.getUTCMinutes();
+  return (beijingMinutes >= 9 * 60 && beijingMinutes < 12 * 60)
+    || (beijingMinutes >= 14 * 60 && beijingMinutes < 18 * 60);
 }
 
 function sumBalances(infos) {

@@ -117,9 +117,6 @@ pub(super) fn client_handoff_guard_stop(
             "CodeSeeX stopped repeated client tool handoffs after {consecutive_failure_count} consecutive failure(s) for tool '{}'.",
             tool_name.unwrap_or("unknown")
         ),
-        "repeated_signature" => format!(
-            "CodeSeeX stopped repeated client tool handoffs after the same tool call signature repeated {repeated_signature_count} time(s)."
-        ),
         _ => "CodeSeeX stopped repeated client tool handoffs.".to_owned(),
     };
     ClientToolHandoffGuardStop {

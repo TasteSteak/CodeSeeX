@@ -5,25 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/panels.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/cards.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/forms.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/lists.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/menus.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/components/toml.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/pages/config.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/pages/about.css?v=0.5.1">
-  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.5.1">
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.5.2">
 </head>
 <body>
   <div class="layout-container">
@@ -433,6 +433,17 @@
                 <div class="setting-divider"></div>
 
                 <h3 class="config-section-title" data-i18n="usageDisplay">Usage display</h3>
+                <div class="setting-item">
+                  <span>
+                    <span data-i18n="billingPeakValleyMode">Peak / off-peak billing</span>
+                    <small class="muted" data-i18n="billingPeakValleyHint">Use Beijing-time peak pricing for cost estimates.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="BILLING_PEAK_VALLEY_ENABLED" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="setting-divider"></div>
                 <div class="setting-item setting-item-block">
                   <span>
                     <span data-i18n="billingMode">Billing rates</span>

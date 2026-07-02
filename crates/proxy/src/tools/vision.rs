@@ -77,6 +77,7 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "description": "Complete OpenAI-compatible image understanding endpoint. Local image pixels are sent to this endpoint.",
             "placeholderKey": "visionAnalyzeRequestUrlPlaceholder",
             "placeholder": "https://api.example.com/v1/responses",
+            "width": "wide",
             "value": setting_value(settings, ANALYZE_URL_KEY)
         }),
         json!({
@@ -88,6 +89,7 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "description": "Model name sent to the visual endpoint.",
             "placeholderKey": "visionAnalyzeModelPlaceholder",
             "placeholder": "gpt-4o-mini",
+            "width": "compact",
             "value": setting_value(settings, ANALYZE_MODEL_KEY)
         }),
         json!({
@@ -99,6 +101,7 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "description": "Complete OpenAI-compatible image generation endpoint. Prefer /responses; use /images/generations only for the official image-model API.",
             "placeholderKey": "visionGenerateRequestUrlPlaceholder",
             "placeholder": "https://api.example.com/v1/responses",
+            "width": "wide",
             "value": settings.get(GENERATE_URL_KEY).cloned().unwrap_or_default()
         }),
         json!({
@@ -110,6 +113,7 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "description": "Model name sent to the Vision image generation endpoint.",
             "placeholderKey": "visionGenerateModelPlaceholder",
             "placeholder": "gpt-image-1",
+            "width": "compact",
             "value": settings.get(GENERATE_MODEL_KEY).cloned().unwrap_or_default()
         }),
         json!({
@@ -121,6 +125,7 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "description": "Bearer token used only by the Vision module.",
             "placeholderKey": "visionApiKeyPlaceholder",
             "placeholder": "sk-...",
+            "width": "wide",
             "value": "",
             "configured": settings
                 .get(API_KEY_KEY)

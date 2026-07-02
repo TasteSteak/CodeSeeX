@@ -27,6 +27,8 @@
   "billingFlashHint": "Fast, low-cost requests",
   "billingMode": "Настройка тарифа",
   "billingOutput": "Вывод",
+  "billingPeakValleyHint": "Использовать пиковые цены по пекинскому времени: 09:00-12:00 и 14:00-18:00 считаются как 2x.",
+  "billingPeakValleyMode": "Пиковая / непиковая тарификация",
   "billingPro": "Pro",
   "billingProBadge": "Deep",
   "billingProHint": "Agent and complex coding tasks",
