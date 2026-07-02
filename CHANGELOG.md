@@ -2,14 +2,14 @@
 
 ## 0.5.2 - 2026-07-02
 
-CodeSeeX 0.5.2 is a focused release for long-running agent stability, DeepSeek peak/off-peak cost estimates, and several desktop UI polish fixes.
+CodeSeeX 0.5.2 is a small stability and billing-display update. It improves long-running agent tasks, adapts cost estimates for DeepSeek peak/off-peak pricing, and polishes several desktop settings interactions.
 
 ### Highlights
 
-- Fixed an issue where long-running agent tasks could be interrupted after repeated client tool handoffs.
+- Improved long-running agent stability by preventing repeated client tool handoffs from prematurely interrupting active tasks.
 - Added DeepSeek peak/off-peak billing estimates, enabled by default in settings.
-- Improved Vision tool configuration layout so URL and API key fields are wider while model fields stay compact.
-- Fixed right-click "Select all" so it only selects the active page or the current input field.
+- Improved Vision tool configuration layout with wider endpoint/API key fields and compact model fields.
+- Scoped right-click "Select all" to the current page or active input.
 
 ### Added
 
@@ -26,7 +26,7 @@ CodeSeeX 0.5.2 is a focused release for long-running agent stability, DeepSeek p
 
 ### Fixed
 
-- Fixed Issue #14 by changing repeated client handoff signatures from a hard stop into diagnostics, preserving complex agent workflows.
+- Fixed long-running tasks being interrupted when the same client tool handoff signature appeared repeatedly.
 - Fixed the peak/off-peak billing switch not rendering as a visible toggle.
 - Fixed missing divider spacing between peak/off-peak billing and billing rate settings.
 - Fixed password-style tool config inputs being visually shortened by nested width constraints.
