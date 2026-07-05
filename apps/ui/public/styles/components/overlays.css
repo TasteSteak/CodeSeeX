@@ -9,6 +9,21 @@
 .modal-header { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .modal-header h2 { font-size: 15px; font-weight: 700; color: var(--text-main); transition: var(--theme-transition); }
 .modal-header p { color: var(--text-secondary); font-size: 12px; line-height: 1.5; transition: var(--theme-transition); }
+.modal-header .modal-warning { padding: 9px 10px; border: 1px solid var(--warn); border-radius: var(--radius-sm); background: var(--warn-badge-bg); color: var(--text-main); }
 .modal-input { width: 100%; }
 .modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .modal-actions .btn { min-height: 32px; padding: 7px 12px; font-size: 12px; }
+
+.update-dialog { width: min(420px, 100%); }
+.update-dialog-body { display: grid; gap: 14px; margin-top: 12px; }
+.update-progress-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.update-progress-track { height: 8px; overflow: hidden; border: 1px solid var(--border-color); border-radius: 999px; background: var(--ctrl-bg); transition: var(--theme-transition); }
+.update-progress-bar { width: 0; height: 100%; border-radius: inherit; background: var(--primary); transition: width 0.24s var(--theme-easing), background-color var(--theme-duration) var(--theme-easing); }
+.update-progress-bar.failed { background: var(--danger); }
+.update-current { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-panel); color: var(--text-secondary); font-size: 12px; transition: var(--theme-transition); }
+.update-current b { color: var(--text-main); font-weight: 700; transition: var(--theme-transition); }
+.step-state { flex: none; color: var(--text-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; transition: var(--theme-transition); }
+.step-state.active { color: var(--info); }
+.step-state.done { color: var(--success); }
+.step-state.failed { color: var(--danger); }
+.update-dialog-actions .btn { min-height: 32px; padding: 7px 12px; font-size: 12px; }

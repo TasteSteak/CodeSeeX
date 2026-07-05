@@ -5,25 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/panels.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/cards.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/forms.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/lists.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/menus.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/components/toml.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/pages/config.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/pages/about.css?v=0.5.2">
-  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.5.2">
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.5.3">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.5.3">
 </head>
 <body>
   <div class="layout-container">
@@ -175,6 +175,7 @@
                 </button>
               </div>
             </div>
+            <div class="catalog-notice" id="catalogNotice" hidden></div>
             <pre class="toml-snippet config-toml-code selectable" id="configTomlCode">-</pre>
           </section>
 
@@ -525,6 +526,17 @@
                     <span class="slider"></span>
                   </label>
                 </div>
+                <div class="setting-divider"></div>
+                <div class="setting-item">
+                  <span>
+                    <span data-i18n="codexAppModelListInjection">Codex App model list injection</span>
+                    <small class="muted" data-i18n="codexAppModelListInjectionHint">Experimental. When enabled, Launch Codex also tries to patch the Codex App renderer model list. Leave disabled for the safest native Codex launch.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="CODEX_APP_MODEL_LIST_INJECTION">
+                    <span class="slider"></span>
+                  </label>
+                </div>
               </div>
             </div>
           </section>
@@ -562,13 +574,27 @@
                     </button>
                     <div class="about-row">
                       <span class="about-row-label" data-i18n="checkUpdate">Check updates</span>
-                      <button class="btn btn-secondary about-inline-button update-button" type="button" data-about-action="update">
-                        <span data-i18n="checkUpdate">Check updates</span>
+                      <button class="btn btn-secondary btn-icon-label about-inline-button update-button" type="button" id="updateButton" data-about-action="update">
+                        <span class="btn-icon btn-icon-update" aria-hidden="true"></span>
+                        <span data-i18n="checkUpdate" data-update-button-label="true">Check updates</span>
                         <span class="update-dot" id="updateButtonDot" hidden></span>
                       </button>
                     </div>
                   </div>
                 </section>
+
+                <div class="update-background-status" id="updateBackgroundStatus" hidden>
+                  <div class="update-background-main">
+                    <div class="update-background-title">
+                      <b id="updateBackgroundTask">Download update package</b>
+                      <span id="updateBackgroundPercent">0%</span>
+                    </div>
+                    <div class="update-background-track" aria-label="Background update download progress">
+                      <div class="update-background-bar" id="updateBackgroundBar"></div>
+                    </div>
+                  </div>
+                  <button class="btn btn-secondary" type="button" id="updateBackgroundOpen" data-i18n="viewUpdateProgress">View</button>
+                </div>
 
                 <section class="about-group">
                   <h3 class="about-group-title" data-i18n="runtimeStats">Runtime stats</h3>
@@ -625,11 +651,38 @@
     </div>
   </div>
 
+  <div class="overlay-layer" id="updateModal" hidden>
+    <div class="overlay-card modal-card update-dialog" role="dialog" aria-modal="true" aria-labelledby="updateModalTitle">
+      <div class="modal-header">
+        <h2 id="updateModalTitle" data-i18n="updateDownloadingTitle">Downloading update</h2>
+        <p id="updateModalSubtitle">CodeSeeX update package is downloading.</p>
+      </div>
+      <div class="update-dialog-body">
+        <div class="update-progress-meta">
+          <span id="updateSizeText">-</span>
+          <span id="updatePercentText">0%</span>
+        </div>
+        <div class="update-progress-track" aria-label="Update download progress">
+          <div class="update-progress-bar" id="updateProgressBar"></div>
+        </div>
+        <div class="update-current">
+          <b id="updateTaskLabel" data-i18n="updateDownloadTask">Download update package</b>
+          <span class="step-state active" id="updateTaskState" data-i18n="updateStateRunning">Running</span>
+        </div>
+      </div>
+      <div class="modal-actions update-dialog-actions">
+        <button class="btn btn-secondary" type="button" id="updateModalBackground" data-i18n="downloadInBackground">Download in background</button>
+        <button class="btn btn-danger" type="button" id="updateCancel" data-i18n="cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div class="overlay-layer" id="ccsKeyModal" hidden>
     <div class="overlay-card modal-card" role="dialog" aria-modal="true" aria-labelledby="ccsKeyTitle">
       <div class="modal-header">
         <h2 id="ccsKeyTitle" data-i18n="ccsApiKeyTitle">CCS import API key</h2>
         <p data-i18n="ccsApiKeyHint">Enter the real API key required by CCS for this import. CodeSeeX uses it only to build this one deep link and does not save it.</p>
+        <p class="modal-warning" data-i18n="ccsApiKeyCatalogWarning">Copy the CodeSeeX TOML directly instead of relying on CCS import to keep the model catalog. CCS may show the catalog in preview but drop it after saving.</p>
       </div>
       <input class="inline-control modal-input" type="password" id="ccsApiKeyInput" spellcheck="false" autocomplete="new-password" data-i18n-placeholder="ccsApiKeyPlaceholder" placeholder="sk-">
       <div class="modal-actions">
@@ -648,6 +701,7 @@
       <div class="troubleshoot-summary" id="troubleshootSummary"></div>
       <div class="troubleshoot-action-list" id="troubleshootActions"></div>
       <div class="modal-actions">
+        <button class="btn btn-secondary" type="button" id="troubleshootVerifyRuntime" data-i18n="verifyCodexRuntime">Verify Codex runtime</button>
         <button class="btn btn-secondary" type="button" id="troubleshootRefresh" data-i18n="refresh">Refresh</button>
         <button class="btn btn-primary" type="button" id="troubleshootClose" data-i18n="close">Close</button>
       </div>

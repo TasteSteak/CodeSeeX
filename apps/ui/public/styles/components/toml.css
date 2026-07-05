@@ -11,6 +11,10 @@
 .copy-status { margin-left: auto; color: var(--success); font-size: 12px; font-weight: 700; min-height: 1em; transition: var(--theme-transition); }
 .config-toml-actions .copy-status { margin-left: 0; white-space: nowrap; }
 .copy-status.warning { color: var(--danger); }
+.catalog-notice { margin: 10px 12px 0; padding: 9px 10px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); color: var(--text-secondary); font-size: 12px; line-height: 1.45; transition: var(--theme-transition); }
+.catalog-notice[hidden] { display: none; }
+.catalog-notice.is-warning, .catalog-notice.is-repaired { border-color: var(--warn); background: var(--warn-badge-bg); color: var(--text-main); }
+.catalog-notice.is-error { border-color: var(--danger); background: var(--danger-bg); color: var(--text-main); }
 .config-toml-code { margin: 0; border: 0; border-radius: 0; max-height: 280px; overflow: auto; font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; }
 .toml-key { color: var(--info); font-weight: 700; }
 .toml-string { color: #047857; }

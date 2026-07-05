@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.3 - 2026-07-06
+
+CodeSeeX 0.5.3 is a release-readiness and desktop updater stability update. It focuses on safer Codex App integration, clearer catalog diagnostics, and a more reliable in-app update path.
+
+### Highlights
+
+- Added an in-app update flow with update checking, download progress, cancellation, and passive installation on supported desktop builds.
+- Improved Codex App model-switch continuity by protecting full-context replay and prompt-cache session anchoring.
+- Added Codex runtime catalog diagnostics so users can see whether Codex is actually reading the CodeSeeX model catalog.
+- Hardened release packaging for signed updater manifests across Windows, macOS, and Linux targets.
+
+### Added
+
+- Added desktop updater commands and progress events for the update dialog.
+- Added an experimental Codex App model-list injection setting. It is enabled by default, persisted in user config, and can be turned off if Codex App compatibility changes.
+- Added troubleshooting diagnostics for catalog path mismatches, missing catalog models, and startup-only catalog behavior.
+
+### Changed
+
+- Codex App launch only attempts renderer model-list injection when the experimental setting is enabled.
+- Full-context replay now favors the client replay payload for Codex App model switches instead of trimming away short user history.
+- Update notice dots are dismissed for the current app run only, so update checks remain visible without permanently hiding future notices.
+- Release manifests now include both installer-specific and base updater targets where applicable.
+
+### Fixed
+
+- Fixed a cache/context continuity risk when Codex App switches models without sending `previous_response_id`.
+- Fixed update installation UX so downloads run in the background with visible progress instead of sending users directly to a release page.
+- Fixed catalog troubleshooting UI stability so validation does not collapse the expanded panel.
+- Fixed release workflow gaps that could omit updater-compatible platform entries.
+
+### Compatibility Notes
+
+- CodeSeeX still recommends copying TOML directly from the desktop app when catalog accuracy matters. Some CCS import flows may not preserve the Codex model catalog.
+- The in-app updater requires signed updater artifacts from the GitHub release manifest.
+- Codex App model-list injection remains experimental and can be disabled without affecting normal CodeSeeX proxy operation.
+
 ## 0.5.2 - 2026-07-02
 
 CodeSeeX 0.5.2 is a small stability and billing-display update. It improves long-running agent tasks, adapts cost estimates for DeepSeek peak/off-peak pricing, and polishes several desktop settings interactions.

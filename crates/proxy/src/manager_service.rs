@@ -81,6 +81,9 @@ impl ManagerRuntime {
             ("GET", "/api/codex-adapter")
             | ("POST", "/api/codex-adapter/generate")
             | ("GET", "/api/codex-adapter/generate") => self.generate_adapter(),
+            ("GET", "/api/codex-adapter/runtime") | ("POST", "/api/codex-adapter/runtime") => {
+                self.verify_codex_runtime().await
+            }
             ("POST", "/api/start") | ("POST", "/api/restart") | ("POST", "/api/stop") => {
                 self.compatibility_action(path).await
             }
@@ -205,40 +208,55 @@ impl ManagerRuntime {
     ) -> ManagerJsonResponse {
         let debug_port = crate::codex_app::debug_port_from_values(query, body)
             .unwrap_or_else(crate::codex_app::default_debug_port);
-        let catalog = self.codex_model_catalog();
-        match crate::codex_app::launch_and_inject_model_catalog(debug_port, catalog).await {
-            Ok(value) if codex_app_injection_effective(&value) => {
-                let _ = self
-                    .store
-                    .record_event(
+        let config = self.active_config();
+        let inject = codex_app_launch_injection_enabled(query, body, &config);
+        let result = if inject {
+            let catalog = crate::codex_app::codex_model_catalog_value(&config);
+            crate::codex_app::launch_with_model_catalog_injection(debug_port, catalog).await
+        } else {
+            crate::codex_app::launch_app(debug_port)
+        };
+        match result {
+            Ok(value) => {
+                let injection_enabled = value
+                    .pointer("/injection/enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let injection_ok = value
+                    .pointer("/injection/ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let (level, event_type, message) = if injection_enabled && !injection_ok {
+                    (
+                        "warn",
+                        "codex_app_launch_injection_warning",
+                        "Codex App launched, but experimental renderer model-list injection did not complete.",
+                    )
+                } else if injection_enabled {
+                    (
+                        "info",
+                        "codex_app_launch_injection_succeeded",
+                        "Codex App launched and experimental renderer model-list injection succeeded.",
+                    )
+                } else {
+                    (
                         "info",
                         "codex_app_launch_succeeded",
-                        "Codex App launched and renderer model catalog injection succeeded.",
-                        Some(&value),
+                        "Codex App launch requested.",
                     )
-                    .await;
-                ok(value)
-            }
-            Ok(mut value) => {
-                if let Some(object) = value.as_object_mut() {
-                    object.insert("error".to_owned(), json!("codex_app_launch_incomplete"));
-                }
+                };
                 let _ = self
                     .store
-                    .record_event(
-                        "warn",
-                        "codex_app_launch_incomplete",
-                        "Codex App launched or was reachable, but the renderer model-list patch did not install.",
-                        Some(&value),
-                    )
+                    .record_event(level, event_type, message, Some(&value))
                     .await;
-                status(502, value)
+                ok(value)
             }
             Err(error) => {
                 let body = json!({
                     "ok": false,
                     "error": "codex_app_launch_failed",
                     "debug_port": debug_port,
+                    "injection_enabled": inject,
                     "message": error.to_string()
                 });
                 let _ = self
@@ -246,7 +264,7 @@ impl ManagerRuntime {
                     .record_event(
                         "error",
                         "codex_app_launch_failed",
-                        "Codex App launch with renderer model catalog injection failed.",
+                        "Codex App launch failed.",
                         Some(&body),
                     )
                     .await;
@@ -409,6 +427,7 @@ impl ManagerRuntime {
             "SHOW_THINKING": ui.and_then(|value| value.show_thinking).unwrap_or(true).to_string(),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
             "AUTO_START": ui.and_then(|value| value.auto_start).unwrap_or(false).to_string(),
+            "CODEX_APP_MODEL_LIST_INJECTION": ui.and_then(|value| value.codex_app_model_list_injection).unwrap_or(true).to_string(),
             "UI_THEME": ui.and_then(|value| value.theme.as_deref()).unwrap_or("system"),
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
             "UI_CLOSE_BEHAVIOR": ui.and_then(|value| value.close_behavior.as_deref()).unwrap_or("exit"),
@@ -801,20 +820,251 @@ impl ManagerRuntime {
 
     pub fn generate_adapter(&self) -> ManagerJsonResponse {
         let config = self.active_config();
+        let before = catalog_file_state(&config);
         match ensure_catalog(&config) {
-            Ok(()) => ok(json!({
-                "ok": true,
-                "ready": true,
-                "catalog_mode": "builtin",
-                "catalog_path": config.catalog_path().to_string_lossy(),
-                "models": available_models().into_iter().map(|m| m.slug).collect::<Vec<_>>(),
-                "context_window": 1_000_000,
-                "effective_context_window_percent": 95,
-                "toml_snippet": codex_toml_snippet(&config.catalog_path(), &config.proxy_base_url())
-            })),
+            Ok(()) => {
+                let toml_snippet =
+                    codex_toml_snippet(&config.catalog_path(), &config.proxy_base_url());
+                let after = catalog_file_state(&config);
+                ok(json!({
+                    "ok": true,
+                    "ready": true,
+                    "catalog_mode": "builtin",
+                    "catalog_path": config.catalog_path().to_string_lossy(),
+                    "catalog_diagnostic": catalog_diagnostic(&config, &toml_snippet, &before, &after),
+                    "models": available_models().into_iter().map(|m| m.slug).collect::<Vec<_>>(),
+                    "context_window": 1_000_000,
+                    "effective_context_window_percent": 95,
+                    "toml_snippet": toml_snippet
+                }))
+            }
             Err(error) => status(500, json!({ "ok": false, "error": error.to_string() })),
         }
     }
+
+    pub async fn verify_codex_runtime(&self) -> ManagerJsonResponse {
+        let config = self.active_config();
+        if let Err(error) = ensure_catalog(&config) {
+            return status(
+                500,
+                json!({
+                    "ok": false,
+                    "error": "catalog_prepare_failed",
+                    "message": error.to_string()
+                }),
+            );
+        }
+        let diagnostic = crate::codex_app::verify_runtime_catalog(&config).await;
+        let status_text = diagnostic
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let issue = diagnostic
+            .get("issue")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let path_note = diagnostic
+            .get("path_note")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        let (level, event_type, message) = match status_text {
+            "ok" => (
+                "info",
+                "codex_runtime_catalog_verified",
+                "Codex runtime model catalog verified.",
+            ),
+            "unavailable" => (
+                "warn",
+                "codex_runtime_catalog_unavailable",
+                "Codex runtime model catalog verification is unavailable.",
+            ),
+            "error" => (
+                "error",
+                "codex_runtime_catalog_error",
+                "Codex runtime did not load the expected model catalog.",
+            ),
+            _ => (
+                "warn",
+                "codex_runtime_catalog_warning",
+                "Codex runtime model catalog verification needs attention.",
+            ),
+        };
+        let _ = self
+            .store
+            .record_event(
+                level,
+                event_type,
+                message,
+                Some(&json!({
+                    "status": status_text,
+                    "issue": issue,
+                    "path_note": path_note,
+                    "runtime": diagnostic
+                })),
+            )
+            .await;
+        ok(json!({
+            "ok": true,
+            "runtime_diagnostic": diagnostic
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CatalogFileState {
+    exists: bool,
+    readable: bool,
+    compatible: bool,
+    exact_current: bool,
+    model_count: usize,
+    models: Vec<String>,
+    error: Option<String>,
+}
+
+fn catalog_file_state(config: &AppConfig) -> CatalogFileState {
+    let path = config.catalog_path();
+    if !path.exists() {
+        return CatalogFileState {
+            exists: false,
+            readable: false,
+            compatible: false,
+            exact_current: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: Some("missing".to_owned()),
+        };
+    }
+
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            return CatalogFileState {
+                exists: true,
+                readable: false,
+                compatible: false,
+                exact_current: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let value = serde_json::from_str::<Value>(&text).ok();
+    let models = value
+        .as_ref()
+        .and_then(|value| value.get("models"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("slug")
+                        .or_else(|| item.get("model"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let expected = serde_json::to_string_pretty(&build_codeseex_catalog())
+        .map(|text| text + "\n")
+        .unwrap_or_default();
+
+    CatalogFileState {
+        exists: true,
+        readable: true,
+        compatible: catalog_file_is_compatible(&path),
+        exact_current: !expected.is_empty() && text == expected,
+        model_count: models.len(),
+        models,
+        error: value.is_none().then(|| "invalid_json".to_owned()),
+    }
+}
+
+fn catalog_diagnostic(
+    config: &AppConfig,
+    toml_snippet: &str,
+    before: &CatalogFileState,
+    after: &CatalogFileState,
+) -> Value {
+    let toml_catalog_path = toml_model_catalog_path(toml_snippet);
+    let toml_has_catalog = toml_catalog_path.is_some();
+    let catalog_path = config.catalog_path();
+    let toml_catalog_matches = toml_catalog_path
+        .as_deref()
+        .map(|path| std::path::PathBuf::from(path) == catalog_path)
+        .unwrap_or(false);
+    let repaired = !before.exact_current && after.exact_current;
+    let mut status = if after.exists && after.readable && after.compatible && after.exact_current {
+        "ok"
+    } else if after.exists && after.readable && after.compatible {
+        "warning"
+    } else {
+        "error"
+    };
+    let mut issue = if !after.exists {
+        "missing"
+    } else if !after.readable {
+        "unreadable"
+    } else if !after.compatible {
+        "incompatible"
+    } else if !after.exact_current {
+        "outdated"
+    } else if !toml_has_catalog {
+        status = "warning";
+        "toml_missing_catalog"
+    } else if !toml_catalog_matches {
+        status = "warning";
+        "toml_catalog_mismatch"
+    } else if repaired {
+        status = "repaired";
+        "regenerated"
+    } else {
+        "none"
+    };
+    if repaired && issue == "none" {
+        status = "repaired";
+        issue = "regenerated";
+    }
+
+    json!({
+        "status": status,
+        "issue": issue,
+        "path": catalog_path.to_string_lossy(),
+        "exists": after.exists,
+        "readable": after.readable,
+        "compatible": after.compatible,
+        "exact_current": after.exact_current,
+        "repaired": repaired,
+        "previous_issue": before.error.as_deref().unwrap_or(if before.exact_current { "none" } else { "outdated_or_missing" }),
+        "model_count": after.model_count,
+        "models": after.models,
+        "default_model": "deepseek-v4-pro",
+        "toml_has_model_catalog_json": toml_has_catalog,
+        "toml_catalog_path": toml_catalog_path,
+        "toml_catalog_path_matches": toml_catalog_matches,
+        "ccs_import_model_catalog_risk": true
+    })
+}
+
+fn toml_model_catalog_path(toml_snippet: &str) -> Option<String> {
+    toml_snippet.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed.strip_prefix("model_catalog_json")?.trim();
+        let value = value.strip_prefix('=')?.trim();
+        let unquoted = value
+            .strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .or_else(|| {
+                value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+            })
+            .unwrap_or(value)
+            .trim();
+        (!unquoted.is_empty()).then(|| unquoted.to_owned())
+    })
 }
 
 pub fn ensure_catalog(config: &AppConfig) -> anyhow::Result<()> {
@@ -916,6 +1166,43 @@ fn take_legacy_vision_key(config: &mut UserConfig) -> Option<String> {
 
 fn codex_app_injection_effective(value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn codex_app_launch_injection_enabled(
+    query: Option<&Value>,
+    body: Option<&Value>,
+    config: &AppConfig,
+) -> bool {
+    bool_from_values(query, body, "inject")
+        .or_else(|| bool_from_values(query, body, "model_list_injection"))
+        .or_else(|| bool_from_values(query, body, "CODEX_APP_MODEL_LIST_INJECTION"))
+        .unwrap_or_else(|| {
+            UserConfig::read_from(&config.config_path())
+                .ok()
+                .and_then(|user_config| user_config.ui)
+                .and_then(|ui| ui.codex_app_model_list_injection)
+                .unwrap_or(true)
+        })
+}
+
+fn bool_from_values(query: Option<&Value>, body: Option<&Value>, key: &str) -> Option<bool> {
+    body.and_then(|value| bool_from_value(value, key))
+        .or_else(|| query.and_then(|value| bool_from_value(value, key)))
+}
+
+fn bool_from_value(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(|value| {
+        value.as_bool().or_else(|| {
+            value.as_str().and_then(|text| {
+                let normalized = text.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "1" | "true" | "yes" | "on" | "enabled" => Some(true),
+                    "0" | "false" | "no" | "off" | "disabled" => Some(false),
+                    _ => None,
+                }
+            })
+        })
+    })
 }
 
 fn ok(body: Value) -> ManagerJsonResponse {
@@ -1144,6 +1431,47 @@ mod tests {
         assert_eq!(
             response.body.get("catalog_mode").and_then(Value::as_str),
             Some("builtin")
+        );
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn adapter_reports_catalog_diagnostic_after_regeneration() {
+        let config = temp_config("catalog-diagnostic");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+
+        let response = runtime.generate_adapter();
+
+        assert_eq!(response.status, 200);
+        let diagnostic = response
+            .body
+            .get("catalog_diagnostic")
+            .expect("catalog diagnostic");
+        assert_eq!(
+            diagnostic.get("status").and_then(Value::as_str),
+            Some("repaired")
+        );
+        assert_eq!(
+            diagnostic.get("issue").and_then(Value::as_str),
+            Some("regenerated")
+        );
+        assert_eq!(
+            diagnostic
+                .get("toml_has_model_catalog_json")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            diagnostic
+                .get("toml_catalog_path_matches")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            diagnostic.get("model_count").and_then(Value::as_u64),
+            Some(2)
         );
         let _ = std::fs::remove_dir_all(config.data_dir);
     }

@@ -89,7 +89,7 @@ jobs:
             artifact_name: CodeSeeX-Windows-x64
           - label: macOS arm64
             os: macos-14
-            bundle_args: --bundles dmg
+            bundle_args: --bundles app,dmg
             artifact_name: CodeSeeX-MacOS-arm64
           - label: Linux x64
             os: ubuntu-24.04
@@ -152,6 +152,9 @@ jobs:
 
       - name: Build Tauri bundle
         working-directory: apps/desktop/src-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --ci --no-sign --features tauri/custom-protocol ${{ matrix.bundle_args }}
 
       - name: Upload ${{ matrix.label }} artifacts
@@ -195,29 +198,92 @@ jobs:
       - name: Prepare product assets
         shell: bash
         run: |
-          shopt -s globstar nullglob
-          VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p release-upload
+          python - <<'PY'
+          import datetime as dt
+          import glob
+          import json
+          import os
+          import shutil
+          from pathlib import Path
 
-          for file in release-assets/**/*; do
-            if [ ! -f "$file" ]; then
-              continue
-            fi
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          tag = os.environ["GITHUB_REF_NAME"]
+          base_url = f"https://github.com/TasteSteak/CodeSeeX/releases/download/{tag}"
+          out_dir = Path("release-upload")
+          out_dir.mkdir(exist_ok=True)
+          platforms = {}
 
-            case "$file" in
-              release-assets/CodeSeeX-Windows-*/*.exe)
-                cp "$file" "release-upload/Windows-CodeSeeX.Setup.${VERSION}.exe"
-                ;;
-              release-assets/CodeSeeX-MacOS-*/*.dmg)
-                cp "$file" "release-upload/MacOS-CodeSeeX-${VERSION}-arm64.dmg"
-                ;;
-              release-assets/CodeSeeX-Linux-*/*.AppImage)
-                cp "$file" "release-upload/Linux-CodeSeeX-${VERSION}.AppImage"
-                ;;
-            esac
-          done
+          def first(pattern):
+              matches = sorted(glob.glob(pattern, recursive=True))
+              return Path(matches[0]) if matches else None
 
-          find release-upload -maxdepth 1 -type f -print | sort
+          def copy_asset(source, name):
+              destination = out_dir / name
+              shutil.copy2(source, destination)
+              return destination
+
+          def signature_for(source):
+              candidate = Path(str(source) + ".sig")
+              return candidate if candidate.exists() else None
+
+          def add_platform(keys, bundle, output_name):
+              signature = signature_for(bundle)
+              if not signature:
+                  print(f"Skipping updater manifest entry for {', '.join(keys)}: missing {bundle.name}.sig")
+                  return
+              copy_asset(bundle, output_name)
+              copy_asset(signature, output_name + ".sig")
+              signature_text = signature.read_text(encoding="utf-8").strip()
+              for key in keys:
+                  platforms[key] = {
+                      "signature": signature_text,
+                      "url": f"{base_url}/{output_name}",
+                  }
+
+          windows_exe = first("release-assets/CodeSeeX-Windows-*/**/*.exe")
+          if windows_exe:
+              add_platform(
+                  ["windows-x86_64-nsis", "windows-x86_64"],
+                  windows_exe,
+                  f"Windows-CodeSeeX.Setup.{version}.exe",
+              )
+
+          mac_dmg = first("release-assets/CodeSeeX-MacOS-*/**/*.dmg")
+          if mac_dmg:
+              copy_asset(mac_dmg, f"MacOS-CodeSeeX-{version}-arm64.dmg")
+          mac_update = first("release-assets/CodeSeeX-MacOS-*/**/*.app.tar.gz")
+          if mac_update:
+              add_platform(
+                  ["darwin-aarch64-app", "darwin-aarch64"],
+                  mac_update,
+                  f"MacOS-CodeSeeX-{version}-arm64.app.tar.gz",
+              )
+
+          linux_appimage = first("release-assets/CodeSeeX-Linux-*/**/*.AppImage")
+          if linux_appimage:
+              add_platform(
+                  ["linux-x86_64-appimage", "linux-x86_64"],
+                  linux_appimage,
+                  f"Linux-CodeSeeX-{version}.AppImage",
+              )
+
+          if platforms:
+              manifest = {
+                  "version": version,
+                  "notes": f"CodeSeeX {version}",
+                  "pub_date": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "platforms": platforms,
+              }
+              (out_dir / "latest.json").write_text(
+                  json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+          else:
+              raise SystemExit("No signed updater artifacts were found.")
+
+          for path in sorted(out_dir.iterdir()):
+              print(path)
+          PY
 
       - name: Publish release
         env:

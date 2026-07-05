@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Default)]
 struct FakeUpstreamState {
     requests: Arc<Mutex<Vec<Value>>>,
+    active_requests: Arc<AtomicUsize>,
+    max_concurrent_requests: Arc<AtomicUsize>,
 }
 
 fn test_config(data_dir: PathBuf) -> AppConfig {
@@ -2139,11 +2141,16 @@ async fn fake_delayed_vision_responses(
     State(state): State<FakeUpstreamState>,
     Json(payload): Json<Value>,
 ) -> axum::response::Response {
+    let active = state.active_requests.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+    state
+        .max_concurrent_requests
+        .fetch_max(active, AtomicOrdering::SeqCst);
     {
         let mut requests = state.requests.lock().expect("fake vision lock poisoned");
         requests.push(payload);
     }
     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+    state.active_requests.fetch_sub(1, AtomicOrdering::SeqCst);
     Json(json!({
         "output": [{
             "type": "message",
@@ -3404,8 +3411,8 @@ async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
     let second_messages = serde_json::to_string(&requests[1]["messages"]).unwrap();
     assert!(second_messages.contains("remember switch-anchor-marker"));
     assert!(second_messages.contains("what did I ask you to remember?"));
-    assert!(!second_messages.contains("client replay duplicate not in local chain"));
-    assert!(!second_messages.contains("old client replay assistant text"));
+    assert!(second_messages.contains("client replay duplicate not in local chain"));
+    assert!(second_messages.contains("old client replay assistant text"));
 
     let chain = store
         .response_context_chain("resp_anchor_flash", 2)
@@ -3458,7 +3465,7 @@ async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
             .unwrap()
             .pointer("/context/codex_full_context_replay/strategy")
             .and_then(Value::as_str),
-        Some("local_anchor_tail")
+        Some("client_full_replay")
     );
 
     let _ = std::fs::remove_dir_all(data_dir);
@@ -6154,8 +6161,15 @@ async fn non_streaming_proxy_tools_execute_parallel_batch_and_preserve_order() {
     let elapsed = started.elapsed();
 
     assert!(
-        elapsed < std::time::Duration::from_millis(850),
-        "tool calls should run concurrently, elapsed={elapsed:?}"
+        elapsed < std::time::Duration::from_secs(3),
+        "tool calls should not hang, elapsed={elapsed:?}"
+    );
+    assert!(
+        vision_state
+            .max_concurrent_requests
+            .load(AtomicOrdering::SeqCst)
+            >= 2,
+        "tool calls should run concurrently"
     );
     assert!(serde_json::to_string(&body)
         .unwrap()

@@ -12,6 +12,10 @@ const DEEPSEEK_RECHARGE_URL = "https://platform.deepseek.com/top_up";
 const CCS_IMPORT_URL = "ccswitch://v1/import";
 const DEFAULT_CCS_ENDPOINT = "http://127.0.0.1:8787/v1";
 const DEFAULT_CCS_MODEL = "deepseek-v4-pro";
+const DEFAULT_CCS_MODEL_CATALOG = Object.freeze([
+  Object.freeze({ model: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", contextWindow: 1000000 }),
+  Object.freeze({ model: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", contextWindow: 1000000 }),
+]);
 const CODEX_CONFIG_PATH_UNIX = "~/.codex/config.toml";
 const CODEX_CONFIG_PATH_WINDOWS = "%USERPROFILE%\\.codex\\config.toml";
 const REFRESH_RUNNING_MS = 2000;
@@ -20,6 +24,7 @@ const REFRESH_HIDDEN_MS = 10000;
 const SLOW_RENDER_MS = 80;
 const LANGUAGE_LOAD_TIMEOUT_MS = 1200;
 const CONFIG_CHANGED_EVENT = "codeseex-config-changed";
+const UPDATE_PROGRESS_EVENT = "codeseex-update-progress";
 const RUNTIME_STATUS_STARTING = "starting";
 const RUNTIME_STATUS_STOPPING = "stopping";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
@@ -61,6 +66,7 @@ const els = {
   billingProOutput: byId("BILLING_PRO_OUTPUT_CNY"),
   completedTurns: byId("completedTurns"),
   autoStart: byId("AUTO_START"),
+  catalogNotice: byId("catalogNotice"),
   configTomlCode: byId("configTomlCode"),
   configSaveStatus: byId("configSaveStatus"),
   configTomlCopyStatus: byId("configTomlCopyStatus"),
@@ -110,14 +116,32 @@ const els = {
   troubleshootClose: byId("troubleshootClose"),
   troubleshootModal: byId("troubleshootModal"),
   troubleshootRefresh: byId("troubleshootRefresh"),
+  troubleshootVerifyRuntime: byId("troubleshootVerifyRuntime"),
   troubleshootSummary: byId("troubleshootSummary"),
   uiLanguage: byId("UI_LANGUAGE"),
+  codexAppModelListInjection: byId("CODEX_APP_MODEL_LIST_INJECTION"),
   usageAverageMs: byId("usageAverageMs"),
   usageCacheHitRate: byId("usageCacheHitRate"),
   usageRows: byId("usageRows"),
   usageTotalCost: byId("usageTotalCost"),
   usageTotalTurns: byId("usageTotalTurns"),
+  updateButton: byId("updateButton"),
   updateButtonDot: byId("updateButtonDot"),
+  updateBackgroundBar: byId("updateBackgroundBar"),
+  updateBackgroundOpen: byId("updateBackgroundOpen"),
+  updateBackgroundPercent: byId("updateBackgroundPercent"),
+  updateBackgroundStatus: byId("updateBackgroundStatus"),
+  updateBackgroundTask: byId("updateBackgroundTask"),
+  updateCancel: byId("updateCancel"),
+  updateModal: byId("updateModal"),
+  updateModalBackground: byId("updateModalBackground"),
+  updateModalSubtitle: byId("updateModalSubtitle"),
+  updateModalTitle: byId("updateModalTitle"),
+  updatePercentText: byId("updatePercentText"),
+  updateProgressBar: byId("updateProgressBar"),
+  updateSizeText: byId("updateSizeText"),
+  updateTaskLabel: byId("updateTaskLabel"),
+  updateTaskState: byId("updateTaskState"),
   workspace: byId("workspace"),
 };
 
@@ -184,8 +208,23 @@ let usageRenderRuntime = null;
 let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
 let latestAdapter = null;
+let latestCatalogRuntimeDiagnostic = null;
+let codexRuntimeVerificationInFlight = false;
+let troubleshootTechnicalOpen = false;
 let latestStatus = null;
 let latestUpdateCheck = null;
+let updateInstallInProgress = false;
+let updateProgressState = {
+  active: false,
+  background: false,
+  visible: false,
+  stage: "idle",
+  version: "",
+  downloaded: 0,
+  contentLength: null,
+  percent: null,
+  error: "",
+};
 let updateNoticeSeenVersion = "";
 let latestConfigVersion = "";
 let externalConfigSyncTimer = null;
@@ -277,8 +316,12 @@ function bind() {
   if (els.troubleshootButton) els.troubleshootButton.addEventListener("click", openTroubleshootModal);
   if (els.troubleshootClose) els.troubleshootClose.addEventListener("click", closeTroubleshootModal);
   if (els.troubleshootRefresh) els.troubleshootRefresh.addEventListener("click", refreshTroubleshootModal);
+  if (els.troubleshootVerifyRuntime) els.troubleshootVerifyRuntime.addEventListener("click", verifyCodexRuntime);
   if (els.ccsKeyCancel) els.ccsKeyCancel.addEventListener("click", () => closeCcsKeyModal(""));
   if (els.ccsKeyConfirm) els.ccsKeyConfirm.addEventListener("click", confirmCcsKeyModal);
+  if (els.updateModalBackground) els.updateModalBackground.addEventListener("click", hideUpdateModalToBackground);
+  if (els.updateBackgroundOpen) els.updateBackgroundOpen.addEventListener("click", showUpdateModal);
+  if (els.updateCancel) els.updateCancel.addEventListener("click", cancelDesktopUpdate);
   if (els.ccsApiKeyInput) {
     els.ccsApiKeyInput.addEventListener("input", updateCcsKeyConfirmState);
     els.ccsApiKeyInput.addEventListener("keydown", (event) => {
@@ -310,6 +353,7 @@ function bind() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && els.ccsKeyModal && !els.ccsKeyModal.hidden) closeCcsKeyModal("");
     if (event.key === "Escape" && els.troubleshootModal && !els.troubleshootModal.hidden) closeTroubleshootModal();
+    if (event.key === "Escape" && els.updateModal && !els.updateModal.hidden) hideUpdateModalToBackground();
     if (event.key === "Escape") hideContextMenu();
   });
   document.addEventListener("visibilitychange", () => scheduleNextRefresh(0));
@@ -860,6 +904,11 @@ async function bindDesktopConfigEvents() {
       window.dispatchEvent(new Event(CONFIG_CHANGED_EVENT));
     });
   } catch {}
+  try {
+    await listen(UPDATE_PROGRESS_EVENT, (event) => {
+      handleUpdateProgressEvent(event && event.payload ? event.payload : {});
+    });
+  } catch {}
 }
 
 async function syncDesktopConfig(payload, previousConfig) {
@@ -1071,10 +1120,33 @@ async function loadCodexAdapter() {
 }
 
 async function checkForUpdates(options = {}) {
+  let desktopError = null;
+  if (isTauriRuntime()) {
+    try {
+      latestUpdateCheck = await desktopInvoke("desktop_check_update");
+      renderUpdateState({ silent: Boolean(options.silent) });
+      return latestUpdateCheck;
+    } catch (error) {
+      desktopError = error && error.message ? error.message : String(error);
+    }
+  }
   try {
     latestUpdateCheck = await apiJson("/api/update-check", { cache: "no-store" });
+    if (desktopError && latestUpdateCheck && typeof latestUpdateCheck === "object") {
+      latestUpdateCheck.desktop_updater_error = desktopError;
+      latestUpdateCheck.installable = false;
+      if (!latestUpdateCheck.has_update) {
+        latestUpdateCheck.ok = false;
+        latestUpdateCheck.error = desktopError;
+      }
+    }
   } catch (error) {
-    latestUpdateCheck = { ok: false, has_update: false, error: error.message || String(error) };
+    latestUpdateCheck = {
+      ok: false,
+      has_update: false,
+      installable: false,
+      error: desktopError || error.message || String(error),
+    };
   }
   renderUpdateState({ silent: Boolean(options.silent) });
   return latestUpdateCheck;
@@ -1284,6 +1356,7 @@ function renderConfig(config) {
   els.showThinking.checked = !/^(0|false|no|off|disabled)$/i.test(String(config.SHOW_THINKING || "true"));
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
   if (els.deepseekOfficialV1Compat) els.deepseekOfficialV1Compat.checked = isTruthy(config.DEEPSEEK_OFFICIAL_V1_COMPAT || "true");
+  if (els.codexAppModelListInjection) els.codexAppModelListInjection.checked = config.CODEX_APP_MODEL_LIST_INJECTION !== "false";
   if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
   const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
@@ -1308,6 +1381,7 @@ function renderCodexAdapter(adapter) {
   currentAdapterSignature = signature;
   const toml = String(latestAdapter.toml_snippet || "");
   renderConfigToml(toml || "-");
+  renderCatalogNotice(latestAdapter.catalog_diagnostic || null);
   if (els.configTomlStatus) els.configTomlStatus.textContent = codexConfigPathHint();
 }
 
@@ -1335,7 +1409,7 @@ async function importConfigToCcs() {
   if (!apiKey) return;
   try {
     await openExternalUrl(ccsImportUrl(toml, { apiKey }));
-    setConfigTomlActionStatus(t("ccsImportStarted"), { timeout: 2200 });
+    setConfigTomlActionStatus(t("ccsImportStartedCatalogWarning"), { warning: true, timeout: 5200 });
   } catch {
     setConfigTomlActionStatus(t("ccsImportFailed"), { warning: true, timeout: 2600 });
   }
@@ -1343,10 +1417,26 @@ async function importConfigToCcs() {
 
 async function launchCodexApp() {
   if (busy) return;
-  setBusy(true, t("codexLaunchTitle"), t("codexLaunchDetail"));
+  const inject = Boolean(els.codexAppModelListInjection && els.codexAppModelListInjection.checked);
+  setBusy(true, t("codexLaunchTitle"), t(inject ? "codexLaunchExperimentalDetail" : "codexLaunchDetail"));
   try {
-    await apiJson("/api/codex-app/launch", { method: "POST" });
-    setConfigTomlActionStatus(t("codexLaunchStarted"), { timeout: 2600 });
+    const result = await apiJson("/api/codex-app/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inject }),
+    });
+    const injection = result && result.injection;
+    const injectionEnabled = Boolean(injection && injection.enabled);
+    const injectionOk = Boolean(injection && injection.ok);
+    const statusKey = injectionEnabled && !injectionOk
+      ? "codexLaunchStartedWithInjectionWarning"
+      : injectionEnabled
+        ? "codexLaunchStartedWithInjection"
+        : "codexLaunchStarted";
+    setConfigTomlActionStatus(t(statusKey), {
+      warning: injectionEnabled && !injectionOk,
+      timeout: injectionEnabled && !injectionOk ? 5200 : 2600,
+    });
     await refresh({ forceLogs: true, force: true });
   } catch (error) {
     setConfigTomlActionStatus(actionErrorMessage(t("codexLaunchFailed"), error), { warning: true, timeout: 9000 });
@@ -1431,26 +1521,88 @@ async function refreshTroubleshootModal() {
   }
 }
 
+async function verifyCodexRuntime() {
+  if (codexRuntimeVerificationInFlight) return;
+  codexRuntimeVerificationInFlight = true;
+  latestCatalogRuntimeDiagnostic = { status: "checking", issue: "checking" };
+  renderTroubleshootModal();
+  renderCatalogNotice(latestAdapter && latestAdapter.catalog_diagnostic ? latestAdapter.catalog_diagnostic : null);
+  if (els.troubleshootVerifyRuntime) els.troubleshootVerifyRuntime.disabled = true;
+  try {
+    const data = await apiJson("/api/codex-adapter/runtime", { cache: "no-store" });
+    latestCatalogRuntimeDiagnostic = data && data.runtime_diagnostic
+      ? data.runtime_diagnostic
+      : { status: "unavailable", issue: "empty_runtime_diagnostic" };
+    await refreshLatestLogs({ force: true }).catch(() => {});
+  } catch (error) {
+    latestCatalogRuntimeDiagnostic = {
+      status: "unavailable",
+      issue: "runtime_probe_failed",
+      message: error && error.message ? error.message : String(error || ""),
+    };
+  } finally {
+    codexRuntimeVerificationInFlight = false;
+    if (els.troubleshootVerifyRuntime) els.troubleshootVerifyRuntime.disabled = false;
+    renderTroubleshootModal();
+    renderCatalogNotice(latestAdapter && latestAdapter.catalog_diagnostic ? latestAdapter.catalog_diagnostic : null);
+  }
+}
+
 function renderTroubleshootModal() {
   if (!els.troubleshootSummary || !els.troubleshootActions) return;
   const status = latestStatus || {};
   const runtime = status.runtime || {};
+  const catalog = latestAdapter && latestAdapter.catalog_diagnostic ? latestAdapter.catalog_diagnostic : null;
+  const runtimeCatalog = latestCatalogRuntimeDiagnostic;
   const hasStatus = Boolean(latestStatus && latestStatus.ok !== undefined);
   const statusOk = hasStatus && status.ok !== false;
   const port = statusOk
     ? (runtime.port || latestRuntimePort || (lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787")
     : ((lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787");
-  const rows = [
-    [t("troubleshootProxyState"), latestRunning ? t("running") : (latestStarting ? t("starting") : t("stopped"))],
-    [t("logPort"), String(port)],
-    [statusOk ? (status.process_label || t("proxyPid")) : t("proxyPid"), statusOk && status.pid ? String(status.pid) : "-"],
-    [t("configTomlTitle"), codexConfigPathHint()],
-    [t("troubleshootCatalogPath"), statusOk ? (status.catalog_path || (latestAdapter && latestAdapter.catalog_path) || "-") : "-"],
-    [t("troubleshootBaseUrl"), statusOk ? (status.base_url || (latestAdapter && latestAdapter.base_url) || DEFAULT_CCS_ENDPOINT) : "-"],
-  ];
-  els.troubleshootSummary.replaceChildren(...rows.map(([label, value]) => troubleshootRow(label, value)));
+  const baseUrl = statusOk
+    ? (status.base_url || (latestAdapter && latestAdapter.base_url) || DEFAULT_CCS_ENDPOINT)
+    : DEFAULT_CCS_ENDPOINT;
+  const processLabel = statusOk ? (status.process_label || t("proxyPid")) : t("proxyPid");
+  const proxyState = latestRunning ? "ok" : (latestStarting ? "checking" : "error");
+  const catalogState = catalogStatusClass(catalog);
+  const runtimeState = catalogRuntimeStatusClass(runtimeCatalog);
+  els.troubleshootSummary.replaceChildren(
+    troubleshootOverview({
+      state: proxyState,
+      title: latestRunning ? t("troubleshootProxyRunning") : (latestStarting ? t("troubleshootProxyStarting") : t("troubleshootProxyStopped")),
+      meta: `${t("logPort")} ${port}${statusOk && status.pid ? ` · ${processLabel} ${status.pid}` : ""}`,
+    }),
+    troubleshootDiagnosticGrid([
+      {
+        title: t("troubleshootProxyService"),
+        value: latestRunning ? t("running") : (latestStarting ? t("starting") : t("stopped")),
+        detail: `${t("troubleshootBaseUrl")} ${baseUrl}`,
+        state: proxyState,
+      },
+      {
+        title: t("troubleshootCodexConfig"),
+        value: catalogStatusLabel(catalog),
+        detail: catalogSummaryDetail(catalog),
+        state: catalogState,
+      },
+      {
+        title: t("troubleshootRuntimeCatalog"),
+        value: catalogRuntimeStatusLabel(runtimeCatalog),
+        detail: catalogRuntimeSummaryDetail(runtimeCatalog),
+        state: runtimeState,
+      },
+    ]),
+    troubleshootTechnicalDetails([
+      [t("configTomlTitle"), codexConfigPathHint()],
+      [t("troubleshootCatalogPath"), catalog ? (catalog.path || "-") : (statusOk ? (status.catalog_path || (latestAdapter && latestAdapter.catalog_path) || "-") : "-")],
+      [t("troubleshootCatalogModels"), catalogModelsLabel(catalog)],
+      [t("troubleshootCatalogToml"), catalogTomlLabel(catalog)],
+      [t("troubleshootRuntimeCatalog"), catalogRuntimeTechnicalLabel(runtimeCatalog)],
+      [t("troubleshootBaseUrl"), baseUrl],
+    ]),
+  );
 
-  const actions = troubleshootActions(status, runtime);
+  const actions = troubleshootActions(status, runtime, catalog, runtimeCatalog);
   els.troubleshootActions.replaceChildren(...actions.map((text) => {
     const item = document.createElement("div");
     item.className = "troubleshoot-action";
@@ -1459,20 +1611,82 @@ function renderTroubleshootModal() {
   }));
 }
 
-function troubleshootRow(label, value) {
-  const row = document.createElement("div");
-  row.className = "troubleshoot-row";
-  const span = document.createElement("span");
-  span.textContent = label;
-  const strong = document.createElement("strong");
-  strong.textContent = value || "-";
-  row.append(span, strong);
+function troubleshootOverview(options) {
+  const wrap = document.createElement("div");
+  wrap.className = ["troubleshoot-overview", options.state ? `is-${options.state}` : ""].filter(Boolean).join(" ");
+  const dot = document.createElement("span");
+  dot.className = "troubleshoot-overview-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const text = document.createElement("div");
+  text.className = "troubleshoot-overview-text";
+  const title = document.createElement("strong");
+  title.textContent = options.title || "-";
+  const meta = document.createElement("span");
+  meta.textContent = options.meta || "";
+  text.append(title, meta);
+  wrap.append(dot, text);
+  return wrap;
+}
+
+function troubleshootDiagnosticGrid(items) {
+  const grid = document.createElement("div");
+  grid.className = "troubleshoot-diagnostic-grid";
+  for (const item of items) grid.append(troubleshootDiagnosticItem(item));
+  return grid;
+}
+
+function troubleshootDiagnosticItem(item) {
+  const row = document.createElement("section");
+  row.className = ["troubleshoot-diagnostic-item", item.state ? `is-${item.state}` : ""].filter(Boolean).join(" ");
+  const header = document.createElement("div");
+  header.className = "troubleshoot-diagnostic-header";
+  const title = document.createElement("span");
+  title.textContent = item.title || "-";
+  const badge = document.createElement("strong");
+  badge.textContent = item.value || "-";
+  header.append(title, badge);
+  const detail = document.createElement("p");
+  detail.textContent = item.detail || "";
+  row.append(header, detail);
   return row;
 }
 
-function troubleshootActions(status, runtime) {
+function troubleshootTechnicalDetails(rows) {
+  const details = document.createElement("details");
+  details.className = "troubleshoot-technical";
+  details.open = troubleshootTechnicalOpen;
+  details.addEventListener("toggle", () => {
+    troubleshootTechnicalOpen = details.open;
+  });
+  const summary = document.createElement("summary");
+  summary.textContent = t("troubleshootTechnicalDetails");
+  const body = document.createElement("div");
+  body.className = "troubleshoot-technical-body";
+  for (const [label, value] of rows) body.append(troubleshootTechnicalRow(label, value));
+  details.append(summary, body);
+  return details;
+}
+
+function troubleshootTechnicalRow(label, value) {
+  const row = document.createElement("div");
+  row.className = "troubleshoot-technical-row";
+  const key = document.createElement("span");
+  key.textContent = label;
+  const val = document.createElement("strong");
+  val.textContent = value || "-";
+  row.append(key, val);
+  return row;
+}
+
+function troubleshootActions(status, runtime, catalog, runtimeCatalog) {
   const actions = [];
   const activeRequests = Number(runtime && runtime.active_requests || 0);
+  const catalogState = catalogStatusClass(catalog);
+  const runtimeState = catalogRuntimeStatusClass(runtimeCatalog);
+  if (catalogState === "error" || catalogState === "warning") actions.push(t("troubleshootActionCatalogProblem"));
+  if (catalogState === "repaired") actions.push(t("troubleshootActionCatalogRepaired"));
+  if (runtimeState === "error") actions.push(t("troubleshootActionRuntimeCatalogProblem"));
+  if (runtimeState === "warning") actions.push(t("troubleshootActionRuntimeCatalogUnavailable"));
   if (latestStarting) actions.push(t("troubleshootActionWaitStartup"));
   if (!latestRunning && !latestStarting) actions.push(t("troubleshootActionStartProxy"));
   if (latestRunning && activeRequests > 0) actions.push(t("troubleshootActionActiveRequests").replace("{count}", formatNumber(activeRequests)));
@@ -1481,6 +1695,118 @@ function troubleshootActions(status, runtime) {
   if (!status || !status.ok) actions.push(t("troubleshootActionRefreshStatus"));
   if (actions.length === 0) actions.push(t("troubleshootActionHealthy"));
   return actions;
+}
+
+function renderCatalogNotice(diagnostic) {
+  if (!els.catalogNotice) return;
+  const state = catalogStatusClass(diagnostic);
+  const runtimeState = catalogRuntimeStatusClass(latestCatalogRuntimeDiagnostic);
+  if (runtimeState === "error") {
+    els.catalogNotice.textContent = t("catalogNoticeRuntimeError");
+    els.catalogNotice.className = "catalog-notice is-error";
+    els.catalogNotice.hidden = false;
+    return;
+  }
+  if (!diagnostic || state === "unknown" || state === "ok") {
+    els.catalogNotice.hidden = true;
+    els.catalogNotice.textContent = "";
+    els.catalogNotice.className = "catalog-notice";
+    return;
+  }
+  const key = state === "repaired"
+    ? "catalogNoticeRepaired"
+    : state === "error"
+      ? "catalogNoticeError"
+      : "catalogNoticeWarning";
+  els.catalogNotice.textContent = t(key);
+  els.catalogNotice.className = `catalog-notice is-${state}`;
+  els.catalogNotice.hidden = false;
+}
+
+function catalogRuntimeStatusClass(diagnostic) {
+  const status = String(diagnostic && diagnostic.status || "").toLowerCase();
+  if (!diagnostic) return "unknown";
+  if (status === "checking") return "checking";
+  if (status === "ok") return "ok";
+  if (status === "error") return "error";
+  if (status === "unavailable") return "warning";
+  if (status === "warning") return "warning";
+  return "warning";
+}
+
+function catalogRuntimeStatusLabel(diagnostic) {
+  if (!diagnostic) return t("catalogRuntimeNotChecked");
+  const status = String(diagnostic.status || "").toLowerCase();
+  if (status === "checking") return t("catalogRuntimeStatusChecking");
+  if (status === "ok") return t("catalogRuntimeStatusOk");
+  if (status === "error") return t("catalogRuntimeStatusError");
+  if (status === "unavailable") return t("catalogRuntimeStatusUnavailable");
+  return t("catalogRuntimeStatusWarning");
+}
+
+function catalogRuntimeSummaryDetail(diagnostic) {
+  if (!diagnostic) return t("catalogRuntimeHint");
+  const status = String(diagnostic.status || "").toLowerCase();
+  if (status === "checking") return t("catalogRuntimeCheckingHint");
+  if (status === "ok") return t("catalogRuntimeVerifiedHint");
+  if (status === "error") return t("catalogRuntimeErrorHint");
+  if (status === "unavailable") return t("catalogRuntimeUnavailableHint");
+  return t("catalogRuntimeWarningHint");
+}
+
+function catalogRuntimeTechnicalLabel(diagnostic) {
+  if (!diagnostic) return t("catalogRuntimeNotChecked");
+  const issue = String(diagnostic.issue || "none");
+  const pathNote = String(diagnostic.path_note || "").trim();
+  const duration = diagnostic.duration_ms !== undefined ? ` · ${formatNumber(diagnostic.duration_ms)} ms` : "";
+  return `${catalogRuntimeStatusLabel(diagnostic)} · ${issue}${pathNote ? ` · ${pathNote}` : ""}${duration}`;
+}
+
+function catalogSummaryDetail(diagnostic) {
+  if (!diagnostic) return t("catalogNotCheckedHint");
+  const parts = [];
+  parts.push(catalogTomlLabel(diagnostic));
+  const count = Number(diagnostic.model_count || 0);
+  if (count > 0) parts.push(t("catalogModelCount").replace("{count}", formatNumber(count)));
+  return parts.join(" · ");
+}
+
+function catalogStatusClass(diagnostic) {
+  const status = String(diagnostic && diagnostic.status || "").toLowerCase();
+  if (!diagnostic) return "unknown";
+  if (status === "ok") return "ok";
+  if (status === "repaired") return "repaired";
+  if (status === "error") return "error";
+  if (status === "warning") return "warning";
+  return "warning";
+}
+
+function catalogStatusLabel(diagnostic) {
+  if (!diagnostic) return "-";
+  const state = catalogStatusClass(diagnostic);
+  if (state === "ok") return t("catalogStatusOk");
+  if (state === "repaired") return t("catalogStatusRepaired");
+  if (state === "error") return t("catalogStatusError");
+  return t("catalogStatusWarning");
+}
+
+function catalogModelsLabel(diagnostic) {
+  if (!diagnostic) return "-";
+  const count = Number(diagnostic.model_count || 0);
+  const models = Array.isArray(diagnostic.models) ? diagnostic.models.filter(Boolean) : [];
+  if (models.length > 0) return `${formatNumber(count)} - ${models.join(", ")}`;
+  return formatNumber(count);
+}
+
+function catalogTomlOk(diagnostic) {
+  return Boolean(diagnostic && diagnostic.toml_has_model_catalog_json && diagnostic.toml_catalog_path_matches);
+}
+
+function catalogTomlLabel(diagnostic) {
+  if (!diagnostic) return "-";
+  if (!diagnostic.toml_has_model_catalog_json) return t("catalogTomlMissing");
+  if (!diagnostic.toml_catalog_path_matches) return t("catalogTomlMismatch");
+  return t("catalogTomlOk");
 }
 
 function configTomlCopyText(value) {
@@ -1550,17 +1876,35 @@ function escapeHtml(value) {
 
 function ccsImportUrl(toml, options = {}) {
   const apiKey = String(options.apiKey || "").trim();
+  const endpoint = parseTomlStringValue(toml, "base_url") || DEFAULT_CCS_ENDPOINT;
+  const model = parseTomlStringValue(toml, "model") || DEFAULT_CCS_MODEL;
+  const config = {
+    auth: { OPENAI_API_KEY: apiKey },
+    config: String(toml || ""),
+    modelCatalog: { models: ccsModelCatalogModels() },
+  };
   const params = new URLSearchParams({
     resource: "provider",
     app: "codex",
     name: appInfo && appInfo.product_name ? appInfo.product_name : "CodeSeeX",
-    endpoint: parseTomlStringValue(toml, "base_url") || DEFAULT_CCS_ENDPOINT,
-    model: parseTomlStringValue(toml, "model") || DEFAULT_CCS_MODEL,
-    config: utf8Base64(toml),
-    configFormat: "toml",
+    endpoint,
+    model,
+    config: utf8Base64(JSON.stringify(config)),
+    configFormat: "json",
   });
   if (apiKey) params.set("apiKey", apiKey);
   return CCS_IMPORT_URL + "?" + params.toString();
+}
+
+function ccsModelCatalogModels() {
+  const adapterModels = Array.isArray(latestAdapter && latestAdapter.models) ? latestAdapter.models : [];
+  const known = new Map(DEFAULT_CCS_MODEL_CATALOG.map((model) => [model.model, { ...model }]));
+  for (const slug of adapterModels) {
+    const model = String(slug || "").trim();
+    if (!model || known.has(model)) continue;
+    known.set(model, { model, displayName: model, contextWindow: 1000000 });
+  }
+  return Array.from(known.values());
 }
 
 function parseTomlStringValue(toml, key) {
@@ -1613,15 +1957,27 @@ function renderUpdateState(options = {}) {
   const hasUpdate = Boolean(latestUpdateCheck && latestUpdateCheck.has_update);
   if (els.aboutUpdateDot) els.aboutUpdateDot.hidden = !hasUpdate || isUpdateNoticeSeen(latestUpdateCheck);
   if (els.updateButtonDot) els.updateButtonDot.hidden = !hasUpdate;
+  updateUpdateButtonState(hasUpdate);
   if (!els.aboutStatus || !latestUpdateCheck || options.silent) return;
 
-  if (hasUpdate) {
+  if (updateInstallInProgress) {
+    setAboutStatus(t("installingUpdate"), false);
+  } else if (hasUpdate) {
     setAboutStatus(renderUpdateAvailableMessage(latestUpdateCheck), false, { html: true });
   } else if (latestUpdateCheck.ok) {
     setAboutStatus(updateMessage("updateCurrent", latestUpdateCheck), false);
   } else {
     setAboutStatus(updateMessage("updateCheckFailed", latestUpdateCheck), true);
   }
+}
+
+function updateUpdateButtonState(hasUpdate = Boolean(latestUpdateCheck && latestUpdateCheck.has_update)) {
+  if (!els.updateButton) return;
+  const label = els.updateButton.querySelector("[data-update-button-label]");
+  const installable = Boolean(latestUpdateCheck && latestUpdateCheck.installable);
+  const key = updateInstallInProgress ? "installingUpdate" : (hasUpdate && installable ? "installUpdate" : "checkUpdate");
+  if (label) label.textContent = t(key);
+  els.updateButton.disabled = updateInstallInProgress;
 }
 
 function updateNoticeVersion(data = latestUpdateCheck) {
@@ -1644,6 +2000,7 @@ function renderUpdateAvailableMessage(data = {}) {
   const url = data.url || (appInfo && appInfo.urls && appInfo.urls.releases) || "";
   const version = data.latest_version || data.current_version || "-";
   const prefix = t("updateAvailablePrefix");
+  if (data.installable) return updateMessage("updateAvailableInstallable", data);
   if (!url) return updateMessage("updateAvailable", data);
   return `${escapeHtml(prefix)} <a href="${escapeHtml(url)}" data-update-link="true" target="_blank" rel="noopener">${escapeHtml(version)}</a>`;
 }
@@ -1653,6 +2010,174 @@ function updateMessage(key, data = {}) {
     .replace("{version}", data.latest_version || data.current_version || "-")
     .replace("{current}", data.current_version || "-")
     .replace("{error}", data.error || t("unknownError"));
+}
+
+function showUpdateModal() {
+  updateProgressState.visible = true;
+  updateProgressState.background = false;
+  renderUpdateProgress();
+}
+
+function hideUpdateModalToBackground() {
+  if (!updateProgressState.active) {
+    if (els.updateModal) els.updateModal.hidden = true;
+    return;
+  }
+  updateProgressState.visible = false;
+  updateProgressState.background = true;
+  renderUpdateProgress();
+}
+
+function handleUpdateProgressEvent(payload = {}) {
+  const stage = String(payload.stage || "downloading").trim() || "downloading";
+  const terminal = stage === "failed" || stage === "canceled" || stage === "restarting";
+  updateProgressState = {
+    active: stage !== "canceled",
+    background: updateProgressState.background && stage !== "failed" && stage !== "restarting",
+    visible: (updateProgressState.visible || !updateProgressState.background) && stage !== "canceled" && stage !== "restarting",
+    stage,
+    version: String(payload.version || updateProgressState.version || updateNoticeVersion() || ""),
+    downloaded: Number(payload.downloaded || 0),
+    contentLength: payload.content_length === undefined || payload.content_length === null ? updateProgressState.contentLength : Number(payload.content_length),
+    percent: payload.percent === undefined || payload.percent === null ? null : Number(payload.percent),
+    error: String(payload.error || ""),
+  };
+  updateInstallInProgress = !terminal && updateProgressState.active;
+  if (stage === "failed") {
+    updateProgressState.visible = !updateProgressState.background;
+    setAboutStatus(updateMessage("updateInstallFailed", { error: updateProgressState.error || t("unknownError") }), true);
+  } else if (stage === "canceled") {
+    setAboutStatus(t("updateCanceledTask"), false);
+  } else if (stage === "restarting") {
+    setAboutStatus(t("updateInstalledRestarting"), false);
+  } else {
+    setAboutStatus(updateStageLabel(stage), false);
+  }
+  renderUpdateState({ silent: true });
+  renderUpdateProgress();
+}
+
+function renderUpdateProgress() {
+  const state = updateProgressState || {};
+  const stage = state.stage || "idle";
+  const percent = updatePercentValue(state);
+  const percentText = Number.isFinite(percent) ? `${Math.round(percent)}%` : "-";
+  const task = updateStageLabel(stage);
+  const status = updateStageState(stage);
+  const canBackground = Boolean(state.active && !["installing", "failed", "canceled", "restarting"].includes(stage));
+  const canCancel = Boolean(state.active && !["installing", "failed", "canceled", "restarting"].includes(stage));
+  const isFailed = stage === "failed";
+
+  if (els.updateModal) els.updateModal.hidden = !state.visible;
+  if (els.updateModalTitle) els.updateModalTitle.textContent = t(isFailed ? "updateFailedTitle" : "updateDownloadingTitle");
+  if (els.updateModalSubtitle) els.updateModalSubtitle.textContent = t(isFailed ? "updateFailedSubtitle" : "updateDownloadSubtitle");
+  if (els.updateSizeText) els.updateSizeText.textContent = updateSizeText(state);
+  if (els.updatePercentText) els.updatePercentText.textContent = percentText;
+  if (els.updateProgressBar) {
+    els.updateProgressBar.style.width = Number.isFinite(percent) ? `${percent}%` : "0%";
+    els.updateProgressBar.classList.toggle("failed", isFailed);
+  }
+  if (els.updateTaskLabel) els.updateTaskLabel.textContent = task;
+  if (els.updateTaskState) {
+    els.updateTaskState.textContent = status.label;
+    els.updateTaskState.className = `step-state ${status.className}`;
+  }
+  if (els.updateModalBackground) els.updateModalBackground.hidden = !canBackground;
+  if (els.updateCancel) {
+    els.updateCancel.disabled = !canCancel && !isFailed;
+    els.updateCancel.textContent = t(isFailed ? "close" : "cancel");
+  }
+
+  const showBackground = Boolean(state.active && state.background && stage !== "canceled" && stage !== "restarting");
+  if (els.updateBackgroundStatus) els.updateBackgroundStatus.hidden = !showBackground;
+  if (els.updateBackgroundTask) els.updateBackgroundTask.textContent = task;
+  if (els.updateBackgroundPercent) els.updateBackgroundPercent.textContent = percentText;
+  if (els.updateBackgroundBar) {
+    els.updateBackgroundBar.style.width = Number.isFinite(percent) ? `${percent}%` : "0%";
+    els.updateBackgroundBar.classList.toggle("failed", isFailed);
+  }
+}
+
+async function cancelDesktopUpdate() {
+  if (updateProgressState.stage === "failed") {
+    updateProgressState.active = false;
+    updateProgressState.visible = false;
+    updateProgressState.background = false;
+    renderUpdateProgress();
+    renderUpdateState({ silent: true });
+    return;
+  }
+  if (!updateProgressState.active) {
+    if (els.updateModal) els.updateModal.hidden = true;
+    return;
+  }
+  try {
+    await desktopInvoke("desktop_cancel_update");
+  } catch (error) {
+    handleUpdateProgressEvent({
+      stage: "failed",
+      version: updateProgressState.version,
+      downloaded: updateProgressState.downloaded,
+      content_length: updateProgressState.contentLength,
+      error: error && error.message ? error.message : String(error),
+    });
+  }
+}
+
+function updateStageLabel(stage) {
+  const key = {
+    starting: "updateStartingTask",
+    downloading: "updateDownloadTask",
+    verifying: "updateVerifyingTask",
+    installing: "updateInstallingTask",
+    failed: "updateFailedTask",
+    restarting: "updateRestartingTask",
+    canceled: "updateCanceledTask",
+  }[stage] || "updateDownloadTask";
+  return t(key);
+}
+
+function updateStageState(stage) {
+  if (stage === "failed") return { label: t("updateStateFailed"), className: "failed" };
+  if (stage === "canceled") return { label: t("updateStateDone"), className: "done" };
+  if (stage === "restarting" || stage === "installing" || stage === "verifying") {
+    return { label: t("updateStateRunning"), className: "active" };
+  }
+  return { label: t("updateStateRunning"), className: "active" };
+}
+
+function updateSizeText(state) {
+  const downloaded = Number(state.downloaded || 0);
+  const total = Number(state.contentLength || 0);
+  if (total > 0) return `${formatBytes(downloaded)} / ${formatBytes(total)}`;
+  if (downloaded > 0) return formatBytes(downloaded);
+  return t("updateStateWaiting");
+}
+
+function updatePercentValue(state) {
+  const stage = state.stage || "idle";
+  if (stage === "failed") return Number.isFinite(Number(state.percent)) ? Number(state.percent) : 0;
+  if (stage === "verifying" || stage === "installing" || stage === "restarting") return 100;
+  const explicit = Number(state.percent);
+  if (Number.isFinite(explicit)) return Math.max(0, Math.min(100, explicit));
+  const downloaded = Number(state.downloaded || 0);
+  const total = Number(state.contentLength || 0);
+  if (total > 0) return Math.max(0, Math.min(100, (downloaded / total) * 100));
+  return stage === "starting" ? 0 : null;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const digits = unit === 0 || size >= 10 ? 0 : 1;
+  return `${size.toFixed(digits)} ${units[unit]}`;
 }
 
 function renderTools(tools, config) {
@@ -2171,7 +2696,14 @@ function renderUsage(runtime) {
   els.usageCacheHitRate.className = ["usage-metric-value", "selectable", usageCacheToneClass(totalCached, totalMiss)].filter(Boolean).join(" ");
   els.usageAverageMs.textContent = formatDuration(avgMs);
   els.usageTotalCost.textContent = formatCost(totalCostVal);
-  els.usageTotalCost.classList.add("usage-cost-value");
+  els.usageTotalCost.className = ["usage-metric-value", "selectable", "usage-cost-value", usageCostToneClass({
+    billing_buckets: runtime.billing_buckets,
+    rows: billable,
+  })].filter(Boolean).join(" ");
+  els.usageTotalCost.title = usageCostTitle({
+    billing_buckets: runtime.billing_buckets,
+    rows: billable,
+  });
   renderUsageRows(sessions);
   noteSlow("renderUsage", performance.now() - started);
 }
@@ -2279,6 +2811,7 @@ function updateUsageRecord(details, session) {
 
 function renderUsageRecordSummary(summary, session) {
   const totalCost = formatCost(costForSession(session));
+  const costTone = usageCostToneClass(session);
   const cachedTokens = Number(session.cached_input_tokens || 0);
   const missTokens = Number(session.cache_miss_input_tokens || 0);
   const inputTokens = cachedTokens + missTokens;
@@ -2289,7 +2822,7 @@ function renderUsageRecordSummary(summary, session) {
     usageValueCell(formatNumber(inputTokens)),
     usageValueCell(formatNumber(session.output_tokens || 0)),
     usageValueCell(cacheHitRate, usageCacheToneClass(cachedTokens, missTokens)),
-    usageValueCell(totalCost),
+    usageValueCell(totalCost, costTone, usageCostTitle(session)),
   );
 }
 
@@ -2477,11 +3010,11 @@ function usageTitleCell(title, subtitle) {
   return wrap;
 }
 
-function usageValueCell(value, tone) {
+function usageValueCell(value, tone, title) {
   const span = document.createElement("div");
   span.className = ["usage-cell-value", "usage-text-right", tone || ""].filter(Boolean).join(" ");
   span.textContent = value || "-";
-  span.title = span.textContent;
+  span.title = title || span.textContent;
   return span;
 }
 
@@ -2543,7 +3076,12 @@ function usageSegmentRow(segment) {
     usageTraceInputCell(display.inputTotal, display.hit),
     usageTraceCell(display.output, true),
     usageTraceCell(display.cacheHitRate, true),
-    usageTraceCell(display.cost, true, display.cost === "-" ? "" : "cost-val"),
+    usageTraceCell(
+      display.cost,
+      true,
+      display.cost === "-" ? "" : ["cost-val", usageCostToneClass(segment)].filter(Boolean).join(" "),
+      display.cost === "-" ? "" : usageCostTitle(segment),
+    ),
   );
   return row;
 }
@@ -2598,7 +3136,7 @@ function usageTraceInputLine(kind, value) {
   return line;
 }
 
-function usageTraceCell(value, numeric, innerClass) {
+function usageTraceCell(value, numeric, innerClass, title) {
   const cell = document.createElement("div");
   cell.className = ["trace-cell", numeric ? "usage-text-right" : ""].filter(Boolean).join(" ");
   const text = value || "-";
@@ -2606,9 +3144,11 @@ function usageTraceCell(value, numeric, innerClass) {
     const inner = document.createElement("span");
     inner.className = text === "-" ? "dash" : innerClass;
     inner.textContent = text;
+    if (title) inner.title = title;
     cell.appendChild(inner);
   } else {
     cell.textContent = text;
+    if (title) cell.title = title;
   }
   return cell;
 }
@@ -3345,10 +3885,45 @@ function handleAboutAction(action) {
 
 async function handleUpdateCheck() {
   markUpdateNoticeSeen();
+  if (latestUpdateCheck && latestUpdateCheck.has_update && latestUpdateCheck.installable) {
+    return installDesktopUpdate();
+  }
   setAboutStatus(t("checkingUpdate"), false);
   const update = await checkForUpdates();
   renderUpdateState();
   return update;
+}
+
+async function installDesktopUpdate() {
+  if (!isTauriRuntime()) {
+    const url = latestUpdateCheck && (latestUpdateCheck.url || (appInfo && appInfo.urls && appInfo.urls.releases));
+    return openOrExplain(url, updateMessage("updateCheckFailed", latestUpdateCheck || {}));
+  }
+  updateInstallInProgress = true;
+  updateProgressState = {
+    active: true,
+    background: false,
+    visible: true,
+    stage: "starting",
+    version: updateNoticeVersion() || "",
+    downloaded: 0,
+    contentLength: null,
+    percent: 0,
+    error: "",
+  };
+  renderUpdateState();
+  renderUpdateProgress();
+  try {
+    await desktopInvoke("desktop_install_update");
+  } catch (error) {
+    handleUpdateProgressEvent({
+      stage: "failed",
+      version: updateProgressState.version,
+      error: error && error.message ? error.message : String(error),
+    });
+    updateInstallInProgress = false;
+    renderUpdateState({ silent: true });
+  }
 }
 
 function handleAboutStatusClick(event) {
@@ -3479,6 +4054,7 @@ function buildConfigPayload() {
     DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(getRadioValue("DEEPSEEK_TEMPERATURE_PRESET")),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     DEEPSEEK_OFFICIAL_V1_COMPAT: els.deepseekOfficialV1Compat && els.deepseekOfficialV1Compat.checked ? "true" : "false",
+    CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
     SHOW_THINKING: els.showThinking && els.showThinking.checked ? "true" : "false",
@@ -3621,6 +4197,7 @@ function applyLanguage(value) {
   if (latestUsageRuntime) renderUsage(latestUsageRuntime);
   renderCodexAdapter(latestAdapter || {});
   renderUpdateState({ silent: true });
+  renderUpdateProgress();
   updateContextMenuLabels();
   if (currentTools.length > 0) {
     currentToolsSignature = "";
@@ -3870,6 +4447,34 @@ function billingMultiplierForTokens(tokens) {
   const explicit = Number(tokens && (tokens.billing_multiplier || tokens.billingMultiplier));
   if (Number.isFinite(explicit) && explicit > 0) return explicit;
   return isDeepSeekBillingPeakTime(tokens && (tokens.completed_at || tokens.completedAt)) ? BILLING_PEAK_MULTIPLIER : 1;
+}
+
+function usageCostToneClass(source) {
+  if (!source || !currentPeakValleyBillingEnabled()) return "usage-cost-normal";
+  return usageHasPeakBilling(source) ? "usage-cost-peak" : "usage-cost-normal";
+}
+
+function usageCostTitle(source) {
+  if (!source || !currentPeakValleyBillingEnabled()) return "";
+  return usageHasPeakBilling(source) ? t("usagePeakBillingCost") : t("usageOffPeakBillingCost");
+}
+
+function usageHasPeakBilling(source) {
+  if (!source || typeof source !== "object") return false;
+  const buckets = Array.isArray(source.billing_buckets || source.billingBuckets)
+    ? source.billing_buckets || source.billingBuckets
+    : [];
+  if (buckets.some((bucket) => usageHasPeakBilling(bucket))) return true;
+  const rows = Array.isArray(source.rows) ? source.rows : [];
+  if (rows.some((row) => usageHasPeakBilling(row))) return true;
+  const segments = Array.isArray(source.segments) ? source.segments : [];
+  if (segments.some((segment) => usageHasPeakBilling(segment))) return true;
+
+  const period = String(source.billing_period || source.billingPeriod || "").toLowerCase();
+  const multiplier = Number(source.billing_multiplier || source.billingMultiplier || 0);
+  if ((period === "peak" || multiplier > 1) && usageHasTokens(source)) return true;
+
+  return usageHasTokens(source) && isDeepSeekBillingPeakTime(source.completed_at || source.completedAt);
 }
 
 function isDeepSeekBillingPeakTime(timestamp) {

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default desktop permissions for CodeSeeX.",
   "windows": ["main"],
-  "permissions": ["core:default", "autostart:default"]
+  "permissions": ["core:default", "autostart:default", "updater:default"]
 }

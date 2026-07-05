@@ -19,7 +19,6 @@ pub(crate) use budget::{estimate_tokens_from_messages, estimate_tokens_from_text
 use budget::{messages_json_bytes, upstream_context_budget_bytes};
 
 const RECENT_TOOL_FACT_REQUEST_LIMIT: u32 = 200;
-const CODEX_FULL_CONTEXT_LOCAL_ROOT_ITEM_LIMIT: usize = 16;
 
 pub(crate) struct BuiltResponseContext {
     pub(crate) messages: Vec<ChatMessage>,
@@ -40,25 +39,13 @@ struct ResponseHistoryContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexFullContextReplayStrategy {
     NotCodexFullContext,
-    LocalAnchorTail,
     ClientFullReplay,
 }
 
 impl CodexFullContextReplayStrategy {
-    fn select(
-        is_codex_full_context: bool,
-        has_local_anchor: bool,
-        root_full_context_original_input_items: Option<usize>,
-    ) -> Self {
+    fn select(is_codex_full_context: bool) -> Self {
         if !is_codex_full_context {
             return Self::NotCodexFullContext;
-        }
-        if has_local_anchor
-            && root_full_context_original_input_items
-                .map(|items| items <= CODEX_FULL_CONTEXT_LOCAL_ROOT_ITEM_LIMIT)
-                .unwrap_or(true)
-        {
-            return Self::LocalAnchorTail;
         }
         Self::ClientFullReplay
     }
@@ -66,13 +53,8 @@ impl CodexFullContextReplayStrategy {
     fn label(self) -> &'static str {
         match self {
             Self::NotCodexFullContext => "not_codex_full_context",
-            Self::LocalAnchorTail => "local_anchor_tail",
             Self::ClientFullReplay => "client_full_replay",
         }
-    }
-
-    fn uses_local_anchor_tail(self) -> bool {
-        self == Self::LocalAnchorTail
     }
 
     fn uses_client_full_replay(self) -> bool {
@@ -82,7 +64,7 @@ impl CodexFullContextReplayStrategy {
     fn budget_mode(self) -> BudgetMode {
         match self {
             Self::ClientFullReplay => BudgetMode::CodexFullContextReplay,
-            Self::NotCodexFullContext | Self::LocalAnchorTail => BudgetMode::Standard,
+            Self::NotCodexFullContext => BudgetMode::Standard,
         }
     }
 }
@@ -330,20 +312,8 @@ pub(crate) async fn build_response_context(
     let replaying_codex_full_context = request_looks_like_codex_full_context(input);
     let codex_replay_tail_start = replaying_codex_full_context
         .then(|| codex_full_context_relevant_tail_start(&original_current_messages));
-    let replay_strategy = CodexFullContextReplayStrategy::select(
-        replaying_codex_full_context,
-        previous.is_some(),
-        history_context.root_full_context_original_input_items,
-    );
-    let current_messages = if replay_strategy.uses_local_anchor_tail() {
-        let tail_start = codex_replay_tail_start.unwrap_or(0);
-        original_current_messages
-            .get(tail_start..)
-            .unwrap_or_default()
-            .to_vec()
-    } else {
-        original_current_messages.clone()
-    };
+    let replay_strategy = CodexFullContextReplayStrategy::select(replaying_codex_full_context);
+    let current_messages = original_current_messages.clone();
     let current_message_count = current_messages.len();
     let history_messages = if replay_strategy.uses_client_full_replay() {
         filter_history_messages_for_codex_full_context(
@@ -393,8 +363,7 @@ pub(crate) async fn build_response_context(
             "original_current_messages": original_current_message_count,
             "selected_current_messages": current_message_count,
             "tail_start": codex_replay_tail_start,
-            "root_original_input_items": history_context.root_full_context_original_input_items,
-            "local_root_item_limit": CODEX_FULL_CONTEXT_LOCAL_ROOT_ITEM_LIMIT
+            "root_original_input_items": history_context.root_full_context_original_input_items
         },
         "current_input": current_context_diagnostic,
         "current_input_images": current_image_refs.len(),

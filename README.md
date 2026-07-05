@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.5.2" src="https://img.shields.io/badge/version-0.5.2-1f6feb">
+  <img alt="Version 0.5.3" src="https://img.shields.io/badge/version-0.5.3-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.5.2`
+Current version: `0.5.3`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -234,7 +234,7 @@ CodeSeeX does not rewrite Vision endpoint URLs. The request URL you configure is
 
 ## Install And Update
 
-On Windows, use the NSIS `CodeSeeX_*_setup.exe` installer for normal desktop installs and updates. It supports installer language selection, current-user or all-users install mode, and migration from the earlier Electron build by uninstalling the legacy app before installing the Tauri build.
+On Windows, use the NSIS `Windows-CodeSeeX.Setup.*.exe` installer for normal desktop installs and updates. It supports installer language selection, current-user or all-users install mode, and migration from the earlier Electron build by uninstalling the legacy app before installing the Tauri build.
 
 ## Credential Boundary
 

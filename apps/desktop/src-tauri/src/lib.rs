@@ -1,13 +1,15 @@
 use codeseex_core::{
-    AppConfig, TemperaturePreset, UpstreamModelOverride, UserConfig, UserModelConfig, UserUiConfig,
+    AppConfig, NetworkProxyMode, TemperaturePreset, UpstreamModelOverride, UserConfig,
+    UserModelConfig, UserUiConfig,
 };
 use serde_json::{json, Value};
 use std::env;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
@@ -15,12 +17,15 @@ use tauri::{
     WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "codeseex";
 const PRODUCT_NAME: &str = "CodeSeeX";
 const QUIT_FOR_UPDATE_ARG: &str = "--quit-for-update";
+const UPDATE_PROGRESS_EVENT: &str = "codeseex-update-progress";
 const EXIT_PROXY_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Default)]
@@ -30,6 +35,12 @@ struct DesktopRuntime {
     proxy: Mutex<ProxyRuntime>,
     manager: Mutex<Option<codeseex_proxy::ManagerRuntime>>,
 }
+
+#[derive(Default)]
+struct PendingDesktopUpdate(Mutex<Option<Update>>);
+
+#[derive(Default)]
+struct DesktopUpdateTask(Mutex<Option<JoinHandle<()>>>);
 
 #[derive(Debug)]
 struct ProxyRuntime {
@@ -113,6 +124,343 @@ fn desktop_open_external(url: String) -> Result<(), String> {
     open_external_url(url)
 }
 
+#[tauri::command]
+async fn desktop_check_update(
+    app: AppHandle,
+    pending_update: State<'_, PendingDesktopUpdate>,
+) -> Result<Value, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_owned();
+    let update = desktop_updater(&app)?
+        .check()
+        .await
+        .map_err(|error| format!("tauri_updater_check_failed: {error}"))?;
+
+    let Some(update) = update else {
+        *pending_update
+            .0
+            .lock()
+            .map_err(|_| "failed to lock pending update state".to_owned())? = None;
+        return Ok(json!({
+            "ok": true,
+            "has_update": false,
+            "installable": false,
+            "latest_version": current_version,
+            "current_version": current_version,
+            "source": "tauri_updater",
+            "target": tauri_plugin_updater::target()
+        }));
+    };
+
+    let latest_version = update.version.to_string();
+    let update_current_version = update.current_version.to_string();
+    *pending_update
+        .0
+        .lock()
+        .map_err(|_| "failed to lock pending update state".to_owned())? = Some(update);
+
+    Ok(json!({
+        "ok": true,
+        "has_update": true,
+        "installable": true,
+        "latest_version": latest_version,
+        "current_version": if update_current_version.is_empty() {
+            current_version
+        } else {
+            update_current_version
+        },
+        "source": "tauri_updater",
+        "target": tauri_plugin_updater::target()
+    }))
+}
+
+#[tauri::command]
+async fn desktop_install_update(
+    app: AppHandle,
+    pending_update: State<'_, PendingDesktopUpdate>,
+    update_task: State<'_, DesktopUpdateTask>,
+) -> Result<Value, String> {
+    {
+        let mut task = update_task
+            .0
+            .lock()
+            .map_err(|_| "failed to lock update task state".to_owned())?;
+        if task.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            return Ok(json!({
+                "ok": true,
+                "started": false,
+                "running": true
+            }));
+        }
+        if task.as_ref().is_some_and(|handle| handle.is_finished()) {
+            *task = None;
+        }
+    }
+
+    let pending = pending_update
+        .0
+        .lock()
+        .map_err(|_| "failed to lock pending update state".to_owned())?
+        .take();
+    let update = match pending {
+        Some(update) => update,
+        None => desktop_updater(&app)?
+            .check()
+            .await
+            .map_err(|error| format!("tauri_updater_check_failed: {error}"))?
+            .ok_or_else(|| "there is no pending update".to_owned())?,
+    };
+
+    let version = update.version.to_string();
+    let app_for_task = app.clone();
+    emit_update_progress(&app, "starting", &version, 0, None, None);
+    let handle = tokio::spawn(async move {
+        run_desktop_update(app_for_task, update, version).await;
+    });
+    *update_task
+        .0
+        .lock()
+        .map_err(|_| "failed to lock update task state".to_owned())? = Some(handle);
+
+    Ok(json!({
+        "ok": true,
+        "started": true,
+        "running": true
+    }))
+}
+
+#[tauri::command]
+fn desktop_cancel_update(
+    app: AppHandle,
+    update_task: State<'_, DesktopUpdateTask>,
+) -> Result<Value, String> {
+    let handle = update_task
+        .0
+        .lock()
+        .map_err(|_| "failed to lock update task state".to_owned())?
+        .take();
+    if let Some(handle) = handle {
+        if !handle.is_finished() {
+            handle.abort();
+        }
+    }
+    emit_update_progress(&app, "canceled", "", 0, None, None);
+    Ok(json!({
+        "ok": true,
+        "canceled": true
+    }))
+}
+
+async fn run_desktop_update(app: AppHandle, update: Update, version: String) {
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let download_progress = Arc::clone(&downloaded);
+    let finish_progress = Arc::clone(&downloaded);
+    let app_progress = app.clone();
+    let progress_version = version.clone();
+    let app_finish = app.clone();
+    let finish_version = version.clone();
+
+    let bytes = update
+        .download(
+            move |chunk_length, content_length| {
+                let total = download_progress.fetch_add(chunk_length as u64, Ordering::SeqCst)
+                    + chunk_length as u64;
+                emit_update_progress(
+                    &app_progress,
+                    "downloading",
+                    &progress_version,
+                    total,
+                    content_length,
+                    None,
+                );
+            },
+            move || {
+                emit_update_progress(
+                    &app_finish,
+                    "verifying",
+                    &finish_version,
+                    finish_progress.load(Ordering::SeqCst),
+                    None,
+                    None,
+                );
+            },
+        )
+        .await;
+
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            app.state::<DesktopRuntime>()
+                .quitting
+                .store(false, Ordering::SeqCst);
+            emit_update_progress(
+                &app,
+                "failed",
+                &version,
+                downloaded.load(Ordering::SeqCst),
+                None,
+                Some(&error.to_string()),
+            );
+            return;
+        }
+    };
+
+    app.state::<DesktopRuntime>()
+        .quitting
+        .store(true, Ordering::SeqCst);
+    emit_update_progress(
+        &app,
+        "installing",
+        &version,
+        downloaded.load(Ordering::SeqCst),
+        Some(downloaded.load(Ordering::SeqCst)),
+        None,
+    );
+    if let Err(error) = update.install(bytes) {
+        app.state::<DesktopRuntime>()
+            .quitting
+            .store(false, Ordering::SeqCst);
+        emit_update_progress(
+            &app,
+            "failed",
+            &version,
+            downloaded.load(Ordering::SeqCst),
+            None,
+            Some(&error.to_string()),
+        );
+        return;
+    }
+    emit_update_progress(
+        &app,
+        "restarting",
+        &version,
+        downloaded.load(Ordering::SeqCst),
+        Some(downloaded.load(Ordering::SeqCst)),
+        None,
+    );
+    app.restart();
+}
+
+fn emit_update_progress(
+    app: &AppHandle,
+    stage: &str,
+    version: &str,
+    downloaded: u64,
+    content_length: Option<u64>,
+    error: Option<&str>,
+) {
+    let percent = content_length
+        .filter(|value| *value > 0)
+        .map(|value| ((downloaded as f64 / value as f64) * 100.0).clamp(0.0, 100.0));
+    let _ = app.emit(
+        UPDATE_PROGRESS_EVENT,
+        json!({
+            "stage": stage,
+            "version": version,
+            "downloaded": downloaded,
+            "content_length": content_length,
+            "percent": percent,
+            "error": error,
+        }),
+    );
+}
+
+fn desktop_updater<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let config = AppConfig::load();
+    let mut builder = app.updater_builder().timeout(Duration::from_secs(30));
+    match config.network_proxy {
+        NetworkProxyMode::None => {
+            builder = builder.no_proxy();
+        }
+        NetworkProxyMode::System => {
+            if let Some(proxy_url) = desktop_system_proxy_url() {
+                let proxy = proxy_url
+                    .parse()
+                    .map_err(|error| format!("invalid system proxy for updater: {error}"))?;
+                builder = builder.proxy(proxy);
+            }
+        }
+    }
+    builder.build().map_err(string_error)
+}
+
+fn desktop_system_proxy_url() -> Option<String> {
+    env_proxy_url().or_else(windows_internet_settings_proxy_url)
+}
+
+fn env_proxy_url() -> Option<String> {
+    ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find_map(|value| normalize_proxy_server(&value))
+}
+
+#[cfg(windows)]
+fn windows_internet_settings_proxy_url() -> Option<String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = hkcu
+        .open_subkey_with_flags(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            KEY_READ,
+        )
+        .ok()?;
+    let enabled = settings
+        .get_value::<u32, _>("ProxyEnable")
+        .ok()
+        .or_else(|| {
+            settings
+                .get_value::<u64, _>("ProxyEnable")
+                .ok()
+                .and_then(|value| u32::try_from(value).ok())
+        })?;
+    if enabled == 0 {
+        return None;
+    }
+    let server = settings.get_value::<String, _>("ProxyServer").ok()?;
+    normalize_proxy_server(&server)
+}
+
+#[cfg(not(windows))]
+fn windows_internet_settings_proxy_url() -> Option<String> {
+    None
+}
+
+fn normalize_proxy_server(value: &str) -> Option<String> {
+    let selected = select_proxy_server(value)?.trim();
+    if selected.is_empty() {
+        return None;
+    }
+    if selected.contains("://") {
+        return Some(selected.to_owned());
+    }
+    Some(format!("http://{selected}"))
+}
+
+fn select_proxy_server(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.contains('=') {
+        return Some(trimmed);
+    }
+    let entries = trimmed
+        .split(';')
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim()))
+        .collect::<Vec<_>>();
+    for wanted in ["https", "http"] {
+        if let Some((_, value)) = entries.iter().find(|(key, _)| key == wanted) {
+            return Some(*value);
+        }
+    }
+    entries.first().map(|(_, value)| *value)
+}
+
 fn allowed_external_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     lower.starts_with("https://")
@@ -178,6 +526,8 @@ async fn desktop_manager_request(
 pub fn run() {
     tauri::Builder::default()
         .manage(DesktopRuntime::default())
+        .manage(PendingDesktopUpdate::default())
+        .manage(DesktopUpdateTask::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if args.iter().any(|arg| arg == QUIT_FOR_UPDATE_ARG) {
                 request_app_exit(app);
@@ -191,6 +541,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if launched_for_update_quit() {
                 app.handle().exit(0);
@@ -241,6 +592,9 @@ pub fn run() {
             desktop_apply_autostart,
             desktop_refresh_tray,
             desktop_open_external,
+            desktop_check_update,
+            desktop_install_update,
+            desktop_cancel_update,
             desktop_manager_request
         ])
         .build(tauri::generate_context!())

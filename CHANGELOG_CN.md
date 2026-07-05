@@ -1,5 +1,42 @@
 # 更新日志
 
+## 0.5.3 - 2026-07-06
+
+CodeSeeX 0.5.3 是一次发布前稳定性与桌面更新能力增强版本，重点改进 Codex App 集成安全性、catalog 诊断和应用内更新链路。
+
+### 重点更新
+
+- 新增应用内更新流程，支持检查更新、下载进度、取消下载和受支持桌面包的静默安装。
+- 改进 Codex App 切换模型后的上下文连续性，保护 full-context replay 与 prompt cache 会话锚点。
+- 新增 Codex runtime catalog 诊断，帮助用户确认 Codex 是否真的读取了 CodeSeeX 模型目录。
+- 加固发布打包流程，改进 Windows、macOS、Linux 的签名 updater manifest 生成。
+
+### 新增
+
+- 新增桌面更新命令与下载进度事件，用于更新弹窗。
+- 新增实验性 Codex App 模型列表注入开关：默认开启、持久化保存；如果 Codex App 兼容性变化，可以手动关闭。
+- 新增 catalog 路径不一致、模型目录未加载、启动期 catalog 行为等故障排除诊断。
+
+### 改进
+
+- 启动 Codex App 时，只有在实验性开关开启时才尝试渲染端模型列表注入。
+- Codex App 切换模型后的 full-context replay 优先保留客户端 replay 内容，避免短用户历史被裁掉。
+- 更新红点改为应用本次运行内已读，不再对当前版本永久隐藏。
+- 发布 manifest 现在会同时写入 installer 专用 target 与基础 target，提升自动更新兼容性。
+
+### 修复
+
+- 修复 Codex App 切换模型且未发送 `previous_response_id` 时可能出现的缓存/上下文连续性风险。
+- 修复更新安装体验，下载更新时显示后台进度，而不是只跳转到 release 页面。
+- 修复 catalog 故障排除验证时展开区域被折叠的问题。
+- 修复发布工作流可能遗漏 updater 兼容平台条目的问题。
+
+### 兼容说明
+
+- 如果需要确保 catalog 准确，仍建议从 CodeSeeX 桌面端直接复制 TOML。部分 CCS 导入流程可能不会保留 Codex 模型目录。
+- 应用内更新依赖 GitHub release manifest 中的签名 updater 产物。
+- Codex App 模型列表注入仍是实验性功能，可关闭；关闭后不影响 CodeSeeX 代理的正常使用。
+
 ## 0.5.2 - 2026-07-02
 
 CodeSeeX 0.5.2 是一次小版本稳定性与计费显示更新，重点修复长时间 Agent 任务中的工具调用中断问题，并适配 DeepSeek 峰谷计费估算。

@@ -2,265 +2,367 @@
    页面层：控制台控制中心特有样式 (dashboard.css)
    ========================================================================= */
 
-   .balance-total-block { 
-    display: flex; 
-    flex-direction: column; 
-    gap: 8px; 
-    padding: 4px 0 10px; 
+   .balance-total-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px 0 10px;
   }
-  
-  .balance-heading-row { 
-    display: flex; 
-    align-items: center; 
-    justify-content: space-between; 
-    gap: 10px; 
+
+  .balance-heading-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
   }
-  
-  .balance-total-value { 
-    font-size: 34px; 
-    line-height: 1.05; 
-    font-weight: 700; 
-    letter-spacing: 0; 
-    color: var(--text-main); 
-    word-break: break-word; 
-    font-variant-numeric: tabular-nums; 
-    transition: var(--theme-transition); 
+
+  .balance-total-value {
+    font-size: 34px;
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: 0;
+    color: var(--text-main);
+    word-break: break-word;
+    font-variant-numeric: tabular-nums;
+    transition: var(--theme-transition);
   }
-  
-  .balance-actions { 
-    align-self: flex-end; 
-    justify-content: flex-end; 
-    margin-top: auto; 
-    flex-wrap: wrap; 
+
+  .balance-actions {
+    align-self: flex-end;
+    justify-content: flex-end;
+    margin-top: auto;
+    flex-wrap: wrap;
   }
-  
-  .balance-actions .btn { 
-    min-height: 32px; 
-    padding: 7px 11px; 
-    font-size: 12px; 
+
+  .balance-actions .btn {
+    min-height: 32px;
+    padding: 7px 11px;
+    font-size: 12px;
   }
-  
-  .readiness-heading-row { 
-    display: flex; 
-    align-items: center; 
-    justify-content: space-between; 
-    gap: 12px; 
-    margin-bottom: 4px; 
+
+  .readiness-heading-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 4px;
   }
-  
-  .dashboard-troubleshoot-btn { 
-    min-height: 32px; 
-    padding: 7px 11px; 
-    font-size: 12px; 
+
+  .dashboard-troubleshoot-btn {
+    min-height: 32px;
+    padding: 7px 11px;
+    font-size: 12px;
   }
-  
-  .dashboard-panel { 
-    display: flex; 
-    flex-direction: column; 
-    gap: 24px; 
-    width: 100%; 
-    min-height: 0; 
+
+  .dashboard-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    width: 100%;
+    min-height: 0;
   }
-  
+
   /* 核心指标卡网格行：规定标准的 16px 间隙 */
-  .dashboard-metrics-row { 
-    display: grid; 
-    grid-template-columns: repeat(4, 1fr); 
-    gap: 16px; 
-    width: 100%; 
+  .dashboard-metrics-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    width: 100%;
   }
-  
-  .unified-split { 
-    display: grid; 
-    grid-template-columns: 1.1fr 0.9fr; 
-    width: 100%; 
+
+  .unified-split {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    width: 100%;
   }
-  
-  .left-wing { 
-    border-right: 1px solid var(--border-color); 
-    padding-right: 30px; 
-    display: flex; 
-    flex-direction: column; 
-    justify-content: flex-start; 
-    min-height: 230px; 
+
+  .left-wing {
+    border-right: 1px solid var(--border-color);
+    padding-right: 30px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    min-height: 230px;
   }
-  
-  .right-wing { 
-    padding-left: 30px; 
-    display: flex; 
-    flex-direction: column; 
-    justify-content: flex-start; 
-    gap: 18px; 
-    min-height: 230px; 
+
+  .right-wing {
+    padding-left: 30px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 18px;
+    min-height: 230px;
   }
-  
-  .readiness-block { 
-    display: flex; 
-    flex-direction: column; 
-    gap: 6px; 
+
+  .readiness-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
-  
-  .section-kicker { 
-    display: block; 
-    margin-bottom: 0; 
+
+  .section-kicker {
+    display: block;
+    margin-bottom: 0;
   }
-  
-  .readiness-chain { 
-    display: flex; 
-    flex-direction: column; 
-    gap: 0; 
-    width: 100%; 
-    border: 1px solid var(--border-color); 
-    border-radius: var(--radius-sm); 
-    overflow: hidden; 
-    background: var(--bg-panel); 
-    transition: var(--theme-transition); 
+
+  .readiness-chain {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    width: 100%;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--bg-panel);
+    transition: var(--theme-transition);
   }
-  
-  .compact-stage { 
-    background: transparent; 
-    border: 0; 
-    border-bottom: 1px solid var(--border-color); 
-    border-radius: 0; 
-    padding: 8px 10px; 
-    display: flex; 
-    align-items: center; 
-    justify-content: space-between; 
-    gap: 8px; 
-    transition: var(--theme-transition); 
+
+  .compact-stage {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--border-color);
+    border-radius: 0;
+    padding: 8px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    transition: var(--theme-transition);
   }
-  
-  .compact-stage:last-child { 
-    border-bottom: 0; 
+
+  .compact-stage:last-child {
+    border-bottom: 0;
   }
-  
-  .compact-stage:hover { 
-    background: var(--hover-bg); 
+
+  .compact-stage:hover {
+    background: var(--hover-bg);
   }
-  
-  .compact-stage-info { 
-    display: flex; 
-    align-items: center; 
-    gap: 8px; 
+
+  .compact-stage-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
-  
-  .compact-stage .stage-dot { 
-    width: 7px; 
-    height: 7px; 
-    background-color: var(--text-muted); 
-    border-radius: 50%; 
-    display: inline-block; 
-    transition: var(--theme-transition); 
+
+  .compact-stage .stage-dot {
+    width: 7px;
+    height: 7px;
+    background-color: var(--text-muted);
+    border-radius: 50%;
+    display: inline-block;
+    transition: var(--theme-transition);
   }
-  
-  .compact-stage.is-done .stage-dot, 
-  .compact-stage.is-active .stage-dot { 
-    background-color: var(--text-main); 
-    box-shadow: none; 
+
+  .compact-stage.is-done .stage-dot,
+  .compact-stage.is-active .stage-dot {
+    background-color: var(--text-main);
+    box-shadow: none;
   }
-  
-  .compact-stage.is-error .stage-dot { 
-    background-color: var(--danger); 
-    box-shadow: none; 
+
+  .compact-stage.is-error .stage-dot {
+    background-color: var(--danger);
+    box-shadow: none;
   }
-  
-  .compact-stage .stage-name { 
-    font-size: 12px; 
-    font-weight: 500; 
-    color: var(--text-secondary); 
+
+  .compact-stage .stage-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
   }
-  
-  .compact-stage .stage-state { 
-    display: inline-flex; 
-    align-items: center; 
-    justify-content: center; 
-    min-height: 21px; 
-    padding: 0; 
-    border: 0; 
-    border-radius: 0; 
-    background: transparent; 
-    color: var(--text-muted); 
-    font-size: 11px; 
-    font-weight: 700; 
-    line-height: 1.2; 
-    white-space: nowrap; 
-    transition: var(--theme-transition); 
+
+  .compact-stage .stage-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 21px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    transition: var(--theme-transition);
   }
-  
-  .compact-stage.is-done .stage-state, 
-  .compact-stage.is-active .stage-state { 
-    background: transparent; 
-    border-color: transparent; 
-    color: var(--text-secondary); 
+
+  .compact-stage.is-done .stage-state,
+  .compact-stage.is-active .stage-state {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-secondary);
   }
-  
-  .compact-stage.is-error .stage-state { 
-    background: transparent; 
-    border-color: transparent; 
-    color: var(--danger); 
+
+  .compact-stage.is-error .stage-state {
+    background: transparent;
+    border-color: transparent;
+    color: var(--danger);
   }
-  
-  .troubleshoot-card { 
-    width: min(560px, 100%); 
+
+  .troubleshoot-card { width: min(640px, 100%); }
+
+  .troubleshoot-summary { display: grid; gap: 12px; }
+
+  .troubleshoot-overview {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--hover-bg);
   }
-  
-  .troubleshoot-summary { 
-    display: grid; 
-    gap: 8px; 
+
+  .troubleshoot-overview-dot {
+    width: 10px;
+    height: 10px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: var(--text-muted);
   }
-  
-  .troubleshoot-row { 
-    min-width: 0; 
-    display: grid; 
-    grid-template-columns: minmax(120px, 0.4fr) minmax(0, 1fr); 
-    gap: 12px; 
-    align-items: center; 
-    padding: 9px 10px; 
-    border: 1px solid var(--border-color); 
-    border-radius: var(--radius-sm); 
-    background: var(--hover-bg); 
-    transition: var(--theme-transition); 
+
+  .troubleshoot-overview.is-ok .troubleshoot-overview-dot { background: var(--success); }
+  .troubleshoot-overview.is-checking .troubleshoot-overview-dot { background: var(--warn); }
+  .troubleshoot-overview.is-error .troubleshoot-overview-dot { background: var(--danger); }
+
+  .troubleshoot-overview-text {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
   }
-  
-  .troubleshoot-row span { 
-    color: var(--text-muted); 
-    font-size: 12px; 
-    font-weight: 600; 
+
+  .troubleshoot-overview-text strong {
+    color: var(--text-main);
+    font-size: 14px;
+    font-weight: 700;
   }
-  
-  .troubleshoot-row strong { 
-    color: var(--text-main); 
-    font-size: 12px; 
-    font-weight: 600; 
-    text-align: right; 
-    word-break: break-all; 
-    transition: var(--theme-transition); 
+
+  .troubleshoot-overview-text span {
+    color: var(--text-muted);
+    font-size: 12px;
   }
-  
-  .troubleshoot-action-list { 
-    display: grid; 
-    gap: 8px; 
-    margin-top: 12px; 
+
+  .troubleshoot-diagnostic-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
   }
-  
-  .troubleshoot-action { 
-    padding: 9px 10px; 
-    border-left: 2px solid var(--info); 
-    border-radius: var(--radius-sm); 
-    background: var(--bg-panel); 
-    color: var(--text-secondary); 
-    font-size: 12px; 
-    line-height: 1.45; 
-    transition: var(--theme-transition); 
+
+  .troubleshoot-diagnostic-item {
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+    padding: 11px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-panel);
   }
-  
+
+  .troubleshoot-diagnostic-header {
+    display: grid;
+    gap: 4px;
+  }
+
+  .troubleshoot-diagnostic-header span {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .troubleshoot-diagnostic-header strong {
+    color: var(--text-main);
+    font-size: 13px;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+  }
+
+  .troubleshoot-diagnostic-item p {
+    min-height: 32px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .troubleshoot-diagnostic-item.is-ok { border-color: color-mix(in srgb, var(--success) 34%, var(--border-color)); }
+  .troubleshoot-diagnostic-item.is-ok .troubleshoot-diagnostic-header strong { color: var(--success); }
+  .troubleshoot-diagnostic-item.is-warning,
+  .troubleshoot-diagnostic-item.is-repaired,
+  .troubleshoot-diagnostic-item.is-checking { border-color: color-mix(in srgb, var(--warn) 45%, var(--border-color)); }
+  .troubleshoot-diagnostic-item.is-error { border-color: var(--danger); background: var(--danger-bg); }
+
+  .troubleshoot-technical {
+    border-top: 1px solid var(--border-color);
+    padding-top: 2px;
+  }
+
+  .troubleshoot-technical summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 700;
+    list-style-position: inside;
+  }
+
+  .troubleshoot-technical-body {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .troubleshoot-technical-row {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(110px, 0.32fr) minmax(0, 1fr);
+    gap: 10px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .troubleshoot-technical-row:last-child { border-bottom: none; }
+
+  .troubleshoot-technical-row span {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .troubleshoot-technical-row strong {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  .troubleshoot-action-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .troubleshoot-action {
+    padding: 9px 10px;
+    border-left: 2px solid var(--info);
+    border-radius: 0;
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+    transition: var(--theme-transition);
+  }
+
   @media (max-width: 1024px) {
     .dashboard-metrics-row { grid-template-columns: repeat(2, 1fr); }
     .unified-split { grid-template-columns: 1fr; }
     .left-wing { border-right: none; padding-right: 0; padding-bottom: 24px; border-bottom: 1px solid var(--border-color); }
     .right-wing { padding-left: 0; padding-top: 24px; min-height: auto; gap: 16px; }
   }
-  
+
   @media (max-width: 640px) {
     .dashboard-metrics-row { grid-template-columns: 1fr; }
+    .troubleshoot-diagnostic-grid { grid-template-columns: 1fr; }
+    .troubleshoot-technical-row { grid-template-columns: 1fr; }
+    .troubleshoot-technical-row strong { text-align: left; }
   }

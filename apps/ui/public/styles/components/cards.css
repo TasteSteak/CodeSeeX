@@ -41,7 +41,10 @@
     transition: var(--theme-transition);
   }
   
-  /* 预留使用率金额的高亮色规范 */
-  #usageTotalCost.usage-cost-value {
+  #usageTotalCost.usage-cost-normal {
     color: var(--success);
+  }
+
+  #usageTotalCost.usage-cost-peak {
+    color: var(--warn);
   }

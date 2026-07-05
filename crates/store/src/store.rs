@@ -1805,7 +1805,10 @@ fn event_view_category(event: &EventRecord, object: Option<&Map<String, Value>>)
     if event_type.starts_with("request_") || event_type == "service_request_diagnostic" {
         return "request";
     }
-    if event_type.contains("config") || event_type.contains("security") {
+    if event_type.contains("config")
+        || event_type.contains("security")
+        || event_type.starts_with("codex_runtime_catalog")
+    {
         return "security";
     }
     "system"
@@ -1853,6 +1856,14 @@ fn event_title(event: &EventRecord, object: Option<&Map<String, Value>>) -> Stri
         "deepseek_tool_protocol_adapted" => "DeepSeek protocol adapted".to_owned(),
         "deepseek_tool_protocol_blocked" => "DeepSeek protocol blocked".to_owned(),
         "deepseek_tool_protocol_parse_failed" => "DeepSeek protocol parse failed".to_owned(),
+        "codex_app_launch_succeeded" => "Codex App launched".to_owned(),
+        "codex_app_launch_injection_succeeded" => "Codex App injection enabled".to_owned(),
+        "codex_app_launch_injection_warning" => "Codex App injection warning".to_owned(),
+        "codex_app_launch_failed" => "Codex App launch failed".to_owned(),
+        "codex_runtime_catalog_verified" => "Codex runtime catalog verified".to_owned(),
+        "codex_runtime_catalog_warning" => "Codex runtime catalog warning".to_owned(),
+        "codex_runtime_catalog_error" => "Codex runtime catalog error".to_owned(),
+        "codex_runtime_catalog_unavailable" => "Codex runtime catalog unavailable".to_owned(),
         "web_search_source_probe" => "Search source probe".to_owned(),
         _ => {
             let message = event.message.trim();
@@ -1958,6 +1969,45 @@ fn event_summary(event: &EventRecord, object: Option<&Map<String, Value>>) -> St
             .join(" - "),
             MAX_LOG_SUMMARY_CHARS,
         ),
+        "codex_app_launch_succeeded"
+        | "codex_app_launch_injection_succeeded"
+        | "codex_app_launch_injection_warning"
+        | "codex_app_launch_failed" => compact_log_string(
+            &[
+                detail_string(object, "status").map(|value| format!("status={value}")),
+                detail_u64(object, "debug_port").map(|value| format!("debug_port={value}")),
+                detail_bool(object, "injection_enabled").map(|value| format!("injection={value}")),
+                nested_string(object, "injection", "status")
+                    .map(|value| format!("injection_status={value}")),
+                detail_string(object, "message")
+                    .or_else(|| nested_string(object, "injection", "message")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" - "),
+            MAX_LOG_SUMMARY_CHARS,
+        ),
+        "codex_runtime_catalog_verified"
+        | "codex_runtime_catalog_warning"
+        | "codex_runtime_catalog_error"
+        | "codex_runtime_catalog_unavailable" => compact_log_string(
+            &[
+                detail_string(object, "status").map(|value| format!("status={value}")),
+                detail_string(object, "issue").map(|value| format!("issue={value}")),
+                detail_string(object, "path_note").map(|value| format!("path={value}")),
+                nested_string(object, "runtime", "transport")
+                    .map(|value| format!("transport={value}")),
+                nested_string(object, "runtime", "method").map(|value| format!("method={value}")),
+                nested_u64(object, "runtime", "duration_ms")
+                    .map(|value| format!("duration={value}ms")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" - "),
+            MAX_LOG_SUMMARY_CHARS,
+        ),
         "web_search_source_probe" => web_source_summary(object),
         "cost_risk_diagnostic" => compact_log_string(
             &[
@@ -1999,6 +2049,10 @@ fn event_risk_flags(event: &EventRecord, object: Option<&Map<String, Value>>) ->
         }
         "retry_cache_diagnostic" => push_unique_flag(&mut flags, "retry_cache"),
         "client_tool_handoff_guard_diagnostic" => push_unique_flag(&mut flags, "handoff_guard"),
+        "codex_runtime_catalog_error" => push_unique_flag(&mut flags, "catalog_not_loaded"),
+        "codex_runtime_catalog_warning" | "codex_runtime_catalog_unavailable" => {
+            push_unique_flag(&mut flags, "catalog_verification")
+        }
         "apply_patch_input_micro_repair_diagnostic" => {
             push_unique_flag(&mut flags, "patch_micro_repair")
         }
@@ -2156,6 +2210,23 @@ fn nested_u64(object: Option<&Map<String, Value>>, object_key: &str, key: &str) 
         .and_then(Value::as_u64)
 }
 
+fn nested_string(
+    object: Option<&Map<String, Value>>,
+    object_key: &str,
+    key: &str,
+) -> Option<String> {
+    object
+        .and_then(|object| object.get(object_key))
+        .and_then(Value::as_object)
+        .and_then(|nested| nested.get(key))
+        .and_then(|value| match value {
+            Value::String(value) => Some(value.clone()),
+            Value::Number(value) => Some(value.to_string()),
+            Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        })
+}
+
 fn detail_array_strings(object: Option<&Map<String, Value>>, key: &str) -> Option<Vec<String>> {
     let values = object
         .and_then(|object| object.get(key))
@@ -2289,6 +2360,10 @@ fn is_safe_diagnostic_event_type(event_type: &str) -> bool {
             | "tool_exposure_diagnostic"
             | "upstream_usage_chunk_diagnostic"
             | "upstream_call_usage_breakdown"
+            | "codex_runtime_catalog_verified"
+            | "codex_runtime_catalog_warning"
+            | "codex_runtime_catalog_error"
+            | "codex_runtime_catalog_unavailable"
     )
 }
 
@@ -2392,13 +2467,50 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
         "codex_app_inject_succeeded"
         | "codex_app_inject_failed"
         | "codex_app_launch_succeeded"
+        | "codex_app_launch_injection_succeeded"
+        | "codex_app_launch_injection_warning"
         | "codex_app_launch_failed" => {
             copy_log_fields(
                 object,
                 &mut output,
-                &["ok", "status", "error", "debug_port", "message", "attempt"],
+                &[
+                    "ok",
+                    "status",
+                    "error",
+                    "debug_port",
+                    "message",
+                    "attempt",
+                    "injection_enabled",
+                ],
             );
-            copy_structured_log_fields(object, &mut output, &["target", "launch", "models"]);
+            copy_structured_log_fields(
+                object,
+                &mut output,
+                &["target", "launch", "models", "injection"],
+            );
+        }
+        "codex_runtime_catalog_verified"
+        | "codex_runtime_catalog_warning"
+        | "codex_runtime_catalog_error"
+        | "codex_runtime_catalog_unavailable" => {
+            copy_log_fields(object, &mut output, &["status", "issue"]);
+            copy_log_fields(object, &mut output, &["path_note"]);
+            copy_safe_diagnostic_fields(
+                object,
+                &mut output,
+                &[(
+                    "runtime",
+                    &[
+                        "status",
+                        "issue",
+                        "method",
+                        "transport",
+                        "duration_ms",
+                        "startup_only_catalog",
+                        "proves_current_open_window",
+                    ][..],
+                )],
+            );
         }
         "service_request_diagnostic" => {
             copy_log_fields(

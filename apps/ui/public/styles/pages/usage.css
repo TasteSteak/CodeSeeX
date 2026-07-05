@@ -198,6 +198,8 @@
   .usage-cache-mid { color: #f59e0b; font-weight: 600; }
   .usage-cache-low { color: #ef4444; font-weight: 600; }
   .usage-cache-none { color: var(--text-main); }
+  .usage-cell-value.usage-cost-normal { color: var(--success); font-weight: 650; }
+  .usage-cell-value.usage-cost-peak { color: var(--warn); font-weight: 650; }
   
   /* 展开层对话历史嵌套审计链路 UI 紧凑精修 */
   .usage-trace-pure-container {
@@ -346,6 +348,8 @@
   }
   
   .cost-val { color: var(--text-main); font-weight: 600; }
+  .cost-val.usage-cost-normal { color: var(--success); }
+  .cost-val.usage-cost-peak { color: var(--warn); }
   .dash { color: var(--text-muted); }
   
   @media (max-width: 1024px) {

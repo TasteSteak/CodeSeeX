@@ -5,7 +5,7 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use codeseex_core::AppConfig;
+use codeseex_core::{AppConfig, UserConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -71,6 +71,10 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route(
             "/api/codex-adapter/generate",
             post(generate_adapter).get(generate_adapter),
+        )
+        .route(
+            "/api/codex-adapter/runtime",
+            post(verify_codex_runtime).get(verify_codex_runtime),
         );
     router
 }
@@ -248,17 +252,46 @@ async fn launch_codex_app_with_model_catalog(
 ) -> axum::response::Response {
     let debug_port = debug_port_from_values(query.as_ref(), body.as_ref())
         .unwrap_or_else(crate::codex_app::default_debug_port);
-    let catalog = crate::codex_app::codex_model_catalog_value(&state.active_config());
-    match crate::codex_app::launch_and_inject_model_catalog(debug_port, catalog).await {
+    let config = state.active_config();
+    let inject = codex_app_launch_injection_enabled(query.as_ref(), body.as_ref(), &config);
+    let result = if inject {
+        let catalog = crate::codex_app::codex_model_catalog_value(&config);
+        crate::codex_app::launch_with_model_catalog_injection(debug_port, catalog).await
+    } else {
+        crate::codex_app::launch_app(debug_port)
+    };
+    match result {
         Ok(value) => {
-            let _ = state
-                .store
-                .record_event(
+            let injection_enabled = value
+                .pointer("/injection/enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let injection_ok = value
+                .pointer("/injection/ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let (level, event_type, message) = if injection_enabled && !injection_ok {
+                (
+                    "warn",
+                    "codex_app_launch_injection_warning",
+                    "Codex App launched, but experimental renderer model-list injection did not complete.",
+                )
+            } else if injection_enabled {
+                (
+                    "info",
+                    "codex_app_launch_injection_succeeded",
+                    "Codex App launched and experimental renderer model-list injection succeeded.",
+                )
+            } else {
+                (
                     "info",
                     "codex_app_launch_succeeded",
-                    "Codex App launched and renderer model catalog injection succeeded.",
-                    Some(&value),
+                    "Codex App launch requested.",
                 )
+            };
+            let _ = state
+                .store
+                .record_event(level, event_type, message, Some(&value))
                 .await;
             (StatusCode::OK, Json(value)).into_response()
         }
@@ -267,6 +300,7 @@ async fn launch_codex_app_with_model_catalog(
                 "ok": false,
                 "error": "codex_app_launch_failed",
                 "debug_port": debug_port,
+                "injection_enabled": inject,
                 "message": error.to_string()
             });
             let _ = state
@@ -274,13 +308,58 @@ async fn launch_codex_app_with_model_catalog(
                 .record_event(
                     "error",
                     "codex_app_launch_failed",
-                    "Codex App launch with renderer model catalog injection failed.",
+                    "Codex App launch failed.",
                     Some(&response),
                 )
                 .await;
             (StatusCode::BAD_GATEWAY, Json(response)).into_response()
         }
     }
+}
+
+async fn verify_codex_runtime(State(state): State<ProxyState>) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/codex-adapter/runtime", None, None)
+            .await,
+    )
+}
+
+fn codex_app_launch_injection_enabled(
+    query: Option<&Value>,
+    body: Option<&Value>,
+    config: &AppConfig,
+) -> bool {
+    bool_from_values(query, body, "inject")
+        .or_else(|| bool_from_values(query, body, "model_list_injection"))
+        .or_else(|| bool_from_values(query, body, "CODEX_APP_MODEL_LIST_INJECTION"))
+        .unwrap_or_else(|| {
+            UserConfig::read_from(&config.config_path())
+                .ok()
+                .and_then(|user_config| user_config.ui)
+                .and_then(|ui| ui.codex_app_model_list_injection)
+                .unwrap_or(true)
+        })
+}
+
+fn bool_from_values(query: Option<&Value>, body: Option<&Value>, key: &str) -> Option<bool> {
+    body.and_then(|value| bool_from_value(value, key))
+        .or_else(|| query.and_then(|value| bool_from_value(value, key)))
+}
+
+fn bool_from_value(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(|value| {
+        value.as_bool().or_else(|| {
+            value.as_str().and_then(|text| {
+                let normalized = text.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "1" | "true" | "yes" | "on" | "enabled" => Some(true),
+                    "0" | "false" | "no" | "off" | "disabled" => Some(false),
+                    _ => None,
+                }
+            })
+        })
+    })
 }
 
 fn debug_port_from_values(query: Option<&Value>, body: Option<&Value>) -> Option<u16> {

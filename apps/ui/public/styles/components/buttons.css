@@ -14,6 +14,7 @@
 .btn-icon-import { -webkit-mask: url("/assets/icons/import.svg") center / contain no-repeat; mask: url("/assets/icons/import.svg") center / contain no-repeat; }
 .btn-icon-heartbeat { -webkit-mask: url("/assets/icons/heartbeat.svg") center / contain no-repeat; mask: url("/assets/icons/heartbeat.svg") center / contain no-repeat; }
 .btn-icon-link { -webkit-mask: url("/assets/icons/link.svg") center / contain no-repeat; mask: url("/assets/icons/link.svg") center / contain no-repeat; }
+.btn-icon-update { -webkit-mask: url("/assets/icons/update.svg") center / contain no-repeat; mask: url("/assets/icons/update.svg") center / contain no-repeat; }
 
 .update-button { position: relative; }
 .update-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--danger); display: inline-block; flex: none; }

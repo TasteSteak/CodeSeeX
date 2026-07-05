@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["TasteSteak and CodeSeeX contributors"]
@@ -32,6 +32,7 @@ sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time", "process", "io-util"] }
 tokio-tungstenite = "0.24"

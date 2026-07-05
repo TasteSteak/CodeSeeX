@@ -51,6 +51,7 @@ pub(crate) fn user_config_from_payload(
         || payload.get("UI_LANGUAGE").is_some()
         || payload.get("SHOW_THINKING").is_some()
         || payload.get("AUTO_START").is_some()
+        || payload.get("CODEX_APP_MODEL_LIST_INJECTION").is_some()
         || payload.get("UI_CLOSE_BEHAVIOR").is_some()
         || payload.get("LOG_RETENTION_DAYS").is_some()
     {
@@ -66,6 +67,10 @@ pub(crate) fn user_config_from_payload(
         }
         if payload.get("AUTO_START").is_some() {
             ui.auto_start = value_bool(payload, "AUTO_START");
+        }
+        if payload.get("CODEX_APP_MODEL_LIST_INJECTION").is_some() {
+            ui.codex_app_model_list_injection =
+                value_bool(payload, "CODEX_APP_MODEL_LIST_INJECTION");
         }
         if payload.get("UI_CLOSE_BEHAVIOR").is_some() {
             ui.close_behavior = value_string(payload, "UI_CLOSE_BEHAVIOR");
@@ -576,6 +581,23 @@ mod tests {
                 .as_ref()
                 .and_then(|billing| billing.peak_valley_enabled),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn payload_persists_codex_app_model_list_injection_flag() {
+        let config = user_config_from_payload(
+            &json!({ "CODEX_APP_MODEL_LIST_INJECTION": "true" }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+
+        assert_eq!(
+            config
+                .ui
+                .as_ref()
+                .and_then(|ui| ui.codex_app_model_list_injection),
+            Some(true)
         );
     }
 

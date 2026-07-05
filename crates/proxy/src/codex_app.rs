@@ -5,14 +5,20 @@ use codeseex_core::models::MODEL_PRO;
 use codeseex_core::AppConfig;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, Command as TokioCommand};
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_CODEX_DEBUG_PORT: u16 = 9222;
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
+const CODEX_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(8);
+const CODEX_RUNTIME_RPC_TIMEOUT: Duration = Duration::from_secs(8);
+const CODEX_RUNTIME_HTTP_TIMEOUT: Duration = Duration::from_millis(700);
 const CODEX_LAUNCH_INJECT_ATTEMPTS: usize = 60;
 const CODEX_LAUNCH_INJECT_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_PACKAGE_IDENTITIES: &[&str] = &["OpenAI.Codex", "OpenAI.CodexBeta"];
@@ -138,6 +144,738 @@ pub(crate) fn codex_model_catalog_value(config: &AppConfig) -> Value {
         },
         "appServer": app_server
     })
+}
+
+pub(crate) async fn verify_runtime_catalog(config: &AppConfig) -> Value {
+    let started = Instant::now();
+    let catalog = codex_model_catalog_value(config);
+    let expected_models = catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let expected_path = config.catalog_path();
+
+    match run_codex_runtime_probe(&expected_path, &expected_models).await {
+        Ok(probe) => runtime_catalog_diagnostic_from_probe(
+            &expected_path,
+            &expected_models,
+            probe,
+            started.elapsed(),
+        ),
+        Err(error) => json!({
+            "status": "unavailable",
+            "issue": "app_server_unavailable",
+            "method": "codex_app_server",
+            "message": compact_message(&error.to_string(), 500),
+            "expected_catalog_path": expected_path.to_string_lossy(),
+            "expected_models": expected_models,
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "startup_only_catalog": true,
+            "proves_current_open_window": false
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct CodexRuntimeProbe {
+    cli_path: String,
+    transport: String,
+    port: Option<u16>,
+    config_model: Option<String>,
+    config_model_provider: Option<String>,
+    config_catalog_path: Option<String>,
+    layers: Vec<Value>,
+    runtime_models: Vec<String>,
+    config_warnings: Vec<Value>,
+}
+
+async fn run_codex_runtime_probe(
+    expected_path: &std::path::Path,
+    expected_models: &[String],
+) -> anyhow::Result<CodexRuntimeProbe> {
+    let cli = find_codex_cli()
+        .ok_or_else(|| anyhow::anyhow!("Codex CLI was not found on PATH or in npm globals"))?;
+    match probe_codex_app_server_stdio(&cli, expected_path, expected_models).await {
+        Ok(probe) => return Ok(probe),
+        Err(stdio_error) => {
+            let port = free_loopback_port()?;
+            let mut child = spawn_codex_app_server_ws(&cli, port).await?;
+            let result = async {
+                wait_codex_app_server_ready(port, &mut child).await?;
+                probe_codex_app_server_ws(port, &cli, expected_path, expected_models).await
+            }
+            .await;
+            terminate_codex_app_server(&mut child).await;
+            return result.map_err(|ws_error| {
+                anyhow::anyhow!(
+                    "Codex app-server verification failed over stdio and websocket. stdio: {stdio_error}; websocket: {ws_error}"
+                )
+            });
+        }
+    }
+}
+
+async fn probe_codex_app_server_stdio(
+    cli: &std::path::Path,
+    expected_path: &std::path::Path,
+    _expected_models: &[String],
+) -> anyhow::Result<CodexRuntimeProbe> {
+    let mut child = spawn_codex_app_server_stdio(cli).await?;
+    let result = async {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Codex app-server stdio stdin was unavailable"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Codex app-server stdio stdout was unavailable"))?;
+        let mut lines = BufReader::new(stdout).lines();
+        let mut warnings = Vec::new();
+
+        app_server_stdio_request(
+            &mut stdin,
+            &mut lines,
+            1,
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "codeseex-catalog-probe",
+                    "title": "CodeSeeX Catalog Probe",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true
+                }
+            }),
+            &mut warnings,
+        )
+        .await?;
+        app_server_stdio_notification(&mut stdin, "initialized").await?;
+        let config_result = app_server_stdio_request(
+            &mut stdin,
+            &mut lines,
+            2,
+            "config/read",
+            json!({
+                "cwd": std::env::current_dir()
+                    .unwrap_or_else(|_| expected_path.parent().unwrap_or(expected_path).to_path_buf())
+                    .to_string_lossy(),
+                "includeLayers": true
+            }),
+            &mut warnings,
+        )
+        .await?;
+        let model_list_result = app_server_stdio_request(
+            &mut stdin,
+            &mut lines,
+            3,
+            "model/list",
+            json!({
+                "includeHidden": true,
+                "limit": 500
+            }),
+            &mut warnings,
+        )
+        .await?;
+
+        Ok(CodexRuntimeProbe {
+            cli_path: cli.to_string_lossy().into_owned(),
+            transport: "stdio".to_owned(),
+            port: None,
+            config_model: nested_string(&config_result, &["config", "model"]),
+            config_model_provider: nested_string(&config_result, &["config", "model_provider"]),
+            config_catalog_path: nested_string(&config_result, &["config", "model_catalog_json"]),
+            layers: runtime_config_layer_summaries(&config_result),
+            runtime_models: runtime_model_names(&model_list_result),
+            config_warnings: warnings,
+        })
+    }
+    .await;
+    terminate_codex_app_server(&mut child).await;
+    result
+}
+
+async fn app_server_stdio_notification(
+    stdin: &mut tokio::process::ChildStdin,
+    method: &str,
+) -> anyhow::Result<()> {
+    stdin
+        .write_all(format!("{}\n", json!({ "method": method })).as_bytes())
+        .await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+async fn app_server_stdio_request(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    method: &str,
+    params: Value,
+    warnings: &mut Vec<Value>,
+) -> anyhow::Result<Value> {
+    stdin
+        .write_all(
+            format!(
+                "{}\n",
+                json!({
+                    "id": id,
+                    "method": method,
+                    "params": params
+                })
+            )
+            .as_bytes(),
+        )
+        .await?;
+    stdin.flush().await?;
+    tokio::time::timeout(
+        CODEX_RUNTIME_RPC_TIMEOUT,
+        wait_app_server_stdio_response(lines, id, method, warnings),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Codex app-server stdio {method} timed out"))?
+}
+
+async fn wait_app_server_stdio_response(
+    lines: &mut Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    method: &str,
+    warnings: &mut Vec<Value>,
+) -> anyhow::Result<Value> {
+    while let Some(line) = lines.next_line().await? {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)?;
+        collect_config_warning(&value, warnings);
+        if value.get("id").and_then(Value::as_u64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("Codex app-server stdio {method} failed: {error}");
+        }
+        return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+    }
+    anyhow::bail!("Codex app-server stdio ended before {method} response")
+}
+
+async fn spawn_codex_app_server_stdio(cli: &std::path::Path) -> anyhow::Result<Child> {
+    let mut command = codex_app_server_command(cli, "stdio://");
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    }
+    command.spawn().map_err(Into::into)
+}
+
+async fn spawn_codex_app_server_ws(cli: &std::path::Path, port: u16) -> anyhow::Result<Child> {
+    let listen = format!("ws://127.0.0.1:{port}");
+    let mut command = codex_app_server_command(cli, &listen);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    }
+    command.spawn().map_err(Into::into)
+}
+
+fn codex_app_server_command(cli: &std::path::Path, listen: &str) -> TokioCommand {
+    if cli
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("js"))
+        .unwrap_or(false)
+    {
+        let mut command = TokioCommand::new(node_executable_for_codex_script(cli));
+        command
+            .arg(cli)
+            .arg("app-server")
+            .arg("--listen")
+            .arg(listen);
+        return command;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if cli
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("ps1"))
+            .unwrap_or(false)
+        {
+            let mut command = TokioCommand::new("powershell");
+            command
+                .arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(cli)
+                .arg("app-server")
+                .arg("--listen")
+                .arg(listen);
+            return command;
+        }
+        let script = windows_command_line_arguments(&[
+            cli.to_string_lossy().into_owned(),
+            "app-server".to_owned(),
+            "--listen".to_owned(),
+            listen.to_owned(),
+        ]);
+        let mut command = TokioCommand::new("cmd");
+        command.args(["/D", "/C", &format!("call {script}")]);
+        return command;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut command = TokioCommand::new(cli);
+        command.args(["app-server", "--listen", listen]);
+        command
+    }
+}
+
+fn node_executable_for_codex_script(script: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(npm_dir) = script.ancestors().find(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| name.eq_ignore_ascii_case("npm"))
+                .unwrap_or(false)
+        }) {
+            let node = npm_dir.join("node.exe");
+            if node.is_file() {
+                return node;
+            }
+        }
+    }
+    PathBuf::from("node")
+}
+
+async fn probe_codex_app_server_ws(
+    port: u16,
+    cli: &std::path::Path,
+    expected_path: &std::path::Path,
+    _expected_models: &[String],
+) -> anyhow::Result<CodexRuntimeProbe> {
+    let url = format!("ws://127.0.0.1:{port}");
+    let (mut socket, _) = tokio::time::timeout(
+        CODEX_RUNTIME_RPC_TIMEOUT,
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Codex app-server websocket connect timed out"))??;
+    let mut warnings = Vec::new();
+
+    app_server_request(
+        &mut socket,
+        1,
+        "initialize",
+        json!({
+            "clientInfo": {
+                "name": "codeseex-catalog-probe",
+                "title": "CodeSeeX Catalog Probe",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {
+                "experimentalApi": true
+            }
+        }),
+        &mut warnings,
+    )
+    .await?;
+    app_server_notification(&mut socket, "initialized").await?;
+    let config_result = app_server_request(
+        &mut socket,
+        2,
+        "config/read",
+        json!({
+            "cwd": std::env::current_dir()
+                .unwrap_or_else(|_| expected_path.parent().unwrap_or(expected_path).to_path_buf())
+                .to_string_lossy(),
+            "includeLayers": true
+        }),
+        &mut warnings,
+    )
+    .await?;
+    let model_list_result = app_server_request(
+        &mut socket,
+        3,
+        "model/list",
+        json!({
+            "includeHidden": true,
+            "limit": 500
+        }),
+        &mut warnings,
+    )
+    .await?;
+    let _ = socket.close(None).await;
+
+    Ok(CodexRuntimeProbe {
+        cli_path: cli.to_string_lossy().into_owned(),
+        transport: "websocket".to_owned(),
+        port: Some(port),
+        config_model: nested_string(&config_result, &["config", "model"]),
+        config_model_provider: nested_string(&config_result, &["config", "model_provider"]),
+        config_catalog_path: nested_string(&config_result, &["config", "model_catalog_json"]),
+        layers: runtime_config_layer_summaries(&config_result),
+        runtime_models: runtime_model_names(&model_list_result),
+        config_warnings: warnings,
+    })
+}
+
+fn runtime_catalog_diagnostic_from_probe(
+    expected_path: &std::path::Path,
+    expected_models: &[String],
+    probe: CodexRuntimeProbe,
+    elapsed: Duration,
+) -> Value {
+    let catalog_path_matches = probe
+        .config_catalog_path
+        .as_deref()
+        .map(|path| paths_match(path, expected_path))
+        .unwrap_or(false);
+    let runtime_model_set = probe
+        .runtime_models
+        .iter()
+        .map(|model| model.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing_models = expected_models
+        .iter()
+        .filter(|model| !runtime_model_set.contains(model.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let model_list_verified = missing_models.is_empty();
+    let (status, issue) = if !model_list_verified {
+        ("error", "runtime_model_list_missing_catalog_models")
+    } else {
+        ("ok", "none")
+    };
+    let path_note =
+        if model_list_verified && !catalog_path_matches && probe.config_catalog_path.is_some() {
+            Some("runtime_catalog_path_differs")
+        } else {
+            None
+        };
+
+    json!({
+        "status": status,
+        "issue": issue,
+        "path_note": path_note,
+        "method": "codex_app_server",
+        "transport": probe.transport,
+        "cli_path": probe.cli_path,
+        "port": probe.port,
+        "config": {
+            "model": probe.config_model,
+            "model_provider": probe.config_model_provider,
+            "model_catalog_json": probe.config_catalog_path,
+            "catalog_path_matches": catalog_path_matches,
+            "layers": probe.layers
+        },
+        "model_list": {
+            "verified": model_list_verified,
+            "model_count": probe.runtime_models.len(),
+            "models": probe.runtime_models,
+            "expected_models": expected_models,
+            "missing_expected_models": missing_models
+        },
+        "config_warnings": probe.config_warnings,
+        "duration_ms": elapsed.as_millis() as u64,
+        "startup_only_catalog": true,
+        "proves_current_open_window": false
+    })
+}
+
+async fn app_server_notification(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    method: &str,
+) -> anyhow::Result<()> {
+    socket
+        .send(Message::Text(json!({ "method": method }).to_string()))
+        .await?;
+    Ok(())
+}
+
+async fn app_server_request(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    method: &str,
+    params: Value,
+    warnings: &mut Vec<Value>,
+) -> anyhow::Result<Value> {
+    socket
+        .send(Message::Text(
+            json!({
+                "id": id,
+                "method": method,
+                "params": params
+            })
+            .to_string(),
+        ))
+        .await?;
+
+    tokio::time::timeout(
+        CODEX_RUNTIME_RPC_TIMEOUT,
+        wait_app_server_response(socket, id, method, warnings),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Codex app-server {method} timed out"))?
+}
+
+async fn wait_app_server_response(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    method: &str,
+    warnings: &mut Vec<Value>,
+) -> anyhow::Result<Value> {
+    while let Some(message) = socket.next().await {
+        let message = message?;
+        let text = match message {
+            Message::Text(text) => text,
+            Message::Binary(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => {
+                anyhow::bail!("Codex app-server websocket closed before {method} response")
+            }
+            Message::Frame(_) => continue,
+        };
+        let value: Value = serde_json::from_str(&text)?;
+        collect_config_warning(&value, warnings);
+        if value.get("id").and_then(Value::as_u64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("Codex app-server {method} failed: {error}");
+        }
+        return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+    }
+    anyhow::bail!("Codex app-server websocket ended before {method} response")
+}
+
+fn collect_config_warning(value: &Value, warnings: &mut Vec<Value>) {
+    if value.get("method").and_then(Value::as_str) != Some("configWarning") {
+        return;
+    }
+    let params = value.get("params").unwrap_or(&Value::Null);
+    warnings.push(json!({
+        "summary": nested_string(params, &["summary"]).map(|value| compact_message(&value, 240)),
+        "details": nested_string(params, &["details"]).map(|value| compact_message(&value, 360)),
+        "path": nested_string(params, &["path"]).map(|value| compact_message(&value, 260))
+    }));
+}
+
+fn runtime_config_layer_summaries(config_result: &Value) -> Vec<Value> {
+    config_result
+        .get("layers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|layer| {
+            json!({
+                "name": layer.get("name").cloned().unwrap_or(Value::Null),
+                "version": layer.get("version").cloned().unwrap_or(Value::Null),
+                "has_model_catalog_json": layer
+                    .get("config")
+                    .and_then(|config| config.get("model_catalog_json"))
+                    .is_some(),
+                "model_catalog_json": nested_string(layer, &["config", "model_catalog_json"])
+            })
+        })
+        .collect()
+}
+
+fn runtime_model_names(model_list_result: &Value) -> Vec<String> {
+    let mut names = Vec::<String>::new();
+    if let Some(items) = model_list_result.get("data").and_then(Value::as_array) {
+        for item in items {
+            let Some(name) = item
+                .get("model")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if !names.iter().any(|existing| existing == name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+fn nested_string(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn compact_message(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    compact
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>()
+        + "..."
+}
+
+fn paths_match(candidate: &str, expected: &std::path::Path) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let candidate_path = std::path::PathBuf::from(candidate);
+    if candidate_path == expected {
+        return true;
+    }
+    let candidate_text = normalize_path_for_compare(&candidate_path);
+    let expected_text = normalize_path_for_compare(expected);
+    !candidate_text.is_empty() && candidate_text == expected_text
+}
+
+fn normalize_path_for_compare(path: &std::path::Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut text = canonical.to_string_lossy().replace('\\', "/");
+    while text.contains("//") {
+        text = text.replace("//", "/");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        text = text.to_ascii_lowercase();
+    }
+    text.trim_end_matches('/').to_owned()
+}
+
+fn free_loopback_port() -> anyhow::Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+async fn wait_codex_app_server_ready(port: u16, child: &mut Child) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(CODEX_RUNTIME_HTTP_TIMEOUT)
+        .build()?;
+    let deadline = Instant::now() + CODEX_RUNTIME_READY_TIMEOUT;
+    let url = format!("http://127.0.0.1:{port}/readyz");
+    let mut last_error = "not ready yet".to_owned();
+    loop {
+        if Instant::now() >= deadline {
+            anyhow::bail!("Codex app-server did not become ready on {url}: {last_error}");
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("Codex app-server exited before ready: {status}");
+        }
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => last_error = format!("readyz returned {}", response.status()),
+            Err(error) => last_error = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn terminate_codex_app_server(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = child.id() {
+        let _ = TokioCommand::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .await;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+fn find_codex_cli() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for key in ["CODESEEX_CODEX_CLI", "CODEX_CLI", "CODEX_BIN"] {
+        if let Some(path) = std::env::var_os(key).map(PathBuf::from) {
+            candidates.push(path);
+        }
+    }
+    append_codex_cli_platform_candidates(&mut candidates);
+    dedup_paths_preserve_order(&mut candidates);
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn append_codex_cli_platform_candidates(candidates: &mut Vec<PathBuf>) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            candidates.push(
+                appdata
+                    .join("npm")
+                    .join("node_modules")
+                    .join("@openai")
+                    .join("codex")
+                    .join("bin")
+                    .join("codex.js"),
+            );
+            candidates.push(appdata.join("npm").join("codex.cmd"));
+            candidates.push(appdata.join("npm").join("codex.exe"));
+            candidates.push(appdata.join("npm").join("codex.ps1"));
+        }
+        for dir in std::env::var_os("PATH")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            candidates.push(dir.join("codex.cmd"));
+            candidates.push(dir.join("codex.exe"));
+            candidates.push(dir.join("codex.bat"));
+            candidates.push(dir.join("codex.ps1"));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(home) = dirs_next::home_dir() {
+            candidates.push(home.join(".local").join("bin").join("codex"));
+        }
+        candidates.push(PathBuf::from("/usr/local/bin/codex"));
+        candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+        candidates.push(PathBuf::from("/usr/bin/codex"));
+        for dir in std::env::var_os("PATH")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default()
+        {
+            candidates.push(dir.join("codex"));
+        }
+    }
 }
 
 pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
@@ -626,11 +1364,22 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
       const module = await loadCodexAppModule("use-host-config:request-bridge", resolveHostConfigModuleUrl);
       diagnostic.moduleLoaded = !!module;
       diagnostic.exportKeys = Object.keys(module || {}).slice(0, 30);
-      const requestBridge = module && module.Vt;
+      let requestBridge = module && module.Vt;
+      let exportName = requestBridge ? "Vt" : "";
+      if (!requestBridge && module && typeof module === "object") {
+        for (const [key, value] of Object.entries(module)) {
+          if (value && typeof value === "object" && typeof value.sendRequest === "function") {
+            requestBridge = value;
+            exportName = key;
+            break;
+          }
+        }
+      }
+      diagnostic.exportName = exportName;
       diagnostic.exportFound = !!requestBridge;
       diagnostic.hasSendRequest = !!(requestBridge && typeof requestBridge.sendRequest === "function");
       if (!requestBridge || typeof requestBridge.sendRequest !== "function") {
-        throw new Error("Codex App use-host-config request bridge export Vt.sendRequest not found");
+        throw new Error("Codex App use-host-config request bridge sendRequest export not found");
       }
       diagnostic.installed = patchAppServerClient(requestBridge);
       diagnostic.patchVersion = requestBridge.__codeseexModelRequestPatch || null;
@@ -866,63 +1615,204 @@ pub(crate) async fn inject_model_catalog(debug_port: u16, catalog: Value) -> any
     }))
 }
 
-pub(crate) async fn launch_and_inject_model_catalog(
+pub(crate) fn launch_app(debug_port: u16) -> anyhow::Result<Value> {
+    let launch = launch_codex_app(debug_port)?;
+    Ok(json!({
+        "ok": true,
+        "status": "launched",
+        "debug_port": debug_port,
+        "launch": launch,
+        "injection": {
+            "enabled": false,
+            "ok": false,
+            "status": "disabled"
+        }
+    }))
+}
+
+pub(crate) async fn launch_with_model_catalog_injection(
     debug_port: u16,
     catalog: Value,
 ) -> anyhow::Result<Value> {
-    match inject_model_catalog(debug_port, catalog.clone()).await {
-        Ok(mut injected) => {
-            if let Some(object) = injected.as_object_mut() {
-                object.insert(
-                    "launch".to_owned(),
-                    json!({ "mode": "existing_debug_port" }),
-                );
-                object.insert("attempt".to_owned(), json!(0));
-            }
-            return Ok(injected);
-        }
-        Err(initial_error) => {
-            let running = running_codex_processes();
-            if !running.is_empty() {
-                anyhow::bail!(
-                    "Codex is already running but remote debugging is not available on port {debug_port}. Fully quit Codex, including background processes, then launch it from CodeSeeX. Running processes: {}. Initial CDP check: {initial_error}",
-                    codex_process_summary(&running)
-                );
-            }
-        }
-    }
+    let mut launch = None;
+    let mut first_error = None;
+    let mut last_message = None;
+    let mut last_status = None;
+    let mut last_target = None;
+    let mut last_models = None;
+    let mut last_renderer_probe = None;
+    let mut running_processes = None;
 
-    let launch = launch_codex_app(debug_port)?;
-    let mut last_error = None;
     for attempt in 0..CODEX_LAUNCH_INJECT_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(CODEX_LAUNCH_INJECT_INTERVAL).await;
         }
+
         match inject_model_catalog(debug_port, catalog.clone()).await {
-            Ok(mut injected) => {
-                if let Some(object) = injected.as_object_mut() {
-                    object.insert("launch".to_owned(), launch.clone());
-                    object.insert("attempt".to_owned(), json!(attempt + 1));
+            Ok(injected) => {
+                let effective = model_catalog_injection_effective(&injected);
+                last_status = injected
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                last_target = injected.get("target").cloned();
+                last_models = injected.get("models").cloned();
+                last_renderer_probe = renderer_probe_from_injected(&injected);
+                last_message = injection_message_from_probe(last_renderer_probe.as_ref())
+                    .or(last_status.clone());
+                if effective {
+                    return Ok(codex_launch_injection_response(
+                        debug_port,
+                        launch,
+                        "model_list_injected",
+                        true,
+                        attempt + 1,
+                        last_status,
+                        last_target,
+                        last_models,
+                        last_renderer_probe,
+                        first_error,
+                        running_processes,
+                        None,
+                    ));
                 }
-                if model_catalog_injection_effective(&injected) {
-                    return Ok(injected);
-                }
-                last_error =
-                    Some(serde_json::to_string(&injected).unwrap_or_else(|_| {
-                        "renderer evaluated without app-server patch".to_owned()
-                    }));
             }
-            Err(error) => last_error = Some(error.to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if attempt == 0 && launch.is_none() {
+                    first_error = Some(message.clone());
+                    let running = running_codex_processes();
+                    if !running.is_empty() {
+                        running_processes = Some(codex_process_summary(&running));
+                    }
+                    let launch_value = launch_codex_app(debug_port).map_err(|launch_error| {
+                        anyhow::anyhow!(
+                            "Codex injection preflight failed and Codex launch failed: {launch_error}. Initial CDP check: {message}"
+                        )
+                    })?;
+                    launch = Some(launch_value);
+                    last_message = Some(message);
+                    continue;
+                }
+                last_message = Some(message);
+            }
         }
     }
-    anyhow::bail!(
-        "Codex was launched but the renderer could not be injected on debug port {debug_port}: {}",
-        last_error.unwrap_or_else(|| "unknown CDP error".to_owned())
-    )
+
+    let status = if launch.is_some() {
+        "launched_injection_incomplete"
+    } else {
+        "existing_injection_incomplete"
+    };
+    Ok(codex_launch_injection_response(
+        debug_port,
+        launch,
+        status,
+        false,
+        CODEX_LAUNCH_INJECT_ATTEMPTS,
+        last_status,
+        last_target,
+        last_models,
+        last_renderer_probe,
+        first_error,
+        running_processes,
+        last_message,
+    ))
+}
+
+fn codex_launch_injection_response(
+    debug_port: u16,
+    launch: Option<Value>,
+    status: &str,
+    injection_ok: bool,
+    attempts: usize,
+    injection_status: Option<String>,
+    target: Option<Value>,
+    models: Option<Value>,
+    renderer_probe: Option<Value>,
+    preflight_error: Option<String>,
+    running_processes: Option<String>,
+    message: Option<String>,
+) -> Value {
+    let mut response = json!({
+        "ok": true,
+        "status": status,
+        "debug_port": debug_port,
+        "launch": launch.unwrap_or_else(|| json!({ "mode": "existing_debug_port" })),
+        "injection": {
+            "enabled": true,
+            "ok": injection_ok,
+            "attempts": attempts,
+            "status": injection_status.unwrap_or_else(|| (if injection_ok { "injected" } else { "incomplete" }).to_owned())
+        }
+    });
+    if let Some(object) = response
+        .pointer_mut("/injection")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(target) = target {
+            object.insert("target".to_owned(), target);
+        }
+        if let Some(models) = models {
+            object.insert("models".to_owned(), models);
+        }
+        if let Some(renderer_probe) = renderer_probe {
+            object.insert("renderer_probe".to_owned(), renderer_probe);
+        }
+        if let Some(preflight_error) = preflight_error {
+            object.insert("preflight_error".to_owned(), json!(preflight_error));
+        }
+        if let Some(running_processes) = running_processes {
+            object.insert("running_processes".to_owned(), json!(running_processes));
+        }
+        if let Some(message) = message {
+            object.insert("message".to_owned(), json!(message));
+        }
+    }
+    response
 }
 
 fn model_catalog_injection_effective(value: &Value) -> bool {
     value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn renderer_probe_from_injected(value: &Value) -> Option<Value> {
+    let renderer_state = value.get("renderer_state")?.as_object()?;
+    let mut output = Map::new();
+    for key in [
+        "version",
+        "reason",
+        "models",
+        "assetProbe",
+        "hostConfig",
+        "modules",
+        "appServerPatch",
+        "dynamicConfigPatch",
+        "messagePatch",
+        "shortLabelPatch",
+        "failures",
+    ] {
+        if let Some(value) = renderer_state.get(key) {
+            output.insert(key.to_owned(), value.clone());
+        }
+    }
+    Some(Value::Object(output))
+}
+
+fn injection_message_from_probe(probe: Option<&Value>) -> Option<String> {
+    let probe = probe?;
+    for pointer in [
+        "/appServerPatch/error",
+        "/modules/use-host-config:request-bridge/error",
+        "/hostConfig/error",
+    ] {
+        if let Some(message) = probe.pointer(pointer).and_then(Value::as_str) {
+            if !message.trim().is_empty() {
+                return Some(message.trim().to_owned());
+            }
+        }
+    }
+    None
 }
 
 fn codex_process_summary(processes: &[CodexProcess]) -> String {
@@ -1751,6 +2641,8 @@ mod tests {
         assert!(script.contains("model-queries-"));
         assert!(script.contains("use-host-config:request-bridge"));
         assert!(script.contains("module && module.Vt"));
+        assert!(script.contains("Object.entries(module)"));
+        assert!(script.contains("diagnostic.exportName"));
         assert!(script.contains("shortenSelectedModelButtonLabels"));
         assert!(script.contains("message.method"));
         assert!(script.contains("modelListResultLooksPatchable"));
@@ -1780,6 +2672,40 @@ mod tests {
         assert!(!script.contains("Object.values(module)"));
         assert!(!script.contains("app-server-manager-signals-"));
         assert!(!script.contains("value.pages"));
+    }
+
+    #[test]
+    fn renderer_probe_keeps_actionable_injection_failure_summary() {
+        let injected = json!({
+            "renderer_state": {
+                "version": "codeseex-test",
+                "appServerPatch": {
+                    "attempted": true,
+                    "installed": false,
+                    "error": "Codex App use-host-config request bridge sendRequest export not found"
+                },
+                "modules": {
+                    "use-host-config:request-bridge": {
+                        "loaded": true,
+                        "exportKeys": ["At", "Bt"]
+                    }
+                },
+                "failures": ["bridge missing"]
+            }
+        });
+
+        let probe = renderer_probe_from_injected(&injected).expect("renderer probe");
+        assert_eq!(
+            probe
+                .pointer("/appServerPatch/error")
+                .and_then(Value::as_str),
+            Some("Codex App use-host-config request bridge sendRequest export not found")
+        );
+        assert_eq!(
+            injection_message_from_probe(Some(&probe)).as_deref(),
+            Some("Codex App use-host-config request bridge sendRequest export not found")
+        );
+        assert!(probe.get("ignored").is_none());
     }
 
     #[test]

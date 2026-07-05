@@ -267,6 +267,76 @@
     border: 1px solid var(--border-color); 
     transition: var(--theme-transition); 
   }
+
+  .update-background-status {
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 9px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-sm);
+    transition: var(--theme-transition);
+  }
+
+  .update-background-status[hidden] {
+    display: none;
+  }
+
+  .update-background-main {
+    min-width: 0;
+    display: grid;
+    gap: 5px;
+    flex: 1;
+  }
+
+  .update-background-title {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--text-main);
+    font-size: 12px;
+    font-weight: 700;
+    transition: var(--theme-transition);
+  }
+
+  .update-background-title span {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 650;
+    transition: var(--theme-transition);
+  }
+
+  .update-background-track {
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--ctrl-bg);
+    transition: var(--theme-transition);
+  }
+
+  .update-background-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--primary);
+    transition: width 0.24s var(--theme-easing), background-color var(--theme-duration) var(--theme-easing);
+  }
+
+  .update-background-bar.failed {
+    background: var(--danger);
+  }
+
+  .update-background-status .btn {
+    min-height: 28px;
+    padding: 5px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
   
   .about-status.warning { 
     background: var(--danger-bg); 
