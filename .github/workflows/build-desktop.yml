@@ -150,12 +150,21 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
+      - name: Verify updater signing key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "Missing TAURI_SIGNING_PRIVATE_KEY secret; updater artifacts cannot be signed."
+          }
+
       - name: Build Tauri bundle
         working-directory: apps/desktop/src-tauri
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --ci --no-sign --features tauri/custom-protocol ${{ matrix.bundle_args }}
+        run: cargo tauri build --ci --features tauri/custom-protocol ${{ matrix.bundle_args }}
 
       - name: Upload ${{ matrix.label }} artifacts
         uses: actions/upload-artifact@v7
