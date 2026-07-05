@@ -49,7 +49,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyNDY2ODQ1MUU5NDIyNTQKUldSVUlwUWVSV2hHSW9LM1p5QlM2MWp6dkJNYUhVeENSYVFmdGlsTk51Y2lyMzB2UWxldTJNWnIK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM3NTg5NkI2OTMyNEYwNTgKUldSWThDU1R0cFpZeDlNbndIUittTXowSU11aFFyYW9ST1RKUUlKdkFUdk02NGFsZUJoWnJESnEK",
       "endpoints": [
         "https://github.com/TasteSteak/CodeSeeX/releases/latest/download/latest.json"
       ],
