@@ -11,6 +11,7 @@ use crate::tools::response_items::{
     apply_patch_input_normalization_diagnostic, native_apply_patch_response_item_from_chat_call,
 };
 use axum::body::Bytes;
+use axum::http::{header, HeaderMap, StatusCode};
 use codeseex_core::{AppConfig, UserConfig};
 use codeseex_store::Store;
 use serde_json::{json, Value};
@@ -41,6 +42,77 @@ pub(super) fn upstream_error_detail(body_json: Option<&Value>, bytes: &[u8]) -> 
             "note": "Raw upstream error bodies are not logged to avoid leaking secrets or prompt content."
         }
     })
+}
+
+pub(super) fn upstream_body_read_error_detail(
+    id: &str,
+    requested_model: Option<&str>,
+    model: Option<&str>,
+    status: StatusCode,
+    headers: &HeaderMap,
+    error: &reqwest::Error,
+) -> Value {
+    json!({
+        "id": id,
+        "requested_model": requested_model,
+        "model": model,
+        "status": status.as_u16(),
+        "error": error.to_string(),
+        "error_kind": {
+            "body": error.is_body(),
+            "connect": error.is_connect(),
+            "decode": error.is_decode(),
+            "request": error.is_request(),
+            "status": error.is_status(),
+            "timeout": error.is_timeout()
+        },
+        "upstream_response": upstream_response_header_summary(headers),
+        "body": {
+            "omitted": true,
+            "note": "Raw upstream bodies are not logged to avoid leaking secrets or prompt content."
+        }
+    })
+}
+
+pub(super) fn upstream_json_parse_error_detail(
+    id: &str,
+    requested_model: Option<&str>,
+    model: Option<&str>,
+    status: StatusCode,
+    headers: &HeaderMap,
+    bytes_len: usize,
+    error: &serde_json::Error,
+) -> Value {
+    json!({
+        "id": id,
+        "requested_model": requested_model,
+        "model": model,
+        "status": status.as_u16(),
+        "error": error.to_string(),
+        "error_kind": "json_parse",
+        "upstream_response": upstream_response_header_summary(headers),
+        "body": {
+            "omitted": true,
+            "bytes": bytes_len,
+            "note": "Raw upstream bodies are not logged to avoid leaking secrets or prompt content."
+        }
+    })
+}
+
+fn upstream_response_header_summary(headers: &HeaderMap) -> Value {
+    json!({
+        "content_type": header_value(headers, &header::CONTENT_TYPE),
+        "content_encoding": header_value(headers, &header::CONTENT_ENCODING),
+        "content_length": header_value(headers, &header::CONTENT_LENGTH),
+        "transfer_encoding": header_value(headers, &header::TRANSFER_ENCODING)
+    })
+}
+
+fn header_value(headers: &HeaderMap, name: &'static header::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 pub(super) fn request_completed_detail(

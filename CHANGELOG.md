@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.4 - 2026-07-08
+
+CodeSeeX 0.5.4 is a focused agent-stability hotfix. It keeps client tool failures visible to the model, prevents stale handoff guards from blocking follow-up turns, and improves upstream decode diagnostics.
+
+### Highlights
+
+- Repeated client tool failures no longer become terminal proxy errors by default.
+- Follow-up requests such as "continue" no longer inherit a stale client tool handoff stop.
+- Upstream response body decode failures now include safer diagnostics for network/proxy/upstream troubleshooting.
+
+### Changed
+
+- Client tool failure tracking now uses the tool name, arguments hash, and compact failure-summary hash instead of only the tool name.
+- Repeated failure protection is now diagnostic-only, so the agent can inspect the failed tool result and choose a different recovery path.
+- Handoff preflight no longer short-circuits later requests based on a previous repeated-failure state.
+
+### Fixed
+
+- Fixed legitimate troubleshooting workflows being interrupted after several failing `shell_command` handoffs.
+- Fixed repeated apply-patch or shell failures being able to poison later continuation requests.
+- Fixed sparse `error decoding response body` logs by adding status, safe upstream response headers, and reqwest error-kind flags without logging raw upstream bodies.
+
+### Compatibility Notes
+
+- This release does not change model catalog behavior, pricing estimates, updater signing, or Web Search policy.
+- Existing diagnostics that look for client handoff guard stops should now treat repeated-failure records as warnings unless a separate terminal error is present.
+
 ## 0.5.3 - 2026-07-06
 
 CodeSeeX 0.5.3 is a release-readiness and desktop updater stability update. It focuses on safer Codex App integration, clearer catalog diagnostics, and a more reliable in-app update path.

@@ -1,12 +1,11 @@
 use super::{
-    latest_user_summary_from_input, merge_request_diagnostic, runtime_latest_user_summary,
-    stable_hash_hex, ClientHandoffGuardState, ClientHandoffPendingKey, ClientHandoffTurnState,
-    ClientToolHandoffGuardStop, StoreInner, MAX_CLIENT_HANDOFF_GUARD_TURNS,
-    MAX_CLIENT_HANDOFF_PENDING_CALLS, MAX_USAGE_SEGMENT_SUMMARY_CHARS,
+    latest_user_summary_from_input, runtime_latest_user_summary, stable_hash_hex,
+    ClientHandoffGuardState, ClientHandoffPendingKey, ClientHandoffTurnState,
+    MAX_CLIENT_HANDOFF_GUARD_TURNS, MAX_CLIENT_HANDOFF_PENDING_CALLS,
+    MAX_USAGE_SEGMENT_SUMMARY_CHARS,
 };
-use chrono::Utc;
 use codeseex_core::context::content_to_text;
-use serde_json::{json, Value};
+use serde_json::Value;
 #[derive(Debug)]
 pub(super) struct ClientHandoffOutputItem {
     pub(super) call_id: String,
@@ -80,63 +79,6 @@ pub(super) fn unique_client_handoff_pending_key_for_turn(
     matches.next().is_none().then_some(first)
 }
 
-pub(super) fn mark_request_guard_stopped(
-    inner: &mut StoreInner,
-    request_id: &str,
-    stop: &ClientToolHandoffGuardStop,
-) {
-    if let Some(request) = inner.requests.get_mut(request_id) {
-        request.diagnostic = Some(merge_request_diagnostic(
-            request.diagnostic.as_ref(),
-            &json!({
-                "codeseex_lifecycle": "failed_billable",
-                "client_tool_handoff_guard_stopped": true,
-                "client_tool_handoff_guard": stop.diagnostic()
-            }),
-        ));
-        request.updated_at = Utc::now();
-    }
-}
-
-pub(super) fn client_handoff_guard_stop(
-    reason: &str,
-    turn_key: &str,
-    tool_name: Option<&str>,
-    arguments_hash: Option<&str>,
-    failure_summary: Option<&str>,
-    state: &ClientHandoffTurnState,
-    repeated_signature_count: u32,
-    consecutive_failure_count: u32,
-) -> ClientToolHandoffGuardStop {
-    let failure_summary = failure_summary.and_then(compact_client_handoff_failure_summary);
-    let failure_summary_hash = failure_summary
-        .as_ref()
-        .map(|value| stable_hash_hex(value.as_bytes()));
-    let message = match reason {
-        "consecutive_failures" => format!(
-            "CodeSeeX stopped repeated client tool handoffs after {consecutive_failure_count} consecutive failure(s) for tool '{}'.",
-            tool_name.unwrap_or("unknown")
-        ),
-        _ => "CodeSeeX stopped repeated client tool handoffs.".to_owned(),
-    };
-    ClientToolHandoffGuardStop {
-        code: "client_tool_handoff_guard_stopped".to_owned(),
-        message,
-        reason: reason.to_owned(),
-        turn_key: turn_key.to_owned(),
-        tool_name: tool_name.map(str::to_owned),
-        arguments_hash: arguments_hash.map(str::to_owned),
-        failure_summary,
-        failure_summary_hash,
-        handoff_requests: state.handoff_requests,
-        tool_calls: state.tool_calls,
-        repeated_signature_count,
-        consecutive_failure_count,
-        cumulative_input_tokens: state.cumulative_input_tokens,
-        cumulative_total_tokens: state.cumulative_total_tokens,
-    }
-}
-
 pub(super) fn client_handoff_turn_key(input: &Value) -> String {
     runtime_latest_user_summary(input)
         .map(|summary| format!("summary:{}", stable_hash_hex(summary.as_bytes())))
@@ -159,6 +101,12 @@ pub(super) fn client_handoff_turn_key(input: &Value) -> String {
                 .map(|summary| format!("input:{}", stable_hash_hex(summary.as_bytes())))
         })
         .unwrap_or_else(|| format!("request:{}", stable_hash_hex(input.to_string().as_bytes())))
+}
+
+pub(super) fn client_handoff_failure_summary_hash(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(compact_client_handoff_failure_summary)
+        .map(|summary| stable_hash_hex(summary.as_bytes()))
 }
 
 pub(super) fn client_handoff_output_items(input: &Value) -> Vec<ClientHandoffOutputItem> {

@@ -101,7 +101,8 @@ use response_helpers::{
     native_apply_patch_client_tool_sse_events, prepend_response_output_items,
     record_apply_patch_input_micro_repair_diagnostic,
     record_apply_patch_input_micro_repair_diagnostics, record_client_tool_handoff_guard_stop,
-    request_completed_detail, response_id_from_input, show_thinking_enabled, upstream_error_detail,
+    request_completed_detail, response_id_from_input, show_thinking_enabled,
+    upstream_body_read_error_detail, upstream_error_detail, upstream_json_parse_error_detail,
 };
 #[cfg(test)]
 pub(crate) use response_lifecycle::resolve_compact_threshold;
@@ -384,6 +385,7 @@ async fn chat_completions(
         Ok(response) => {
             let status = response.status();
             let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+            let response_headers = response.headers().clone();
             if status.is_success()
                 && content_type
                     .as_ref()
@@ -474,7 +476,14 @@ async fn chat_completions(
                         response_from_bytes(status, content_type, bytes.to_vec())
                     }
                     Err(error) => {
-                        let detail = json!({ "error": error.to_string() });
+                        let detail = upstream_body_read_error_detail(
+                            &id,
+                            requested_model.as_deref(),
+                            model.as_deref(),
+                            status,
+                            &response_headers,
+                            &error,
+                        );
                         let _ = state
                             .store
                             .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
@@ -485,12 +494,7 @@ async fn chat_completions(
                                 "error",
                                 "request_failed",
                                 "Failed to read upstream response body.",
-                                Some(&json!({
-                                    "id": id,
-                                    "requested_model": requested_model.as_deref(),
-                                    "model": model.as_deref(),
-                                    "error": error.to_string()
-                                })),
+                                Some(&detail),
                             )
                             .await;
                         json_error(
@@ -1139,6 +1143,7 @@ async fn responses(
     {
         Ok(response) => {
             let status = response.status();
+            let response_headers = response.headers().clone();
             if !status.is_success() {
                 return match response.bytes().await {
                     Ok(bytes) => {
@@ -1182,7 +1187,14 @@ async fn responses(
                         response_from_bytes(status, response_content_type_json(), bytes.to_vec())
                     }
                     Err(error) => {
-                        let detail = json!({ "error": error.to_string() });
+                        let detail = upstream_body_read_error_detail(
+                            &id,
+                            requested_model.as_deref(),
+                            Some(upstream_model.as_str()),
+                            status,
+                            &response_headers,
+                            &error,
+                        );
                         let _ = state
                             .store
                             .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
@@ -1209,12 +1221,7 @@ async fn responses(
                                 "error",
                                 "request_failed",
                                 "Failed to read upstream response body.",
-                                Some(&json!({
-                                    "id": id,
-                                    "requested_model": requested_model.as_deref(),
-                                    "model": upstream_model.as_str(),
-                                    "error": error.to_string()
-                                })),
+                                Some(&detail),
                             )
                             .await;
                         json_error(
@@ -1247,57 +1254,63 @@ async fn responses(
                     runtime_context_storage: runtime_context_storage_value,
                 });
             }
-            match response.json::<Value>().await {
-                Ok(mut chat) => {
-                    adapt_deepseek_chat_tool_protocol_for_non_streaming(
-                        &state.store,
-                        &id,
-                        &config,
-                        upstream_model.as_str(),
-                        &mut chat,
-                        payload_tools_available(&payload),
-                        "non_streaming_initial",
-                    )
-                    .await;
-                    let _ = state
-                        .store
-                        .record_event(
-                            "info",
-                            "upstream_call_usage_breakdown",
-                            "CodeSeeX upstream call usage breakdown.",
-                            Some(&upstream_call_usage_breakdown_event(
-                                &id,
-                                "non_streaming_initial",
-                                0,
-                                &input,
-                                &payload,
-                                chat.get("usage"),
-                                Some(upstream_started.elapsed().as_millis() as u64),
-                                false,
-                            )),
+            match response.bytes().await {
+                Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(mut chat) => {
+                        adapt_deepseek_chat_tool_protocol_for_non_streaming(
+                            &state.store,
+                            &id,
+                            &config,
+                            upstream_model.as_str(),
+                            &mut chat,
+                            payload_tools_available(&payload),
+                            "non_streaming_initial",
                         )
                         .await;
-                    let client = state.client();
-                    let tool_loop_context = ToolLoopContext {
-                        client: &client,
-                        store: &state.store,
-                        config: &config,
-                        auth: auth.as_deref(),
-                        local_access_token: Some(&state.v1_access_token),
-                        request_id: &id,
-                        enabled_tools: &enabled_tools,
-                        tool_context: &tool_execution_context,
-                        community_tools: &community_tools,
-                        external_tool_context: &external_tool_context,
-                        current_image_refs: &current_image_refs,
-                        original_request: &input,
-                        context_diagnostic: &context_diagnostic,
-                        runtime_context_storage: &runtime_context_storage_value,
-                        requested_model: requested_model.as_deref(),
-                        upstream_model: upstream_model.as_str(),
-                    };
-                    let tool_loop_result =
-                        match complete_chat_with_tools(tool_loop_context, payload, chat).await {
+                        let _ = state
+                            .store
+                            .record_event(
+                                "info",
+                                "upstream_call_usage_breakdown",
+                                "CodeSeeX upstream call usage breakdown.",
+                                Some(&upstream_call_usage_breakdown_event(
+                                    &id,
+                                    "non_streaming_initial",
+                                    0,
+                                    &input,
+                                    &payload,
+                                    chat.get("usage"),
+                                    Some(upstream_started.elapsed().as_millis() as u64),
+                                    false,
+                                )),
+                            )
+                            .await;
+                        let client = state.client();
+                        let tool_loop_context = ToolLoopContext {
+                            client: &client,
+                            store: &state.store,
+                            config: &config,
+                            auth: auth.as_deref(),
+                            local_access_token: Some(&state.v1_access_token),
+                            request_id: &id,
+                            enabled_tools: &enabled_tools,
+                            tool_context: &tool_execution_context,
+                            community_tools: &community_tools,
+                            external_tool_context: &external_tool_context,
+                            current_image_refs: &current_image_refs,
+                            original_request: &input,
+                            context_diagnostic: &context_diagnostic,
+                            runtime_context_storage: &runtime_context_storage_value,
+                            requested_model: requested_model.as_deref(),
+                            upstream_model: upstream_model.as_str(),
+                        };
+                        let tool_loop_result = match complete_chat_with_tools(
+                            tool_loop_context,
+                            payload,
+                            chat,
+                        )
+                        .await
+                        {
                             Ok(result) => result,
                             Err(error) => {
                                 let error_code = error.code.clone();
@@ -1337,120 +1350,157 @@ async fn responses(
                                 );
                             }
                         };
-                    let mut client_tool_handoff = false;
-                    let mut mapped = match tool_loop_result {
-                        ToolLoopResult::FinalChat(result) => {
-                            if let Some(message) = final_chat_turn_message(&result.chat) {
-                                if let Err(error) = state
-                                    .store
-                                    .append_request_turn_messages(&id, &[message])
-                                    .await
-                                {
-                                    return json_error(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "state_turn_messages_failed",
-                                        error.to_string(),
-                                    );
+                        let mut client_tool_handoff = false;
+                        let mut mapped = match tool_loop_result {
+                            ToolLoopResult::FinalChat(result) => {
+                                if let Some(message) = final_chat_turn_message(&result.chat) {
+                                    if let Err(error) = state
+                                        .store
+                                        .append_request_turn_messages(&id, &[message])
+                                        .await
+                                    {
+                                        return json_error(
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            "state_turn_messages_failed",
+                                            error.to_string(),
+                                        );
+                                    }
                                 }
+                                let mut response = chat_completion_to_response(
+                                    &config,
+                                    &id,
+                                    &model,
+                                    result.chat,
+                                    show_thinking_enabled(&config),
+                                );
+                                response["usage"] = result.usage;
+                                prepend_response_output_items(&mut response, result.response_items);
+                                response
                             }
-                            let mut response = chat_completion_to_response(
-                                &config,
-                                &id,
-                                &model,
-                                result.chat,
-                                show_thinking_enabled(&config),
-                            );
-                            response["usage"] = result.usage;
-                            prepend_response_output_items(&mut response, result.response_items);
-                            response
+                            ToolLoopResult::ClientToolCalls(result) => {
+                                client_tool_handoff = true;
+                                let tool_calls = chat_tool_calls(&result.chat);
+                                let partition = partition_tool_calls(
+                                    tool_calls,
+                                    &community_tools,
+                                    &external_tool_context,
+                                );
+                                record_apply_patch_input_micro_repair_diagnostics(
+                                    &state.store,
+                                    &id,
+                                    &partition.native,
+                                )
+                                .await;
+                                let mut response = chat_completion_tool_calls_to_response(
+                                    &config,
+                                    &id,
+                                    &model,
+                                    result.chat,
+                                    &community_tools,
+                                    &external_tool_context,
+                                    show_thinking_enabled(&config),
+                                );
+                                response["usage"] = result.usage;
+                                prepend_response_output_items(&mut response, result.response_items);
+                                response
+                            }
+                        };
+                        if append_auto_compaction_if_safe(&mut mapped, auto_compaction.as_ref()) {
+                            let _ = state
+                                .store
+                                .record_event(
+                                    "info",
+                                    "context_compacted",
+                                    "Context compacted automatically.",
+                                    Some(&json!({ "id": id })),
+                                )
+                                .await;
                         }
-                        ToolLoopResult::ClientToolCalls(result) => {
-                            client_tool_handoff = true;
-                            let tool_calls = chat_tool_calls(&result.chat);
-                            let partition = partition_tool_calls(
-                                tool_calls,
-                                &community_tools,
-                                &external_tool_context,
-                            );
-                            record_apply_patch_input_micro_repair_diagnostics(
-                                &state.store,
+                        let completion_diagnostic = if client_tool_handoff {
+                            Some(json!({ "codeseex_lifecycle": "client_tool_handoff" }))
+                        } else {
+                            service_completion_diagnostic(service_kind)
+                        };
+                        if let Err(error) = state
+                            .store
+                            .finish_request(
                                 &id,
-                                &partition.native,
+                                RequestStatus::Completed,
+                                Some(&mapped),
+                                completion_diagnostic.as_ref(),
                             )
-                            .await;
-                            let mut response = chat_completion_tool_calls_to_response(
-                                &config,
-                                &id,
-                                &model,
-                                result.chat,
-                                &community_tools,
-                                &external_tool_context,
-                                show_thinking_enabled(&config),
+                            .await
+                        {
+                            return json_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "state_finish_failed",
+                                error.to_string(),
                             );
-                            response["usage"] = result.usage;
-                            prepend_response_output_items(&mut response, result.response_items);
-                            response
                         }
-                    };
-                    if append_auto_compaction_if_safe(&mut mapped, auto_compaction.as_ref()) {
+                        let lifecycle = if client_tool_handoff {
+                            Some("client_tool_handoff")
+                        } else {
+                            service_lifecycle_for_kind(service_kind)
+                        };
                         let _ = state
                             .store
                             .record_event(
                                 "info",
-                                "context_compacted",
-                                "Context compacted automatically.",
-                                Some(&json!({ "id": id })),
+                                "request_completed",
+                                "Responses request completed.",
+                                Some(&request_completed_detail(
+                                    &id,
+                                    Some(model.as_str()),
+                                    mapped
+                                        .get("model")
+                                        .and_then(Value::as_str)
+                                        .or(Some(model.as_str())),
+                                    lifecycle,
+                                    Some(&mapped),
+                                )),
                             )
                             .await;
+                        json_response(mapped)
                     }
-                    let completion_diagnostic = if client_tool_handoff {
-                        Some(json!({ "codeseex_lifecycle": "client_tool_handoff" }))
-                    } else {
-                        service_completion_diagnostic(service_kind)
-                    };
-                    if let Err(error) = state
-                        .store
-                        .finish_request(
+                    Err(error) => {
+                        let detail = upstream_json_parse_error_detail(
                             &id,
-                            RequestStatus::Completed,
-                            Some(&mapped),
-                            completion_diagnostic.as_ref(),
-                        )
-                        .await
-                    {
-                        return json_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "state_finish_failed",
-                            error.to_string(),
+                            requested_model.as_deref(),
+                            Some(upstream_model.as_str()),
+                            status,
+                            &response_headers,
+                            bytes.len(),
+                            &error,
                         );
-                    }
-                    let lifecycle = if client_tool_handoff {
-                        Some("client_tool_handoff")
-                    } else {
-                        service_lifecycle_for_kind(service_kind)
-                    };
-                    let _ = state
-                        .store
-                        .record_event(
-                            "info",
-                            "request_completed",
-                            "Responses request completed.",
-                            Some(&request_completed_detail(
-                                &id,
-                                Some(model.as_str()),
-                                mapped
-                                    .get("model")
-                                    .and_then(Value::as_str)
-                                    .or(Some(model.as_str())),
-                                lifecycle,
-                                Some(&mapped),
-                            )),
+                        let _ = state
+                            .store
+                            .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                            .await;
+                        let _ = state
+                            .store
+                            .record_event(
+                                "error",
+                                "request_failed",
+                                "Failed to parse upstream response JSON.",
+                                Some(&detail),
+                            )
+                            .await;
+                        json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "upstream_json_failed",
+                            error.to_string(),
                         )
-                        .await;
-                    json_response(mapped)
-                }
+                    }
+                },
                 Err(error) => {
-                    let detail = json!({ "error": error.to_string() });
+                    let detail = upstream_body_read_error_detail(
+                        &id,
+                        requested_model.as_deref(),
+                        Some(upstream_model.as_str()),
+                        status,
+                        &response_headers,
+                        &error,
+                    );
                     let _ = state
                         .store
                         .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
@@ -1460,13 +1510,13 @@ async fn responses(
                         .record_event(
                             "error",
                             "request_failed",
-                            "Failed to parse upstream response JSON.",
-                            Some(&json!({ "id": id, "error": error.to_string() })),
+                            "Failed to read upstream response body.",
+                            Some(&detail),
                         )
                         .await;
                     json_error(
                         StatusCode::BAD_GATEWAY,
-                        "upstream_json_failed",
+                        "upstream_body_failed",
                         error.to_string(),
                     )
                 }

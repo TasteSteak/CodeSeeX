@@ -1734,7 +1734,7 @@ async fn fake_repeated_shell_handoff_chat_completions(
                     "type": "function",
                     "function": {
                         "name": "shell_command",
-                        "arguments": format!("{{\"command\":\"date\",\"nonce\":{request_index}}}")
+                        "arguments": "{\"command\":\"date\"}"
                     }
                 }]
             }
@@ -7284,7 +7284,7 @@ async fn apply_patch_client_handoff_failure_can_be_replayed_and_corrected() {
 }
 
 #[tokio::test]
-async fn client_tool_handoff_guard_stops_repeated_failures_before_upstream_retry() {
+async fn client_tool_handoff_guard_diagnoses_repeated_failures_without_sticky_stop() {
     let fake_state = FakeUpstreamState::default();
     let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let fake_addr = fake_listener.local_addr().unwrap();
@@ -7375,23 +7375,13 @@ async fn client_tool_handoff_guard_stops_repeated_failures_before_upstream_retry
             .unwrap();
         assert!(followup.status().is_success());
         let body = followup.json::<Value>().await.unwrap();
-        if index < 2 {
-            assert_eq!(body["status"], "completed");
-        } else {
-            assert_eq!(body["status"], "failed");
-            assert_eq!(
-                body.pointer("/error/code").and_then(Value::as_str),
-                Some("client_tool_handoff_guard_stopped")
-            );
-            assert_eq!(
-                body.get("output").and_then(Value::as_array).map(Vec::len),
-                Some(0)
-            );
-            assert_eq!(body.get("incomplete_details"), Some(&Value::Null));
-        }
+        assert_eq!(
+            body["status"], "completed",
+            "repeated client tool failures should stay agent-visible instead of becoming a terminal proxy error"
+        );
     }
 
-    let preflight = client
+    let continuation = client
         .post(format!("http://{proxy_addr}/v1/responses"))
         .json(&json!({
             "id": "resp_guard_after_stop",
@@ -7414,17 +7404,17 @@ async fn client_tool_handoff_guard_stops_repeated_failures_before_upstream_retry
         .send()
         .await
         .unwrap();
-    assert!(preflight.status().is_success());
-    let body = preflight.json::<Value>().await.unwrap();
-    assert_eq!(body["status"], "failed");
+    assert!(continuation.status().is_success());
+    let body = continuation.json::<Value>().await.unwrap();
     assert_eq!(
-        body.pointer("/error/code").and_then(Value::as_str),
-        Some("client_tool_handoff_guard_stopped")
+        body["status"], "completed",
+        "later continue-style requests must not inherit a sticky guard stop"
     );
-    assert_eq!(
-        body.get("output").and_then(Value::as_array).map(Vec::len),
-        Some(0)
-    );
+    assert!(body
+        .get("output")
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false));
 
     let requests = fake_state
         .requests
@@ -7433,19 +7423,13 @@ async fn client_tool_handoff_guard_stops_repeated_failures_before_upstream_retry
         .clone();
     assert_eq!(
         requests.len(),
-        5,
-        "third failing followup and later same-turn request must stop before another upstream request"
+        7,
+        "diagnostic-only guard should not short-circuit upstream retries or later continue requests"
     );
     let (events, _) = store.recent_events(80, None).await.expect("events");
-    assert!(events.iter().any(|event| {
-        event.event_type == "client_tool_handoff_guard_diagnostic"
-            && event
-                .detail
-                .as_ref()
-                .and_then(|detail| detail.get("reason"))
-                .and_then(Value::as_str)
-                == Some("consecutive_failures")
-    }));
+    assert!(!events
+        .iter()
+        .any(|event| { event.event_type == "client_tool_handoff_guard_diagnostic" }));
 
     let _ = std::fs::remove_dir_all(data_dir);
 }

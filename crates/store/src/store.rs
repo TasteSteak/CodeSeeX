@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 mod handoff_guard;
 use handoff_guard::{
-    client_handoff_guard_stop, client_handoff_output_items, client_handoff_pending_request_keys,
-    client_handoff_turn_key, ensure_client_handoff_turn, mark_request_guard_stopped,
+    client_handoff_failure_summary_hash, client_handoff_output_items,
+    client_handoff_pending_request_keys, client_handoff_turn_key, ensure_client_handoff_turn,
     prune_client_handoff_guard, unique_client_handoff_pending_key_for_turn,
 };
 
@@ -84,11 +84,17 @@ struct ClientHandoffTurnState {
     handoff_requests: u32,
     tool_calls: u32,
     signature_counts: HashMap<String, u32>,
-    consecutive_failures_by_tool: HashMap<String, u32>,
+    failure_streaks_by_tool: HashMap<String, ClientHandoffFailureStreak>,
     cumulative_input_tokens: u64,
     cumulative_total_tokens: u64,
     updated_at: Option<DateTime<Utc>>,
-    stopped: Option<ClientToolHandoffGuardStop>,
+}
+
+#[derive(Debug, Clone)]
+struct ClientHandoffFailureStreak {
+    arguments_hash: String,
+    failure_summary_hash: Option<String>,
+    count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +133,32 @@ impl ClientToolHandoffGuardStop {
     pub fn diagnostic(&self) -> Value {
         json!(self)
     }
+}
+
+fn update_client_handoff_failure_streak(
+    state: &mut ClientHandoffTurnState,
+    tool_name: &str,
+    arguments_hash: &str,
+    failure_summary_hash: Option<&str>,
+) -> u32 {
+    let count = state
+        .failure_streaks_by_tool
+        .get(tool_name)
+        .filter(|streak| {
+            streak.arguments_hash == arguments_hash
+                && streak.failure_summary_hash.as_deref() == failure_summary_hash
+        })
+        .map(|streak| streak.count.saturating_add(1))
+        .unwrap_or(1);
+    state.failure_streaks_by_tool.insert(
+        tool_name.to_owned(),
+        ClientHandoffFailureStreak {
+            arguments_hash: arguments_hash.to_owned(),
+            failure_summary_hash: failure_summary_hash.map(str::to_owned),
+            count,
+        },
+    );
+    count
 }
 
 #[derive(Debug, Clone)]
@@ -804,7 +836,7 @@ impl Store {
             return Ok(None);
         }
         prune_client_handoff_guard(&mut inner.client_handoff_guard);
-        let mut stop = None;
+        let mut repeated_failure_diagnostic = None;
         let mut unmatched_outputs = 0_u32;
         for output in output_items {
             let call_id = output.call_id.trim().to_owned();
@@ -854,30 +886,40 @@ impl Store {
                 .expect("guard turn state should exist");
             state.updated_at = Some(Utc::now());
             if output.failed {
-                let failure_count = {
-                    let count = state
-                        .consecutive_failures_by_tool
-                        .entry(pending.name.clone())
-                        .or_insert(0);
-                    *count = count.saturating_add(1);
-                    *count
-                };
-                if failure_count >= MAX_CLIENT_HANDOFF_FAILURES && stop.is_none() {
-                    stop = Some(client_handoff_guard_stop(
-                        "consecutive_failures",
-                        &effective_turn_key,
-                        Some(&pending.name),
-                        Some(&pending.arguments_hash),
-                        output.failure_summary.as_deref(),
-                        state,
-                        0,
-                        failure_count,
-                    ));
+                let failure_summary_hash =
+                    client_handoff_failure_summary_hash(output.failure_summary.as_deref());
+                let failure_count = update_client_handoff_failure_streak(
+                    state,
+                    &pending.name,
+                    &pending.arguments_hash,
+                    failure_summary_hash.as_deref(),
+                );
+                if failure_count >= MAX_CLIENT_HANDOFF_FAILURES
+                    && repeated_failure_diagnostic.is_none()
+                {
+                    repeated_failure_diagnostic = Some(json!({
+                        "client_tool_handoff_repeated_failure": {
+                            "tool_name": pending.name,
+                            "arguments_hash": pending.arguments_hash,
+                            "failure_summary_hash": failure_summary_hash,
+                            "count": failure_count,
+                            "diagnostic_threshold": MAX_CLIENT_HANDOFF_FAILURES,
+                            "mode": "warn_before_guard"
+                        }
+                    }));
                 }
             } else {
-                state
-                    .consecutive_failures_by_tool
-                    .insert(pending.name.clone(), 0);
+                state.failure_streaks_by_tool.remove(&pending.name);
+            }
+        }
+        if let Some(diagnostic) = repeated_failure_diagnostic {
+            if let Some(request) = inner.requests.get_mut(request_id) {
+                request.diagnostic = Some(merge_request_diagnostic(
+                    request.diagnostic.as_ref(),
+                    &diagnostic,
+                ));
+                request.updated_at = Utc::now();
+                bump_usage_revision(&mut inner);
             }
         }
         if unmatched_outputs > 0 {
@@ -893,16 +935,7 @@ impl Store {
                 bump_usage_revision(&mut inner);
             }
         }
-        if let Some(stop) = stop.clone() {
-            if let Some(state) = inner.client_handoff_guard.turns.get_mut(&stop.turn_key) {
-                state.stopped = Some(stop.clone());
-            }
-        }
-        if let Some(stop) = stop.as_ref() {
-            mark_request_guard_stopped(&mut inner, request_id, stop);
-            bump_usage_revision(&mut inner);
-        }
-        Ok(stop)
+        Ok(None)
     }
 
     pub async fn record_client_tool_handoff_calls(
@@ -919,15 +952,6 @@ impl Store {
         prune_client_handoff_guard(&mut inner.client_handoff_guard);
         let turn_key = client_handoff_turn_key(input);
         ensure_client_handoff_turn(&mut inner.client_handoff_guard, &turn_key);
-        if let Some(stop) = inner
-            .client_handoff_guard
-            .turns
-            .get(&turn_key)
-            .and_then(|state| state.stopped.clone())
-        {
-            mark_request_guard_stopped(&mut inner, request_id, &stop);
-            return Ok(Some(stop));
-        }
         let usage_input = usage_input_tokens(usage.unwrap_or(&Value::Null));
         let usage_total = usage_total_tokens(usage.unwrap_or(&Value::Null), usage_input);
         let state = inner
@@ -944,11 +968,34 @@ impl Store {
         state.updated_at = Some(Utc::now());
 
         let mut repeated_signature_diagnostic = None;
+        let mut repeated_failure_guard_diagnostic = None;
         let mut pending_calls = Vec::new();
         let request_key = request_id.to_owned();
         for call in calls {
             let arguments_hash = stable_hash_hex(call.arguments.as_bytes());
             let signature = format!("{}\n{}", call.name, arguments_hash);
+            if repeated_failure_guard_diagnostic.is_none() {
+                if let Some(streak) =
+                    state
+                        .failure_streaks_by_tool
+                        .get(&call.name)
+                        .filter(|streak| {
+                            streak.arguments_hash == arguments_hash
+                                && streak.count >= MAX_CLIENT_HANDOFF_FAILURES
+                        })
+                {
+                    repeated_failure_guard_diagnostic = Some(json!({
+                        "client_tool_handoff_repeated_failure_guard": {
+                            "tool_name": call.name,
+                            "arguments_hash": arguments_hash,
+                            "failure_summary_hash": streak.failure_summary_hash,
+                            "count": streak.count,
+                            "diagnostic_threshold": MAX_CLIENT_HANDOFF_FAILURES,
+                            "mode": "diagnostic_only"
+                        }
+                    }));
+                }
+            }
             let repeat_count = {
                 let count = state.signature_counts.entry(signature.clone()).or_insert(0);
                 *count = count.saturating_add(1);
@@ -1013,6 +1060,16 @@ impl Store {
                 bump_usage_revision(&mut inner);
             }
         }
+        if let Some(diagnostic) = repeated_failure_guard_diagnostic {
+            if let Some(request) = inner.requests.get_mut(request_id) {
+                request.diagnostic = Some(merge_request_diagnostic(
+                    request.diagnostic.as_ref(),
+                    &diagnostic,
+                ));
+                request.updated_at = Utc::now();
+                bump_usage_revision(&mut inner);
+            }
+        }
         for (key, pending) in pending_calls {
             inner
                 .client_handoff_guard
@@ -1025,25 +1082,12 @@ impl Store {
 
     pub async fn client_tool_handoff_guard_preflight(
         &self,
-        request_id: &str,
-        input: &Value,
+        _request_id: &str,
+        _input: &Value,
     ) -> Result<Option<ClientToolHandoffGuardStop>> {
         let mut inner = self.lock_inner()?;
         prune_client_handoff_guard(&mut inner.client_handoff_guard);
-        let turn_key = client_handoff_turn_key(input);
-        let stop = inner
-            .client_handoff_guard
-            .turns
-            .get_mut(&turn_key)
-            .and_then(|state| {
-                state.updated_at = Some(Utc::now());
-                state.stopped.clone()
-            });
-        if let Some(stop) = stop.as_ref() {
-            mark_request_guard_stopped(&mut inner, request_id, stop);
-            bump_usage_revision(&mut inner);
-        }
-        Ok(stop)
+        Ok(None)
     }
 
     pub async fn recover_interrupted_requests(&self, reason: &str) -> Result<Vec<String>> {
@@ -5428,7 +5472,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_handoff_guard_stops_repeated_failures_for_same_turn() {
+    async fn client_handoff_guard_diagnoses_repeated_same_failure_signature_for_same_turn() {
         let dir = temp_dir("client-handoff-guard-failures");
         let store = Store::open(&dir).await.expect("open store");
         let input = json!({
@@ -5454,7 +5498,7 @@ mod tests {
                     &[ClientToolHandoffCall {
                         call_id: format!("call_patch_{index}"),
                         name: "apply_patch".to_owned(),
-                        arguments: format!("patch {index}"),
+                        arguments: "patch retry loop".to_owned(),
                     }],
                     Some(&json!({ "input_tokens": 10, "total_tokens": 12 })),
                 )
@@ -5479,16 +5523,164 @@ mod tests {
                 .settle_client_tool_handoff_outputs(&followup_id, &followup_input)
                 .await
                 .expect("settle output");
-            if index < 2 {
-                assert!(stop.is_none());
-            } else {
-                let stop = stop.expect("third consecutive failure should stop");
-                assert_eq!(stop.code, "client_tool_handoff_guard_stopped");
-                assert_eq!(stop.reason, "consecutive_failures");
-                assert_eq!(stop.tool_name.as_deref(), Some("apply_patch"));
-                assert_eq!(stop.consecutive_failure_count, 3);
-                assert_eq!(stop.cumulative_total_tokens, 36);
-            }
+            assert!(
+                stop.is_none(),
+                "failed outputs should be shown to the model before any loop guard trips"
+            );
+        }
+
+        store
+            .checkpoint_request(
+                "resp_handoff_retry_after_failures",
+                None,
+                Some("deepseek-v4-pro"),
+                &input,
+            )
+            .await
+            .expect("checkpoint repeated handoff");
+        let stop = store
+            .record_client_tool_handoff_calls(
+                "resp_handoff_retry_after_failures",
+                &input,
+                &[ClientToolHandoffCall {
+                    call_id: "call_patch_retry_after_failures".to_owned(),
+                    name: "apply_patch".to_owned(),
+                    arguments: "patch retry loop".to_owned(),
+                }],
+                Some(&json!({ "input_tokens": 10, "total_tokens": 12 })),
+            )
+            .await
+            .expect("record repeated handoff");
+        assert!(
+            stop.is_none(),
+            "repeated failures should be diagnostic-only instead of interrupting the agent"
+        );
+        let inner = store.lock_inner().expect("lock store");
+        let diagnostic = inner
+            .requests
+            .get("resp_handoff_retry_after_failures")
+            .and_then(|request| request.diagnostic.as_ref())
+            .expect("repeated failure should be diagnosed");
+        assert_eq!(
+            diagnostic["client_tool_handoff_repeated_failure_guard"]["mode"],
+            json!("diagnostic_only")
+        );
+        assert_eq!(
+            diagnostic["client_tool_handoff_repeated_failure_guard"]["count"],
+            json!(3)
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn client_handoff_guard_allows_distinct_failed_shell_commands() {
+        let dir = temp_dir("client-handoff-guard-distinct-shell-failures");
+        let store = Store::open(&dir).await.expect("open store");
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "thread-shell",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "diagnose shell failures" }]
+            }]
+        });
+
+        for index in 0..3 {
+            let request_id = format!("resp_shell_{index}");
+            store
+                .checkpoint_request(&request_id, None, Some("deepseek-v4-pro"), &input)
+                .await
+                .expect("checkpoint");
+            let command = format!("{{\"command\":\"failing-command-{index}\"}}");
+            let stop = store
+                .record_client_tool_handoff_calls(
+                    &request_id,
+                    &input,
+                    &[ClientToolHandoffCall {
+                        call_id: format!("call_shell_{index}"),
+                        name: "shell_command".to_owned(),
+                        arguments: command,
+                    }],
+                    Some(&json!({ "input_tokens": 10, "total_tokens": 12 })),
+                )
+                .await
+                .expect("record handoff");
+            assert!(stop.is_none());
+
+            let followup_input = json!({
+                "model": "deepseek-v4-pro",
+                "prompt_cache_key": "thread-shell",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": format!("call_shell_{index}"),
+                    "output": "Error: shell execution failed"
+                }]
+            });
+            let followup_id = format!("resp_shell_followup_{index}");
+            let stop = store
+                .settle_client_tool_handoff_outputs(&followup_id, &followup_input)
+                .await
+                .expect("settle output");
+            assert!(
+                stop.is_none(),
+                "different failing shell commands should not be treated as a loop"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn client_handoff_guard_allows_same_arguments_with_distinct_failures() {
+        let dir = temp_dir("client-handoff-guard-distinct-failure-summary");
+        let store = Store::open(&dir).await.expect("open store");
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "thread-shell-summary",
+            "input": "diagnose a flaky command"
+        });
+
+        for index in 0..3 {
+            let request_id = format!("resp_summary_{index}");
+            store
+                .checkpoint_request(&request_id, None, Some("deepseek-v4-pro"), &input)
+                .await
+                .expect("checkpoint");
+            let stop = store
+                .record_client_tool_handoff_calls(
+                    &request_id,
+                    &input,
+                    &[ClientToolHandoffCall {
+                        call_id: format!("call_summary_{index}"),
+                        name: "shell_command".to_owned(),
+                        arguments: "{\"command\":\"run-diagnostic\"}".to_owned(),
+                    }],
+                    Some(&json!({ "input_tokens": 10, "total_tokens": 12 })),
+                )
+                .await
+                .expect("record handoff");
+            assert!(stop.is_none());
+
+            let followup_input = json!({
+                "model": "deepseek-v4-pro",
+                "prompt_cache_key": "thread-shell-summary",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": format!("call_summary_{index}"),
+                    "output": format!("Error: shell execution failed at step {index}")
+                }]
+            });
+            let followup_id = format!("resp_summary_followup_{index}");
+            let stop = store
+                .settle_client_tool_handoff_outputs(&followup_id, &followup_input)
+                .await
+                .expect("settle output");
+            assert!(
+                stop.is_none(),
+                "same command with changing failure output should remain diagnosable"
+            );
         }
 
         let _ = std::fs::remove_dir_all(dir);
@@ -5642,7 +5834,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_handoff_guard_preflight_stops_after_turn_is_stopped() {
+    async fn client_handoff_guard_preflight_does_not_stick_after_loop_stop() {
         let dir = temp_dir("client-handoff-guard-preflight");
         let store = Store::open(&dir).await.expect("open store");
         let input = json!({
@@ -5659,7 +5851,7 @@ mod tests {
                     &[ClientToolHandoffCall {
                         call_id: format!("call_shell_{index}"),
                         name: "shell_command".to_owned(),
-                        arguments: format!("{{\"command\":\"failing-command-{index}\"}}"),
+                        arguments: "{\"command\":\"failing-command\"}".to_owned(),
                     }],
                     Some(&json!({ "input_tokens": 10, "output_tokens": 1, "total_tokens": 11 })),
                 )
@@ -5680,22 +5872,38 @@ mod tests {
                 .settle_client_tool_handoff_outputs(&followup_id, &followup_input)
                 .await
                 .expect("settle output");
-            if index < 2 {
-                assert!(stop.is_none());
-            } else {
-                assert_eq!(
-                    stop.as_ref().map(|stop| stop.reason.as_str()),
-                    Some("consecutive_failures")
-                );
-            }
+            assert!(
+                stop.is_none(),
+                "settled failures are diagnostics; the model should see them first"
+            );
         }
+
+        let stop = store
+            .record_client_tool_handoff_calls(
+                "resp_handoff_retry",
+                &input,
+                &[ClientToolHandoffCall {
+                    call_id: "call_shell_retry".to_owned(),
+                    name: "shell_command".to_owned(),
+                    arguments: "{\"command\":\"failing-command\"}".to_owned(),
+                }],
+                Some(&json!({ "input_tokens": 10, "output_tokens": 1, "total_tokens": 11 })),
+            )
+            .await
+            .expect("record repeated handoff");
+        assert!(
+            stop.is_none(),
+            "repeated handoff diagnostics should not directly interrupt the agent"
+        );
 
         let stop = store
             .client_tool_handoff_guard_preflight("resp_followup", &input)
             .await
-            .expect("preflight")
-            .expect("stopped turn should be remembered");
-        assert_eq!(stop.reason, "consecutive_failures");
+            .expect("preflight");
+        assert!(
+            stop.is_none(),
+            "guard stops are scoped to the repeated tool call and must not poison later continue requests"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
