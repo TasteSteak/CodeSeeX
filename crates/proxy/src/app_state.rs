@@ -1,3 +1,5 @@
+use crate::manager_service::ReleaseNotesCache;
+use crate::responses::canonical::CanonicalSessionCore;
 use crate::runtime_config::RuntimeConfigService;
 use crate::telemetry::TelemetryHub;
 use codeseex_core::AppConfig;
@@ -11,6 +13,8 @@ pub(crate) struct ProxyState {
     pub(crate) runtime_config: RuntimeConfigService,
     pub(crate) store: Store,
     pub(crate) telemetry: TelemetryHub,
+    pub(crate) canonical_sessions: CanonicalSessionCore,
+    pub(crate) release_notes: ReleaseNotesCache,
     pub(crate) v1_access_token: String,
 }
 
@@ -21,6 +25,8 @@ impl ProxyState {
             runtime_config: RuntimeConfigService::new(config),
             store,
             telemetry: TelemetryHub::new(),
+            canonical_sessions: CanonicalSessionCore::default(),
+            release_notes: ReleaseNotesCache::default(),
             v1_access_token,
         }
     }

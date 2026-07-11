@@ -321,29 +321,15 @@ fn sanitize_chat_tool_protocol(
                         continue;
                     }
 
-                    if !tool_messages.is_empty() {
-                        let mut subset = message;
-                        subset.tool_calls = Some(
-                            calls
-                                .iter()
-                                .filter(|call| {
-                                    tool_call_id(call)
-                                        .map(|id| seen.contains(id))
-                                        .unwrap_or(false)
-                                })
-                                .cloned()
-                                .collect(),
-                        );
-                        output.push(drop_empty_assistant_tool_payload(subset));
-                        output.extend(ordered_tool_messages(tool_messages, &expected_ids));
-                        index = cursor;
-                        continue;
-                    }
-
                     if let Some(downgraded) = downgrade_incomplete_assistant(message) {
                         output.push(downgraded);
                     }
-                    index += 1;
+                    output.extend(tool_messages.iter().map(orphan_tool_result_fact));
+                    index = if tool_messages.is_empty() {
+                        index + 1
+                    } else {
+                        cursor
+                    };
                     continue;
                 }
             }
@@ -391,27 +377,6 @@ fn tool_call_id(call: &Value) -> Option<&str> {
     call.get("id")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-}
-
-fn drop_empty_assistant_tool_payload(mut message: ChatMessage) -> ChatMessage {
-    let has_calls = message
-        .tool_calls
-        .as_ref()
-        .map(|calls| !calls.is_empty())
-        .unwrap_or(false);
-    if !has_calls {
-        message.tool_calls = None;
-        if message
-            .reasoning_content
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            message.reasoning_content = None;
-        }
-    }
-    message
 }
 
 fn downgrade_incomplete_assistant(mut message: ChatMessage) -> Option<ChatMessage> {
@@ -1316,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn non_contiguous_tool_outputs_do_not_create_incomplete_chat_tool_group() {
+    fn non_contiguous_tool_outputs_preserve_results_without_splitting_a_tool_group() {
         let input = json!([
             {
                 "type":"function_call",
@@ -1350,14 +1315,17 @@ mod tests {
         let compiled = compile_responses_input(&input);
 
         assert_legal_chat_tool_protocol(&compiled.messages);
-        let first_assistant = compiled
+        assert!(!compiled.messages.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .map(|calls| !calls.is_empty())
+                .unwrap_or(false)
+        }));
+        assert!(compiled
             .messages
             .iter()
-            .find(|message| message.role == "assistant")
-            .expect("assistant tool replay");
-        let calls = first_assistant.tool_calls.as_ref().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["id"], "call_resources");
+            .any(|message| message.content.contains("call_resources")));
         assert!(compiled
             .messages
             .iter()

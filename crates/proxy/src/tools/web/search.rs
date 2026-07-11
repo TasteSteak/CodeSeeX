@@ -128,6 +128,7 @@ pub(super) async fn warm_sources(client: &reqwest::Client, proxy_mode: NetworkPr
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_search_sources_progressive(
     client: &reqwest::Client,
     query: &str,

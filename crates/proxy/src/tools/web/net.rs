@@ -124,6 +124,6 @@ mod tests {
 
     #[test]
     fn web_request_timeout_stays_short_enough_for_agent_loops() {
-        assert!(WEB_REQUEST_TIMEOUT_SECS <= 12);
+        const { assert!(WEB_REQUEST_TIMEOUT_SECS <= 12) }
     }
 }

@@ -239,14 +239,14 @@ pub(super) fn client_handoff_guard_terminal_sse(
     sequence: &mut u64,
 ) -> Bytes {
     let response = client_handoff_guard_terminal_response(response_id, model, code, message, usage);
-    Bytes::from(sse_bytes(
+    sse_bytes(
         "response.failed",
         json!({
             "type": "response.failed",
             "response": response,
             "sequence_number": next_sequence(sequence)
         }),
-    ))
+    )
 }
 
 fn usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {

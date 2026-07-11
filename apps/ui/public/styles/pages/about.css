@@ -246,9 +246,15 @@
     background: var(--bg-panel); 
   }
   
+  .about-product-actions {
+    width: 100%;
+    display: grid;
+    gap: 8px;
+    margin-top: auto;
+  }
+
   .about-product-action { 
     width: 100%; 
-    margin-top: auto; 
   }
   
   .about-product-action:disabled { 

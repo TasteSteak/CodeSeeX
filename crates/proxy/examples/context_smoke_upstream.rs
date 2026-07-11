@@ -5,6 +5,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -23,10 +24,10 @@ struct AppState {
 async fn main() -> anyhow::Result<()> {
     let payload_file = env::var("PAYLOAD_FILE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("context-smoke-upstream-payload.json"));
+        .unwrap_or_else(|_| PathBuf::from(".private/context-smoke-upstream-payload.json"));
     let balance_file = env::var("BALANCE_FILE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("context-smoke-balance-request.json"));
+        .unwrap_or_else(|_| PathBuf::from(".private/context-smoke-balance-request.json"));
     let port = env::var("FAKE_UPSTREAM_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -100,7 +101,7 @@ async fn chat_completions(
         &state.payload_file,
         &json!({
             "path": uri.path(),
-            "body": redact_value(&parsed)
+            "trace": payload_trace(&parsed)
         }),
     ) {
         return error_response(
@@ -588,37 +589,52 @@ fn error_response(
 }
 
 fn write_json(path: &PathBuf, value: &Value) -> std::io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(path, value.to_string())
 }
 
-fn redact_value(value: &Value) -> Value {
-    match value {
-        Value::String(value) => Value::String(redact_secret_text(value)),
-        Value::Array(values) => Value::Array(values.iter().map(redact_value).collect()),
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| {
-                    if sensitive_key(key) {
-                        (key.clone(), Value::String("[redacted]".to_owned()))
-                    } else {
-                        (key.clone(), redact_value(value))
-                    }
-                })
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
+fn payload_trace(payload: &Value) -> Value {
+    let serialized = serde_json::to_vec(payload).unwrap_or_default();
+    let messages = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let roles = messages
+        .iter()
+        .filter_map(|message| message.get("role").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let tool_names = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let has_tool_result = messages
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"));
+    let payload_hash = Sha256::digest(&serialized)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
 
-fn sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key.contains("authorization")
-        || key.contains("api_key")
-        || key.contains("apikey")
-        || key.contains("access_token")
-        || key.contains("secret")
-        || key.contains("password")
+    json!({
+        "model": payload.get("model").and_then(Value::as_str),
+        "stream": payload.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        "message_count": messages.len(),
+        "message_roles": roles,
+        "tool_names": tool_names,
+        "has_tool_result": has_tool_result,
+        "payload_bytes": serialized.len(),
+        "estimated_input_tokens": serialized.len() / 4,
+        "payload_hash": payload_hash
+    })
 }
 
 fn redact_secret_text(value: &str) -> String {

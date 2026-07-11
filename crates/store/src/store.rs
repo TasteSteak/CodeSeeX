@@ -37,6 +37,8 @@ const CLIENT_HANDOFF_VOLUME_DIAGNOSTIC_THRESHOLD: u32 = 48;
 const IN_PROGRESS_TTL_SECONDS: i64 = 6 * 60 * 60;
 const LOG_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 
+type EventViewPage = (Vec<EventViewRecord>, bool, Option<String>);
+
 static STORE_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<StoreInner>>>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -1219,10 +1221,7 @@ impl Store {
         Ok(Some((matching, has_more)))
     }
 
-    fn runtime_event_views(
-        &self,
-        query: &EventViewQuery,
-    ) -> Result<Option<(Vec<EventViewRecord>, bool, Option<String>)>> {
+    fn runtime_event_views(&self, query: &EventViewQuery) -> Result<Option<EventViewPage>> {
         let limit = event_view_limit(query.limit);
         let inner = self.lock_inner()?;
         if inner.events.is_empty() {
@@ -1911,6 +1910,7 @@ fn event_title(event: &EventRecord, object: Option<&Map<String, Value>>) -> Stri
         "request_started" => "Request started".to_owned(),
         "request_completed" => "Request completed".to_owned(),
         "request_failed" => "Request failed".to_owned(),
+        "context_limit_exceeded" => "Upstream context limit reached".to_owned(),
         "service_request_diagnostic" => "Service request classified".to_owned(),
         "tool_call" => format!(
             "Tool call{}",
@@ -1977,6 +1977,19 @@ fn event_summary(event: &EventRecord, object: Option<&Map<String, Value>>) -> St
                 model_summary(object),
                 detail_string(object, "previous_response_id")
                     .map(|value| format!("previous={}", compact_log_string(&value, 48))),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" - "),
+            MAX_LOG_SUMMARY_CHARS,
+        ),
+        "context_limit_exceeded" => compact_log_string(
+            &[
+                nested_u64(object, "context_limit", "input_bytes")
+                    .map(|value| format!("input={value}B")),
+                nested_u64(object, "context_limit", "max_bytes")
+                    .map(|value| format!("limit={value}B")),
             ]
             .into_iter()
             .flatten()
@@ -2114,6 +2127,7 @@ fn event_risk_flags(event: &EventRecord, object: Option<&Map<String, Value>>) ->
     }
     match event.event_type.as_str() {
         "request_failed" => push_unique_flag(&mut flags, "request_failed"),
+        "context_limit_exceeded" => push_unique_flag(&mut flags, "context_limit"),
         "cost_risk_diagnostic" => {
             if let Some(warnings) = detail_array_strings(object, "warnings") {
                 for warning in warnings {
@@ -2863,6 +2877,14 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                 "upstream_error",
             ],
         ),
+        "context_limit_exceeded" => {
+            copy_log_fields(object, &mut output, &["id"]);
+            copy_safe_diagnostic_fields(
+                object,
+                &mut output,
+                &[("context_limit", &["code", "input_bytes", "max_bytes"][..])],
+            );
+        }
         "tool_loop_repeated_failure_stopped" | "tool_loop_web_search_budget_stopped" => {
             copy_log_fields(
                 object,
@@ -4107,9 +4129,9 @@ fn usage_final_anchor_for_handoff(
         if full_context_key.is_some() && full_context_key == final_turn.full_context_key {
             return Some(final_turn.id.clone());
         }
-        if prompt_cache_key.is_some() && prompt_cache_key == final_turn.prompt_cache_key {
-            fallback = Some(final_turn.id.clone());
-        } else if fallback.is_none() && delay <= Duration::minutes(3) {
+        if (prompt_cache_key.is_some() && prompt_cache_key == final_turn.prompt_cache_key)
+            || (fallback.is_none() && delay <= Duration::minutes(3))
+        {
             fallback = Some(final_turn.id.clone());
         }
     }
@@ -4359,12 +4381,10 @@ fn usage_active_session_anchor(
         {
             return Some(session.id.clone());
         }
-        if prompt_cache_key.is_some()
-            && prompt_cache_key == usage_prompt_cache_key(anchor_request)
-            && session.status == "running"
-        {
-            fallback = Some(session.id.clone());
-        } else if fallback.is_none() && delay <= Duration::minutes(3) && session.status == "running"
+        if session.status == "running"
+            && ((prompt_cache_key.is_some()
+                && prompt_cache_key == usage_prompt_cache_key(anchor_request))
+                || (fallback.is_none() && delay <= Duration::minutes(3)))
         {
             fallback = Some(session.id.clone());
         }
@@ -4468,11 +4488,9 @@ fn usage_request_event_segments(inner: &StoreInner, row: &UsageSessionRow) -> Ve
         .any(|event| matches!(event.event_type.as_str(), "tool_call" | "tool_result"));
     for event in events {
         match event.event_type.as_str() {
-            "upstream_call_usage_breakdown" => {
-                if has_tool_events {
-                    if let Some(segment) = usage_model_segment_from_event(event, row) {
-                        segments.push(segment);
-                    }
+            "upstream_call_usage_breakdown" if has_tool_events => {
+                if let Some(segment) = usage_model_segment_from_event(event, row) {
+                    segments.push(segment);
                 }
             }
             "tool_call" => {
@@ -7550,6 +7568,51 @@ mod tests {
             .any(|flag| flag == "high_input_items"));
         let detail_text = serde_json::to_string(&risk.safe_detail).expect("detail json");
         assert!(!detail_text.contains("unsafe_prompt"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn context_limit_event_exposes_only_safe_budget_metadata() {
+        let dir = temp_dir("context-limit-event-view");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .record_event(
+                "warn",
+                "context_limit_exceeded",
+                "Authoritative Codex replay exceeds the upstream context window.",
+                Some(&json!({
+                    "id": "resp_context_limit",
+                    "context_limit": {
+                        "code": "context_limit_exceeded",
+                        "input_bytes": 3_600_000,
+                        "max_bytes": 3_416_000,
+                        "unsafe_prompt": "do not expose"
+                    },
+                    "unsafe_request": "do not expose"
+                })),
+            )
+            .await
+            .expect("record context limit event");
+
+        let (views, _, _) = store
+            .recent_event_views(EventViewQuery {
+                limit: 10,
+                ..EventViewQuery::default()
+            })
+            .await
+            .expect("event views");
+        let event = views.first().expect("context limit event");
+
+        assert_eq!(event.title, "Upstream context limit reached");
+        assert_eq!(event.summary, "input=3600000B - limit=3416000B");
+        assert_eq!(event.request_id.as_deref(), Some("resp_context_limit"));
+        assert!(event.risk_flags.iter().any(|flag| flag == "context_limit"));
+        let detail = event.safe_detail.as_ref().expect("safe detail");
+        assert_eq!(detail["context_limit"]["input_bytes"], 3_600_000);
+        assert_eq!(detail["context_limit"]["max_bytes"], 3_416_000);
+        assert!(detail.to_string().contains("context_limit_exceeded"));
+        assert!(!detail.to_string().contains("do not expose"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

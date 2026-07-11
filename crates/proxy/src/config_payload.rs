@@ -232,9 +232,7 @@ fn cleanup_tool_settings(tools: &mut UserToolsConfig) {
 }
 
 fn is_vision_tool_config_key(key: &str) -> bool {
-    crate::tools::vision::config_keys()
-        .iter()
-        .any(|candidate| *candidate == key)
+    crate::tools::vision::config_keys().contains(&key)
 }
 
 fn set_vision_tool_setting_from_payload(tools: &mut UserToolsConfig, key: &str, value: &Value) {

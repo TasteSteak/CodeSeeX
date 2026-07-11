@@ -773,6 +773,31 @@ async fn responses(
         );
     }
     let built_context = build_response_context(&state, &input, previous_for_context).await;
+    if let Some(limit) = built_context.upstream_context_limit.as_ref() {
+        let detail = json!({
+            "error": "authoritative Codex replay exceeds the configured upstream context window",
+            "context_limit": limit.clone(),
+            "context": built_context.diagnostic.clone()
+        });
+        let _ = state
+            .store
+            .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+            .await;
+        let _ = state
+            .store
+            .record_event(
+                "warn",
+                "context_limit_exceeded",
+                "Authoritative Codex replay exceeds the upstream context window.",
+                Some(&json!({ "id": id, "context_limit": limit.clone() })),
+            )
+            .await;
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "context_limit_exceeded",
+            "The Codex context exceeds the configured upstream window. Compact the Codex thread and retry; CodeSeeX did not truncate the replay.".to_owned(),
+        );
+    }
     let tool_execution_context = crate::tools::ToolExecutionContext::from_request(&input);
     let current_image_refs = built_context.current_image_refs.clone();
     let mut context_diagnostic = built_context.diagnostic.clone();
@@ -3171,6 +3196,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn recover_streaming_tool_loop_with_final_response(
     state: &ProxyState,
     config: &codeseex_core::AppConfig,

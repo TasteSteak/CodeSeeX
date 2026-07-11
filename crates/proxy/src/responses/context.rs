@@ -13,16 +13,12 @@ use codeseex_store::RequestStatus;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 mod budget;
-use budget::{
-    budget_messages_for_upstream, messages_json_bytes, upstream_context_budget_bytes, BudgetMode,
-};
+use budget::{budget_messages_for_upstream, BudgetMode};
 pub(crate) use budget::{estimate_tokens_from_messages, estimate_tokens_from_text};
+#[cfg(test)]
+use budget::{messages_json_bytes, upstream_context_budget_bytes};
 
 const RECENT_TOOL_FACT_REQUEST_LIMIT: u32 = 200;
-const CODEX_REPLAY_TOOL_COMPACT_MAX_FACTS: usize = 64;
-const CODEX_REPLAY_TOOL_COMPACT_ARGUMENT_CHARS: usize = 360;
-const CODEX_REPLAY_TOOL_COMPACT_OUTPUT_CHARS: usize = 720;
-const CODEX_REPLAY_MESSAGE_COMPACT_CHARS: usize = 900;
 
 pub(crate) struct BuiltResponseContext {
     pub(crate) messages: Vec<ChatMessage>,
@@ -31,47 +27,7 @@ pub(crate) struct BuiltResponseContext {
     pub(crate) tool_facts: Vec<String>,
     pub(crate) diagnostic: Value,
     pub(crate) history_message_count: usize,
-}
-
-struct CodexReplayCompaction {
-    messages: Vec<ChatMessage>,
-    tail_start: usize,
-    diagnostic: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CodexReplayPrefixCoverage {
-    checked: bool,
-    complete: bool,
-    prefix_messages: usize,
-    matched_messages: usize,
-    first_unmatched_index: Option<usize>,
-}
-
-impl CodexReplayPrefixCoverage {
-    fn diagnostic(&self) -> Value {
-        json!({
-            "checked": self.checked,
-            "complete": self.complete,
-            "prefix_messages": self.prefix_messages,
-            "matched_messages": self.matched_messages,
-            "first_unmatched_index": self.first_unmatched_index
-        })
-    }
-}
-
-#[derive(Default)]
-struct CodexReplayFactCounters {
-    compacted_blocks: usize,
-    compacted_tool_results: usize,
-    omitted_facts: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ToolCallSignature {
-    id: String,
-    name: String,
-    arguments: String,
+    pub(crate) upstream_context_limit: Option<Value>,
 }
 
 #[derive(Default)]
@@ -85,15 +41,14 @@ struct ResponseHistoryContext {
 enum CodexFullContextReplayStrategy {
     NotCodexFullContext,
     ExplicitPreviousIncremental,
-    ClientFullReplay,
-    LocalPromptCacheChain,
+    CanonicalAuthoritativeReplay,
 }
 
 impl CodexFullContextReplayStrategy {
     fn select(
         is_codex_full_context: bool,
         has_explicit_previous: bool,
-        local_replay_prefix_covered: bool,
+        _local_replay_prefix_covered: bool,
     ) -> Self {
         if !is_codex_full_context {
             return Self::NotCodexFullContext;
@@ -101,41 +56,25 @@ impl CodexFullContextReplayStrategy {
         if has_explicit_previous {
             return Self::ExplicitPreviousIncremental;
         }
-        if local_replay_prefix_covered {
-            Self::LocalPromptCacheChain
-        } else {
-            Self::ClientFullReplay
-        }
+        Self::CanonicalAuthoritativeReplay
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::NotCodexFullContext => "not_codex_full_context",
             Self::ExplicitPreviousIncremental => "explicit_previous_incremental",
-            Self::ClientFullReplay => "client_full_replay",
-            Self::LocalPromptCacheChain => "local_prompt_cache_chain_current_tail",
+            Self::CanonicalAuthoritativeReplay => "canonical_authoritative_replay",
         }
     }
 
-    fn uses_client_full_replay(self) -> bool {
-        self == Self::ClientFullReplay
+    fn uses_authoritative_replay(self) -> bool {
+        self == Self::CanonicalAuthoritativeReplay
     }
 
     fn budget_mode(self) -> BudgetMode {
         match self {
-            Self::ClientFullReplay | Self::LocalPromptCacheChain => {
-                BudgetMode::CodexFullContextReplay
-            }
+            Self::CanonicalAuthoritativeReplay => BudgetMode::AuthoritativeReplay,
             Self::NotCodexFullContext | Self::ExplicitPreviousIncremental => BudgetMode::Standard,
-        }
-    }
-
-    fn protected_tail_offset(self, replay_tail_start: usize) -> usize {
-        match self {
-            Self::ClientFullReplay => replay_tail_start,
-            Self::LocalPromptCacheChain
-            | Self::ExplicitPreviousIncremental
-            | Self::NotCodexFullContext => 0,
         }
     }
 }
@@ -304,7 +243,12 @@ fn stored_response_starts_authoritative_client_replay(
             .as_ref()
             .and_then(|diagnostic| diagnostic.pointer("/codex_full_context_replay/strategy"))
             .and_then(Value::as_str)
-            == Some("client_full_replay")
+            .is_some_and(|strategy| {
+                matches!(
+                    strategy,
+                    "canonical_authoritative_replay" | "client_full_replay"
+                )
+            })
 }
 
 fn stored_full_context_original_input_items(input: &Value) -> Option<usize> {
@@ -395,13 +339,17 @@ pub(crate) async fn build_response_context(
     } else {
         &current_tool_call_ids
     };
-    let history_context = response_history_context(
-        state,
-        previous,
-        &current_tool_output_ids,
-        history_current_tool_call_ids,
-    )
-    .await;
+    let history_context = if replaying_codex_full_context {
+        ResponseHistoryContext::default()
+    } else {
+        response_history_context(
+            state,
+            previous,
+            &current_tool_output_ids,
+            history_current_tool_call_ids,
+        )
+        .await
+    };
     let mut tool_facts = history_context.tool_facts.clone();
     let current_valid_tool_call_ids = immediate_previous_tool_call_ids(state, previous).await;
     let current_context = compile_responses_input_with_tool_outputs(
@@ -413,46 +361,24 @@ pub(crate) async fn build_response_context(
     let original_current_message_count = current_context.messages.len();
     let current_context_diagnostic = current_context.diagnostic.clone();
     let original_current_messages = current_context.messages.clone();
-    let codex_replay_tail_start = replaying_codex_full_context
-        .then(|| codex_full_context_relevant_tail_start(&original_current_messages));
-    let replay_prefix_coverage = if replaying_codex_full_context && previous.is_some() {
-        codex_replay_prefix_coverage(
-            &history_context.messages,
-            &original_current_messages,
-            codex_replay_tail_start.unwrap_or(0),
-        )
-    } else {
-        CodexReplayPrefixCoverage::default()
-    };
+    let replay_prefix_coverage = json!({
+        "checked": false,
+        "reason": "canonical_session_core_uses_authoritative_client_replay"
+    });
     let replay_strategy = CodexFullContextReplayStrategy::select(
         codex_full_context_detected,
         has_explicit_previous,
-        previous.is_some() && replay_prefix_coverage.complete,
+        false,
     );
-    let replay_compaction = match replay_strategy {
-        CodexFullContextReplayStrategy::ClientFullReplay => prepare_codex_client_full_replay(
-            original_current_messages,
-            codex_replay_tail_start.unwrap_or(0),
-        ),
-        CodexFullContextReplayStrategy::LocalPromptCacheChain => {
-            select_codex_full_context_current_tail_messages(
-                original_current_messages,
-                codex_replay_tail_start.unwrap_or(0),
-            )
-        }
-        CodexFullContextReplayStrategy::NotCodexFullContext
-        | CodexFullContextReplayStrategy::ExplicitPreviousIncremental => CodexReplayCompaction {
-            messages: original_current_messages,
-            tail_start: 0,
-            diagnostic: json!({
-                "triggered": false,
-                "reason": replay_strategy.label()
-            }),
-        },
-    };
-    let current_messages = replay_compaction.messages;
+    let canonical_replay = replaying_codex_full_context.then(|| {
+        state
+            .canonical_sessions
+            .reconcile(input, &original_current_messages)
+            .diagnostic()
+    });
+    let current_messages = original_current_messages;
     let current_message_count = current_messages.len();
-    let history_messages = if replay_strategy.uses_client_full_replay() {
+    let history_messages = if replay_strategy.uses_authoritative_replay() {
         Vec::new()
     } else {
         history_context.messages
@@ -460,8 +386,11 @@ pub(crate) async fn build_response_context(
     let history_message_count = history_messages.len();
     let current_start_index = instruction_message_count + history_message_count;
     messages.extend(history_messages);
-    let recovered_tool_facts =
-        recover_current_web_search_facts(state, input.get("input").unwrap_or(&Value::Null)).await;
+    let recovered_tool_facts = if replaying_codex_full_context {
+        Vec::new()
+    } else {
+        recover_current_web_search_facts(state, input.get("input").unwrap_or(&Value::Null)).await
+    };
     if !recovered_tool_facts.is_empty() {
         let mut seen = tool_facts.iter().cloned().collect::<HashSet<_>>();
         let mut unique_recovered = Vec::new();
@@ -472,28 +401,20 @@ pub(crate) async fn build_response_context(
         }
     }
     messages.extend(current_messages.clone());
-    let dropped_duplicate_assistant_tool_calls = (replay_strategy
-        == CodexFullContextReplayStrategy::LocalPromptCacheChain)
-        .then(|| remove_duplicate_replay_assistant_tool_calls(&mut messages, current_start_index))
-        .unwrap_or(0);
     let pre_budget_message_count = messages.len();
     let budget_mode = replay_strategy.budget_mode();
-    let protected_start_index = match budget_mode {
-        BudgetMode::Standard => current_start_index,
-        BudgetMode::CodexFullContextReplay => {
-            current_start_index
-                + replay_strategy.protected_tail_offset(replay_compaction.tail_start)
-        }
-    };
+    let protected_start_index = current_start_index;
     let budgeted = budget_messages_for_upstream(messages, protected_start_index, budget_mode);
     let message_count = budgeted.messages.len();
+    let budget_diagnostic = budgeted.diagnostic.clone();
+    let upstream_context_limit = budgeted.rejection.clone();
     let diagnostic = json!({
         "instruction_messages": instruction_message_count,
         "history_messages": history_message_count,
         "current_messages": current_message_count,
         "total_messages": message_count,
         "pre_budget_messages": pre_budget_message_count,
-        "budget": budgeted.diagnostic,
+        "budget": budget_diagnostic,
         "budget_mode": budget_mode.label(),
         "protected_start_index": protected_start_index,
         "codex_full_context_replay": {
@@ -501,10 +422,8 @@ pub(crate) async fn build_response_context(
             "replay_applied": replaying_codex_full_context,
             "has_explicit_previous": has_explicit_previous,
             "strategy": replay_strategy.label(),
-            "history_strategy": if replay_strategy.uses_client_full_replay() {
-                "skip_local_history_trust_client_replay"
-            } else if replay_strategy == CodexFullContextReplayStrategy::LocalPromptCacheChain {
-                "local_prompt_cache_chain_current_tail"
+            "history_strategy": if replay_strategy.uses_authoritative_replay() {
+                "skip_local_history_use_authoritative_replay"
             } else if replay_strategy == CodexFullContextReplayStrategy::ExplicitPreviousIncremental {
                 "local_explicit_previous_chain"
             } else {
@@ -512,11 +431,12 @@ pub(crate) async fn build_response_context(
             },
             "original_current_messages": original_current_message_count,
             "selected_current_messages": current_message_count,
-            "tail_start": codex_replay_tail_start,
-            "selected_tail_start": replay_compaction.tail_start,
-            "tool_history_compaction": replay_compaction.diagnostic,
-            "dropped_duplicate_assistant_tool_calls": dropped_duplicate_assistant_tool_calls,
-            "local_replay_prefix_coverage": replay_prefix_coverage.diagnostic(),
+            "canonical_replay": canonical_replay,
+            "tool_history_compaction": {
+                "triggered": false,
+                "reason": "codex_replay_is_forwarded_without_proxy_compaction"
+            },
+            "local_replay_prefix_coverage": replay_prefix_coverage,
             "root_original_input_items": history_context.root_full_context_original_input_items
         },
         "current_input": current_context_diagnostic,
@@ -531,501 +451,7 @@ pub(crate) async fn build_response_context(
         tool_facts,
         diagnostic,
         history_message_count,
-    }
-}
-
-fn codex_replay_prefix_coverage(
-    history: &[ChatMessage],
-    client_replay: &[ChatMessage],
-    tail_start: usize,
-) -> CodexReplayPrefixCoverage {
-    let prefix_end = tail_start.min(client_replay.len());
-    let mut coverage = CodexReplayPrefixCoverage {
-        checked: true,
-        complete: prefix_end == 0,
-        prefix_messages: prefix_end,
-        ..Default::default()
-    };
-    let mut history_index = 0_usize;
-    for (client_index, client_message) in client_replay[..prefix_end].iter().enumerate() {
-        let matched = history[history_index..].iter().position(|history_message| {
-            replay_message_identity_matches(history_message, client_message)
-        });
-        let Some(offset) = matched else {
-            coverage.first_unmatched_index = Some(client_index);
-            return coverage;
-        };
-        history_index = history_index.saturating_add(offset).saturating_add(1);
-        coverage.matched_messages = coverage.matched_messages.saturating_add(1);
-    }
-    coverage.complete = true;
-    coverage
-}
-
-fn replay_message_identity_matches(left: &ChatMessage, right: &ChatMessage) -> bool {
-    if left.role != right.role
-        || left.content != right.content
-        || left.tool_call_id != right.tool_call_id
-    {
-        return false;
-    }
-    match (&left.tool_calls, &right.tool_calls) {
-        (Some(_), Some(_)) => {
-            let Some(left_calls) = tool_call_signatures_from_message(left) else {
-                return false;
-            };
-            let Some(right_calls) = tool_call_signatures_from_message(right) else {
-                return false;
-            };
-            left_calls == right_calls
-        }
-        (None, None) => true,
-        (Some(_), None) | (None, Some(_)) => false,
-    }
-}
-
-fn prepare_codex_client_full_replay(
-    messages: Vec<ChatMessage>,
-    tail_start: usize,
-) -> CodexReplayCompaction {
-    let initial_bytes = messages_json_bytes(&messages);
-    let max_bytes = upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay);
-    if initial_bytes > max_bytes {
-        return compact_codex_full_context_replay_messages(messages, tail_start);
-    }
-    CodexReplayCompaction {
-        messages,
-        tail_start,
-        diagnostic: json!({
-            "triggered": false,
-            "mode": "client_full_replay_within_budget",
-            "initial_bytes": initial_bytes,
-            "max_bytes": max_bytes,
-            "reason": "within_upstream_budget"
-        }),
-    }
-}
-
-fn select_codex_full_context_current_tail_messages(
-    messages: Vec<ChatMessage>,
-    tail_start: usize,
-) -> CodexReplayCompaction {
-    if messages.is_empty() {
-        return CodexReplayCompaction {
-            messages,
-            tail_start: 0,
-            diagnostic: json!({
-                "triggered": false,
-                "mode": "local_prompt_cache_chain_current_tail",
-                "reason": "empty_current_input"
-            }),
-        };
-    }
-
-    let prefix_end = tail_start.min(messages.len());
-    let original_message_count = messages.len();
-    let selected = if prefix_end < original_message_count {
-        messages.into_iter().skip(prefix_end).collect::<Vec<_>>()
-    } else {
-        messages
-            .last()
-            .cloned()
-            .into_iter()
-            .collect::<Vec<ChatMessage>>()
-    };
-    let selected_len = selected.len();
-    CodexReplayCompaction {
-        messages: selected,
-        tail_start: 0,
-        diagnostic: json!({
-            "triggered": false,
-            "mode": "local_prompt_cache_chain_current_tail",
-            "dropped_client_replay_prefix_messages": prefix_end,
-            "selected_tail_messages": selected_len
-        }),
-    }
-}
-
-fn remove_duplicate_replay_assistant_tool_calls(
-    messages: &mut Vec<ChatMessage>,
-    current_start_index: usize,
-) -> usize {
-    let current_start_index = current_start_index.min(messages.len());
-    let Some(history_call_signatures) = messages[..current_start_index]
-        .last()
-        .and_then(tool_call_signatures_from_message)
-    else {
-        return 0;
-    };
-    let Some(current_call_signatures) = messages
-        .get(current_start_index)
-        .and_then(tool_call_signatures_from_message)
-    else {
-        return 0;
-    };
-    if history_call_signatures != current_call_signatures {
-        return 0;
-    }
-    let current_tool_output_ids = messages[current_start_index..]
-        .iter()
-        .filter(|message| message.role == "tool")
-        .filter_map(|message| message.tool_call_id.clone())
-        .collect::<HashSet<_>>();
-    if !current_call_signatures
-        .iter()
-        .all(|signature| current_tool_output_ids.contains(&signature.id))
-    {
-        return 0;
-    }
-    messages.remove(current_start_index);
-    1
-}
-
-fn compact_codex_full_context_replay_messages(
-    messages: Vec<ChatMessage>,
-    tail_start: usize,
-) -> CodexReplayCompaction {
-    if messages.is_empty() || tail_start == 0 {
-        return CodexReplayCompaction {
-            tail_start,
-            messages,
-            diagnostic: json!({
-                "triggered": false,
-                "reason": "no_prior_replay_prefix"
-            }),
-        };
-    }
-
-    let prefix_end = tail_start.min(messages.len());
-    let old_message_count = prefix_end;
-    let old_tool_results = messages[..prefix_end]
-        .iter()
-        .filter(|message| message.role == "tool")
-        .count() as u64;
-    let old_tool_chars = messages[..prefix_end]
-        .iter()
-        .filter(|message| message.role == "tool")
-        .map(|message| message.content.chars().count() as u64)
-        .sum::<u64>();
-    let tail_starts_with_user = messages
-        .get(prefix_end)
-        .is_some_and(|message| message.role == "user");
-    let preserved_user_index = (!tail_starts_with_user)
-        .then(|| {
-            messages[..prefix_end]
-                .iter()
-                .rposition(|message| message.role == "user")
-        })
-        .flatten();
-    let before_user_end = preserved_user_index.unwrap_or(prefix_end);
-    let mut before_user_counters = CodexReplayFactCounters::default();
-    let before_user_facts =
-        collect_compacted_replay_facts(&messages, 0, before_user_end, &mut before_user_counters);
-    let mut after_user_counters = CodexReplayFactCounters::default();
-    let after_user_facts = preserved_user_index
-        .map(|index| {
-            collect_compacted_replay_facts(
-                &messages,
-                index + 1,
-                prefix_end,
-                &mut after_user_counters,
-            )
-        })
-        .unwrap_or_default();
-    let compacted_blocks = before_user_counters
-        .compacted_blocks
-        .saturating_add(after_user_counters.compacted_blocks);
-    let compacted_tool_results = before_user_counters
-        .compacted_tool_results
-        .saturating_add(after_user_counters.compacted_tool_results);
-    let omitted_facts = before_user_counters
-        .omitted_facts
-        .saturating_add(after_user_counters.omitted_facts);
-
-    let mut compacted = Vec::new();
-    if !before_user_facts.is_empty() {
-        compacted.push(ChatMessage::text(
-            "user",
-            compacted_replay_prefix_message(&before_user_facts, before_user_counters.omitted_facts),
-        ));
-    }
-    let protected_tail_start = if let Some(index) = preserved_user_index {
-        let start = compacted.len();
-        compacted.push(messages[index].clone());
-        if !after_user_facts.is_empty() {
-            compacted.push(ChatMessage::text(
-                "user",
-                compacted_replay_prefix_message(
-                    &after_user_facts,
-                    after_user_counters.omitted_facts,
-                ),
-            ));
-        }
-        start
-    } else {
-        compacted.len()
-    };
-    compacted.extend(messages.into_iter().skip(prefix_end));
-    CodexReplayCompaction {
-        messages: compacted,
-        tail_start: protected_tail_start,
-        diagnostic: json!({
-            "triggered": true,
-            "mode": "canonical_prior_replay_prefix",
-            "old_message_count": old_message_count,
-            "old_tool_result_items": old_tool_results,
-            "old_tool_output_chars": old_tool_chars,
-            "compacted_blocks": compacted_blocks,
-            "compacted_tool_results": compacted_tool_results,
-            "retained_compacted_facts": before_user_facts.len() + after_user_facts.len(),
-            "omitted_facts": omitted_facts,
-            "preserved_latest_user_message": preserved_user_index.is_some()
-        }),
-    }
-}
-
-fn collect_compacted_replay_facts(
-    messages: &[ChatMessage],
-    start: usize,
-    end: usize,
-    counters: &mut CodexReplayFactCounters,
-) -> Vec<String> {
-    let mut facts = Vec::new();
-    let mut index = start;
-    while index < end {
-        let message = &messages[index];
-        if message.role == "assistant" {
-            if let Some(calls) = message
-                .tool_calls
-                .as_ref()
-                .filter(|calls| !calls.is_empty())
-            {
-                let expected_ids = calls
-                    .iter()
-                    .filter_map(|call| call.get("id").and_then(Value::as_str))
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                if !expected_ids.is_empty() {
-                    let expected = expected_ids.iter().cloned().collect::<HashSet<_>>();
-                    let mut cursor = index + 1;
-                    let mut tool_results = Vec::new();
-                    while cursor < end && messages[cursor].role == "tool" {
-                        let Some(tool_call_id) = messages[cursor].tool_call_id.as_deref() else {
-                            break;
-                        };
-                        if !expected.contains(tool_call_id) {
-                            break;
-                        }
-                        tool_results.push(messages[cursor].clone());
-                        cursor += 1;
-                    }
-                    if !tool_results.is_empty() {
-                        push_compacted_tool_block_facts(
-                            &mut facts,
-                            message,
-                            calls,
-                            &tool_results,
-                            &mut counters.omitted_facts,
-                        );
-                        counters.compacted_blocks = counters.compacted_blocks.saturating_add(1);
-                        counters.compacted_tool_results = counters
-                            .compacted_tool_results
-                            .saturating_add(tool_results.len());
-                        index = cursor;
-                        continue;
-                    }
-                }
-            }
-        }
-        if message.role == "tool" {
-            push_compacted_standalone_tool_fact(&mut facts, message, &mut counters.omitted_facts);
-            counters.compacted_tool_results = counters.compacted_tool_results.saturating_add(1);
-            index += 1;
-            continue;
-        }
-        push_compacted_message_fact(&mut facts, message, &mut counters.omitted_facts);
-        index += 1;
-    }
-    facts
-}
-
-fn push_compacted_tool_block_facts(
-    facts: &mut Vec<String>,
-    assistant: &ChatMessage,
-    calls: &[Value],
-    tool_results: &[ChatMessage],
-    omitted_tool_results: &mut usize,
-) {
-    if facts.len() >= CODEX_REPLAY_TOOL_COMPACT_MAX_FACTS {
-        *omitted_tool_results = omitted_tool_results.saturating_add(tool_results.len());
-        return;
-    }
-    let mut by_id = tool_results
-        .iter()
-        .filter_map(|message| {
-            message
-                .tool_call_id
-                .as_deref()
-                .map(|id| (id.to_owned(), message))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    for call in calls {
-        if facts.len() >= CODEX_REPLAY_TOOL_COMPACT_MAX_FACTS {
-            *omitted_tool_results = omitted_tool_results.saturating_add(1);
-            continue;
-        }
-        let id = call.get("id").and_then(Value::as_str).unwrap_or("unknown");
-        let name = call
-            .pointer("/function/name")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown_tool");
-        let arguments = call
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let Some(result) = by_id.remove(id) else {
-            continue;
-        };
-        facts.push(format!(
-            "tool={name} call_id={} args={} output={}",
-            compact_line(id, 120),
-            compact_line(
-                &redact_inline_data_urls(arguments),
-                CODEX_REPLAY_TOOL_COMPACT_ARGUMENT_CHARS
-            ),
-            compact_line(
-                &redact_inline_data_urls(&result.content),
-                CODEX_REPLAY_TOOL_COMPACT_OUTPUT_CHARS
-            )
-        ));
-    }
-    if !assistant.content.trim().is_empty() && facts.len() < CODEX_REPLAY_TOOL_COMPACT_MAX_FACTS {
-        push_compacted_fact(
-            facts,
-            omitted_tool_results,
-            format!(
-                "assistant_note={}",
-                compact_line(&redact_inline_data_urls(&assistant.content), 360)
-            ),
-        );
-    }
-}
-
-fn push_compacted_standalone_tool_fact(
-    facts: &mut Vec<String>,
-    message: &ChatMessage,
-    omitted_tool_results: &mut usize,
-) {
-    if facts.len() >= CODEX_REPLAY_TOOL_COMPACT_MAX_FACTS {
-        *omitted_tool_results = omitted_tool_results.saturating_add(1);
-        return;
-    }
-    facts.push(format!(
-        "tool_result call_id={} output={}",
-        message.tool_call_id.as_deref().unwrap_or("unknown"),
-        compact_line(
-            &redact_inline_data_urls(&message.content),
-            CODEX_REPLAY_TOOL_COMPACT_OUTPUT_CHARS
-        )
-    ));
-}
-
-fn push_compacted_message_fact(
-    facts: &mut Vec<String>,
-    message: &ChatMessage,
-    omitted_facts: &mut usize,
-) {
-    let redacted_content = redact_inline_data_urls(&message.content);
-    let content = if redacted_content.chars().count() > CODEX_REPLAY_MESSAGE_COMPACT_CHARS {
-        format!(
-            "[omitted long message chars={} hash={}]",
-            redacted_content.chars().count(),
-            compact_context_hash(&redacted_content)
-        )
-    } else {
-        compact_line(&redacted_content, CODEX_REPLAY_MESSAGE_COMPACT_CHARS)
-    };
-    let reasoning = message
-        .reasoning_content
-        .as_deref()
-        .map(redact_inline_data_urls)
-        .map(|value| compact_line(&value, 360))
-        .filter(|value| !value.trim().is_empty());
-    let mut fact = if content.trim().is_empty() {
-        format!("{} message with empty visible content", message.role)
-    } else {
-        format!("{} message={}", message.role, content)
-    };
-    if let Some(reasoning) = reasoning {
-        fact.push_str(" reasoning=");
-        fact.push_str(&reasoning);
-    }
-    push_compacted_fact(facts, omitted_facts, fact);
-}
-
-fn compact_context_hash(value: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-fn push_compacted_fact(facts: &mut Vec<String>, omitted_facts: &mut usize, fact: String) {
-    if facts.len() >= CODEX_REPLAY_TOOL_COMPACT_MAX_FACTS {
-        *omitted_facts = omitted_facts.saturating_add(1);
-        return;
-    }
-    facts.push(fact);
-}
-
-fn compacted_replay_prefix_message(facts: &[String], omitted_facts: usize) -> String {
-    let mut text = String::from(
-        "CodeSeeX canonicalized the prior prefix of this Codex full-context replay to control token cost and preserve cache continuity. Treat these as historical conversation/tool facts; re-run tools if exact old output matters.\n",
-    );
-    for fact in facts {
-        text.push_str("- ");
-        text.push_str(fact);
-        text.push('\n');
-    }
-    if omitted_facts > 0 {
-        text.push_str(&format!(
-            "- {omitted_facts} older replay fact(s) omitted by the canonical replay budget.\n"
-        ));
-    }
-    text
-}
-
-pub(crate) fn codex_full_context_relevant_tail_start(messages: &[ChatMessage]) -> usize {
-    if messages.is_empty() {
-        return 0;
-    }
-
-    let last_user = messages.iter().rposition(|message| message.role == "user");
-    let last_tool_group_start = messages
-        .iter()
-        .rposition(|message| message.role == "tool")
-        .and_then(|tool_index| {
-            let tool_call_id = messages
-                .get(tool_index)
-                .and_then(|message| message.tool_call_id.as_deref())?;
-            messages[..tool_index].iter().rposition(|message| {
-                message
-                    .tool_calls
-                    .as_ref()
-                    .map(|calls| {
-                        calls.iter().any(|call| {
-                            call.get("id").and_then(Value::as_str) == Some(tool_call_id)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-        });
-
-    match (last_user, last_tool_group_start) {
-        (Some(user), Some(tool)) if tool > user => tool,
-        (Some(user), _) => user,
-        (None, Some(tool)) => tool,
-        (None, None) => messages.len().saturating_sub(1),
+        upstream_context_limit,
     }
 }
 
@@ -1478,41 +904,6 @@ fn tool_call_ids_from_message(message: &ChatMessage) -> Option<HashSet<String>> 
     (!ids.is_empty()).then_some(ids)
 }
 
-fn tool_call_signatures_from_message(message: &ChatMessage) -> Option<HashSet<ToolCallSignature>> {
-    if message.role != "assistant" {
-        return None;
-    }
-    let signatures = message
-        .tool_calls
-        .as_ref()?
-        .iter()
-        .map(tool_call_signature)
-        .collect::<Option<HashSet<_>>>()?;
-    (!signatures.is_empty()).then_some(signatures)
-}
-
-fn tool_call_signature(call: &Value) -> Option<ToolCallSignature> {
-    let id = call.get("id")?.as_str()?.to_owned();
-    let function = call.get("function").and_then(Value::as_object);
-    let name = function
-        .and_then(|value| value.get("name"))
-        .or_else(|| call.get("name"))
-        .and_then(Value::as_str)?
-        .to_owned();
-    let arguments = function
-        .and_then(|value| value.get("arguments"))
-        .or_else(|| call.get("arguments"))?;
-    let arguments = arguments
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| serde_json::to_string(arguments).ok())?;
-    Some(ToolCallSignature {
-        id,
-        name,
-        arguments,
-    })
-}
-
 fn response_input_tool_output_ids(input: &Value) -> HashSet<String> {
     let Value::Array(items) = input else {
         return HashSet::new();
@@ -1823,87 +1214,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_tool_call_identity_requires_matching_name_and_arguments() {
-        let earlier = ChatMessage::assistant_tool_calls(
-            vec![json!({
-                "id": "call_reused",
-                "type": "function",
-                "function": {
-                    "name": "shell_command",
-                    "arguments": "{\"command\":\"Get-Content old.rs\"}"
-                }
-            })],
-            "",
-        );
-        let later = ChatMessage::assistant_tool_calls(
-            vec![json!({
-                "id": "call_reused",
-                "type": "function",
-                "function": {
-                    "name": "shell_command",
-                    "arguments": "{\"command\":\"Get-Content new.rs\"}"
-                }
-            })],
-            "",
-        );
-
-        assert!(
-            !replay_message_identity_matches(&earlier, &later),
-            "reused ids with different arguments must not cover a replay prefix"
-        );
-
-        let mut messages = vec![
-            earlier,
-            later,
-            ChatMessage::tool_result("call_reused", "new file output"),
-        ];
-        assert_eq!(
-            remove_duplicate_replay_assistant_tool_calls(&mut messages, 1),
-            0,
-            "a current tool call with a reused id must remain unless its semantic call matches the pending history call"
-        );
-        assert_eq!(messages.len(), 3);
-        assert_eq!(
-            messages[1]
-                .tool_calls
-                .as_ref()
-                .and_then(|calls| calls.first())
-                .and_then(|call| call.pointer("/function/arguments"))
-                .and_then(Value::as_str),
-            Some("{\"command\":\"Get-Content new.rs\"}")
-        );
-    }
-
-    #[test]
-    fn replay_dedup_only_removes_the_matching_pending_tail_call() {
-        let pending = ChatMessage::assistant_tool_calls(
-            vec![json!({
-                "id": "call_pending",
-                "type": "function",
-                "function": {
-                    "name": "shell_command",
-                    "arguments": "{\"command\":\"Get-ChildItem\"}"
-                }
-            })],
-            "",
-        );
-        let mut messages = vec![
-            pending.clone(),
-            pending,
-            ChatMessage::tool_result("call_pending", "directory output"),
-        ];
-
-        assert_eq!(
-            remove_duplicate_replay_assistant_tool_calls(&mut messages, 1),
-            1
-        );
-        assert_eq!(messages.len(), 2);
-        assert!(messages[0].tool_calls.is_some());
-        assert_eq!(messages[1].role, "tool");
-        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_pending"));
-    }
-
-    #[test]
     fn replay_keeps_leading_tool_output_for_previous_handoff_call() {
         let previous_tool_call_ids = HashSet::from(["call_0".to_owned()]);
         let next_tool_output_ids = HashSet::from(["call_1".to_owned()]);
@@ -2043,116 +1353,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn codex_full_context_replay_compacts_old_tool_output_prefix() {
-        let mut messages = Vec::new();
-        for index in 0..20 {
-            let call_id = format!("call_{index}");
-            messages.push(ChatMessage::assistant_tool_calls(
-                vec![json!({
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": "read_file_range",
-                        "arguments": format!("{{\"path\":\"src/{index}.rs\"}}")
-                    }
-                })],
-                "",
-            ));
-            messages.push(ChatMessage::tool_result(
-                format!("call_{index}"),
-                format!("tool output {index} {}", "x".repeat(4096)),
-            ));
-        }
-        let tail_start = messages.len();
-        messages.push(ChatMessage::text("user", "latest user request"));
-
-        let compacted = compact_codex_full_context_replay_messages(messages, tail_start);
-
-        assert_eq!(
-            compacted.diagnostic["triggered"],
-            json!(true),
-            "old tool-heavy replay prefix should be compacted"
-        );
-        assert!(compacted.tail_start < tail_start);
-        assert!(compacted.messages[compacted.tail_start..]
-            .iter()
-            .any(|message| message.content == "latest user request"));
-        assert!(compacted.messages[..compacted.tail_start]
-            .iter()
-            .any(|message| {
-                message
-                    .content
-                    .contains("CodeSeeX canonicalized the prior prefix")
-            }));
-        assert!(!compacted.messages[..compacted.tail_start]
-            .iter()
-            .any(|message| message.role == "tool"));
-    }
-
-    #[test]
-    fn codex_full_context_replay_canonicalizes_plain_prior_prefix() {
-        let messages = vec![
-            ChatMessage::text("user", "first request with old context"),
-            ChatMessage::text("assistant", "old answer that should not stay raw"),
-            ChatMessage::text("user", "latest request"),
-        ];
-
-        let compacted = compact_codex_full_context_replay_messages(messages, 2);
-        let rendered = serde_json::to_string(&compacted.messages).expect("messages");
-
-        assert_eq!(compacted.diagnostic["triggered"], json!(true));
-        assert_eq!(compacted.tail_start, 1);
-        assert_eq!(compacted.messages.len(), 2);
-        assert!(rendered.contains("CodeSeeX canonicalized the prior prefix"));
-        assert!(rendered.contains("user message=first request with old context"));
-        assert!(rendered.contains("assistant message=old answer that should not stay raw"));
-        assert!(compacted.messages[1].content.contains("latest request"));
-    }
-
-    #[test]
-    fn codex_full_context_replay_compacts_same_turn_tool_history_before_active_group() {
-        let old_tool_call = vec![json!({
-            "id": "call_old",
-            "type": "function",
-            "function": { "name": "shell_command", "arguments": "{\"command\":\"rg old\"}" }
-        })];
-        let active_tool_call = vec![json!({
-            "id": "call_active",
-            "type": "function",
-            "function": { "name": "shell_command", "arguments": "{\"command\":\"cargo check\"}" }
-        })];
-        let messages = vec![
-            ChatMessage::text("user", "review this project and keep going"),
-            ChatMessage::assistant_tool_calls(old_tool_call, ""),
-            ChatMessage::tool_result("call_old", format!("old output {}", "x".repeat(16_000))),
-            ChatMessage::assistant_tool_calls(active_tool_call, ""),
-            ChatMessage::tool_result("call_active", "fresh compiler output"),
-        ];
-
-        let tail_start = codex_full_context_relevant_tail_start(&messages);
-        let compacted = compact_codex_full_context_replay_messages(messages, tail_start);
-        let rendered = serde_json::to_string(&compacted.messages).expect("messages");
-
-        assert_eq!(tail_start, 3);
-        assert_eq!(
-            compacted.diagnostic["mode"],
-            json!("canonical_prior_replay_prefix")
-        );
-        assert_eq!(
-            compacted.diagnostic["preserved_latest_user_message"],
-            json!(true)
-        );
-        assert!(compacted
-            .messages
-            .iter()
-            .any(|message| message.content == "review this project and keep going"));
-        assert!(rendered.contains("tool=shell_command"));
-        assert!(!rendered.contains(&"x".repeat(1024)));
-        assert!(rendered.contains("call_active"));
-        assert!(rendered.contains("fresh compiler output"));
-    }
-
     #[tokio::test]
     async fn codex_full_context_replay_trusts_client_when_local_prefix_diverges() {
         let dir = std::env::temp_dir().join(format!(
@@ -2215,12 +1415,11 @@ mod tests {
         assert!(rendered.contains("latest user request"));
         assert_eq!(
             built.diagnostic["codex_full_context_replay"]["history_strategy"],
-            json!("skip_local_history_trust_client_replay")
+            json!("skip_local_history_use_authoritative_replay")
         );
         assert_eq!(
-            built.diagnostic["codex_full_context_replay"]["local_replay_prefix_coverage"]
-                ["complete"],
-            json!(false)
+            built.diagnostic["codex_full_context_replay"]["local_replay_prefix_coverage"]["reason"],
+            json!("canonical_session_core_uses_authoritative_client_replay")
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -2297,22 +1496,21 @@ mod tests {
     }
 
     #[test]
-    fn codex_full_context_budget_drops_old_current_input_history() {
+    fn authoritative_replay_over_limit_is_rejected_without_dropping_history() {
         let mut messages = vec![ChatMessage::text("system", "instructions")];
-        for index in 0..120 {
+        for index in 0..600 {
             messages.push(ChatMessage::text(
                 "user",
                 format!("old full context item {index} {}", "x".repeat(8_000)),
             ));
         }
-        let tail_start = messages.len();
         messages.push(ChatMessage::text("user", "latest task"));
 
-        let budgeted =
-            budget_messages_for_upstream(messages, tail_start, BudgetMode::CodexFullContextReplay);
+        let budgeted = budget_messages_for_upstream(messages, 0, BudgetMode::AuthoritativeReplay);
 
-        assert_eq!(budgeted.diagnostic["mode"], "codex_full_context_replay");
+        assert_eq!(budgeted.diagnostic["mode"], "authoritative_replay");
         assert_eq!(budgeted.diagnostic["triggered"], true);
+        assert!(budgeted.rejection.is_some());
         assert!(budgeted
             .messages
             .iter()
@@ -2322,27 +1520,22 @@ mod tests {
             .iter()
             .any(|message| message.content == "latest task"));
         assert!(
-            !budgeted
-                .messages
-                .iter()
-                .any(|message| message.content.contains("old full context item 0")),
-            "{:?}",
             budgeted
                 .messages
                 .iter()
-                .map(|message| message.content.as_str())
-                .collect::<Vec<_>>()
+                .any(|message| message.content.contains("old full context item 0")),
+            "authoritative replay must remain intact when rejected"
         );
         assert!(
             messages_json_bytes(&budgeted.messages)
-                <= upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay)
+                > upstream_context_budget_bytes(BudgetMode::AuthoritativeReplay)
         );
     }
 
     #[test]
-    fn codex_full_context_budget_does_not_pin_old_user_messages_outside_structural_tail() {
+    fn authoritative_replay_never_silently_trims_old_user_messages() {
         let mut messages = vec![ChatMessage::text("system", "instructions")];
-        for index in 0..40 {
+        for index in 0..120 {
             messages.push(ChatMessage::text(
                 "user",
                 format!("user said marker-{index} {}", "u".repeat(16_000)),
@@ -2352,29 +1545,24 @@ mod tests {
                 format!("assistant verbose reply {index} {}", "x".repeat(24_000)),
             ));
         }
-        let tail_start = messages.len();
         messages.push(ChatMessage::text("user", "what did I say"));
 
-        let budgeted =
-            budget_messages_for_upstream(messages, tail_start, BudgetMode::CodexFullContextReplay);
+        let budgeted = budget_messages_for_upstream(messages, 0, BudgetMode::AuthoritativeReplay);
 
-        assert_eq!(budgeted.diagnostic["mode"], "codex_full_context_replay");
+        assert_eq!(budgeted.diagnostic["mode"], "authoritative_replay");
         assert_eq!(budgeted.diagnostic["triggered"], true);
         assert!(
-            !budgeted
+            budgeted
                 .messages
                 .iter()
                 .any(|message| message.content.contains("user said marker-0")),
-            "old user messages must not bypass the structural full-context replay budget"
+            "old user messages must remain visible until Codex itself compacts"
         );
         assert!(budgeted
             .messages
             .iter()
             .any(|message| message.content == "what did I say"));
-        assert!(
-            messages_json_bytes(&budgeted.messages)
-                <= upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay)
-        );
+        assert!(budgeted.rejection.is_some());
     }
 
     #[test]
@@ -2394,16 +1582,15 @@ mod tests {
         let initial_bytes = messages_json_bytes(&messages);
         assert!(initial_bytes > 80 * 1024, "{initial_bytes}");
         assert!(
-            initial_bytes < upstream_context_budget_bytes(BudgetMode::CodexFullContextReplay),
+            initial_bytes < upstream_context_budget_bytes(BudgetMode::AuthoritativeReplay),
             "{initial_bytes}"
         );
 
-        let tail_start = messages.len() - 1;
-        let budgeted =
-            budget_messages_for_upstream(messages, tail_start, BudgetMode::CodexFullContextReplay);
+        let budgeted = budget_messages_for_upstream(messages, 0, BudgetMode::AuthoritativeReplay);
 
-        assert_eq!(budgeted.diagnostic["mode"], "codex_full_context_replay");
+        assert_eq!(budgeted.diagnostic["mode"], "authoritative_replay");
         assert_eq!(budgeted.diagnostic["triggered"], false);
+        assert!(budgeted.rejection.is_none());
         assert!(budgeted
             .messages
             .iter()
@@ -2411,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_full_context_tail_start_includes_current_tool_result_group() {
+    fn authoritative_replay_preserves_current_tool_result_group() {
         let mut messages = Vec::new();
         for index in 0..40 {
             messages.push(ChatMessage::text(
@@ -2431,9 +1618,7 @@ mod tests {
         ));
         messages.push(ChatMessage::text("user", "summarize the result"));
 
-        let tail_start = codex_full_context_relevant_tail_start(&messages);
-        let budgeted =
-            budget_messages_for_upstream(messages, tail_start, BudgetMode::CodexFullContextReplay);
+        let budgeted = budget_messages_for_upstream(messages, 0, BudgetMode::AuthoritativeReplay);
 
         assert!(budgeted.messages.iter().any(|message| {
             message
@@ -2727,7 +1912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_web_search_call_without_output_does_not_recover_global_persisted_fact() {
+    async fn authoritative_codex_replay_does_not_recover_persisted_web_search_facts() {
         let dir =
             std::env::temp_dir().join(format!("codeseex-context-{}", Uuid::new_v4().simple()));
         let store = Store::open(&dir).await.expect("open store");
@@ -2777,6 +1962,10 @@ mod tests {
             .expect("finish parent");
 
         let input = json!({
+            "instructions": "You are Codex.",
+            "tools": [],
+            "prompt_cache_key": "canonical-web-search-replay",
+            "client_metadata": { "x-codex-installation-id": "codex-test" },
             "input": [
                 {
                     "type":"web_search_call",
@@ -2798,6 +1987,14 @@ mod tests {
         assert!(joined.contains("Shanghai weather"));
         assert!(!joined.contains("light rain"));
         assert_eq!(built.diagnostic["recovered_tool_facts"].as_u64(), Some(0));
+        assert_eq!(
+            built.diagnostic["codex_full_context_replay"]["strategy"],
+            json!("canonical_authoritative_replay")
+        );
+        assert_eq!(
+            built.diagnostic["codex_full_context_replay"]["canonical_replay"]["alignment"],
+            json!("rebuilt_no_active_session")
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.6.0 - 2026-07-11
+
+CodeSeeX 0.6.0 is a context-runtime correctness release. It makes Codex HTTP full replay authoritative, preserves valid tool protocol groups, keeps workspace inspection bounded, and adds an in-app release-notes view with a safe offline fallback.
+
+### Highlights
+
+- Added a Canonical Session Core that aligns active HTTP replay in memory using anonymous fingerprints without reading Codex transcripts or creating a durable conversation store.
+- Codex full replay is now forwarded as the authoritative context instead of being rewritten into a local tail-only continuation.
+- Tool-call batches and their matching results are handled as atomic protocol groups, including mixed internal and client-tool batches.
+- Workspace inspection tools now return bounded, paginated output for large files and directories while keeping broad repository search available.
+- Added an in-app Release notes view below the official website action in About.
+
+### Added
+
+- Added structured, version-pinned release notes in English and Simplified Chinese, with all other release-note locales falling back to English.
+- Added a local release-notes API with GitHub tag lookup, ETag revalidation, a short network timeout, in-memory retry backoff, and bundled offline content.
+- Added a local fake upstream smoke example for zero-cost checks of replay shape, cache-prefix continuity, tool pairing, and redacted outbound traces.
+- Added paginated `list_directory`, bounded `read_file_range` continuation for long lines, and source-first `workspace_search` coverage with explicit truncation diagnostics.
+
+### Changed
+
+- Removed the proxy-specific 96k full-replay budget. Context is now limited only by the configured upstream model window and required output/tool reserves.
+- Full replay divergence or Codex compaction now rebuilds the active in-memory alignment from the new Codex input; it never silently retains only a local tail.
+- Tool outputs, binary/data URLs, credentials, search snippets, and diagnostics are bounded and redacted before they can expand replay cost.
+- The Apply Patch compatibility path only repairs the narrowly identified malformed blank context-line shape; already valid and ambiguous patches are left unchanged.
+- Release assets and website cache versions now follow the desktop version consistently.
+
+### Fixed
+
+- Fixed cache-hit resets, oscillating context size, and semantic context loss caused by proxy-side tail continuation or replay truncation.
+- Fixed malformed mixed tool histories being sent upstream as incomplete assistant tool-call groups.
+- Fixed repeated long file reads, directory listings, and broad searches being able to produce oversized tool results.
+- Fixed manual fake-upstream traces defaulting to repository-root files; they now default to the ignored `.private` directory.
+
+### Compatibility Notes
+
+- CodeSeeX still does not read, modify, or restore Codex jsonl transcripts. Canonical alignment exists only in RAM and expires with the proxy process or session TTL.
+- If the authoritative Codex replay cannot fit the real upstream context window, CodeSeeX returns a controlled context-limit diagnostic instead of silently summarizing or dropping history.
+- Release notes use the matching GitHub tag when available. If GitHub is unavailable or the tag has not been published yet, the bundled release notes remain available offline.
+
 ## 0.5.4 - 2026-07-08
 
 CodeSeeX 0.5.4 is a focused agent-stability hotfix. It keeps client tool failures visible to the model, prevents stale handoff guards from blocking follow-up turns, and improves upstream decode diagnostics.

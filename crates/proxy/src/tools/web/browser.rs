@@ -287,10 +287,7 @@ where
     let mut output = Vec::new();
     let mut truncated = false;
     let mut buffer = [0_u8; 8192];
-    loop {
-        let Ok(count) = reader.read(&mut buffer).await else {
-            break;
-        };
+    while let Ok(count) = reader.read(&mut buffer).await {
         if count == 0 {
             break;
         }

@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.5.4" src="https://img.shields.io/badge/version-0.5.4-1f6feb">
+  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.5.4`
+当前版本：`0.6.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -80,7 +80,7 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 - CodeSeeX 托管的 Web Search，包含有界执行、source diagnostics、自动打开证据页和本地/私网目标保护。
 - 只读 workspace 工具，用于文件和仓库检查。
 - 可选 Vision 模块，支持 OpenAI 兼容的图像理解和图像生成 endpoint。
-- 上下文编译：已验证工具事实、compact summary、binary/data URL 脱敏和工具结果有界 replay。
+- 上下文编译：以 Codex full replay 为权威输入，保持工具调用/结果原子组、限制工具输出、脱敏 binary/data URL；真实窗口超限时返回可诊断错误，不由代理静默截断 replay。
 - 用量会话：区分普通用户 turn、服务请求、模型迭代、工具阶段、handoff、缓存命中、缓存未命中、输出 token 和估算费用。
 - 桌面管理器：托盘、自动启动、更新检查、日志、用量、余额、设置、工具和 Adapter 配置。
 - Community tool discovery：位于 `~/.codeseex/extension/tools/<tool>/manifest.json`，默认关闭，仅通过显式命令 manifest 执行。

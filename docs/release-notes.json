@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "version": "0.6.0",
+      "released_at": "2026-07-11",
+      "notes": {
+        "en_us": {
+          "summary": "A context-runtime correctness release for stable Codex replay, valid tool groups, and bounded workspace tooling.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "Codex HTTP full replay is now the authoritative context instead of a proxy-managed tail continuation.",
+                "Tool-call batches and matching results stay atomic, including mixed internal and client-tool batches.",
+                "Workspace file, directory, and search tools now use bounded, paginated output for large repositories.",
+                "Added in-app release notes with version-pinned GitHub lookup and bundled offline fallback."
+              ]
+            },
+            {
+              "title": "Fixed",
+              "items": [
+                "Fixed proxy-side replay trimming causing cache resets, oscillating context size, and lost historical context.",
+                "Fixed incomplete tool-call histories that could produce upstream tool-protocol errors."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "一次聚焦上下文运行时正确性的更新，改进 Codex replay 连续性、工具协议完整性和 workspace 工具边界。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "Codex HTTP full replay 现在作为权威上下文处理，不再使用代理管理的尾部 continuation。",
+                "工具调用批次和对应结果保持原子完整，包括内部工具与客户端工具混合批次。",
+                "workspace 文件、目录和搜索工具现在为大型仓库提供有界、可分页的输出。",
+                "新增应用内更新日志，支持按版本读取 GitHub 内容和内置离线回退。"
+              ]
+            },
+            {
+              "title": "修复",
+              "items": [
+                "修复代理侧 replay 裁剪导致的缓存重置、上下文使用率跳动和历史上下文丢失。",
+                "修复不完整工具调用历史可能触发上游工具协议错误的问题。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": "0.5.4",
+      "released_at": "2026-07-08",
+      "notes": {
+        "en_us": {
+          "summary": "A focused agent-stability hotfix for client tool recovery and upstream diagnostics.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "Repeated client tool failures now remain visible to the model instead of becoming terminal proxy errors by default.",
+                "Follow-up requests such as \"continue\" no longer inherit a stale client tool handoff stop.",
+                "Upstream response decode failures now include safer diagnostics for network, proxy, and upstream troubleshooting."
+              ]
+            },
+            {
+              "title": "Fixed",
+              "items": [
+                "Fixed legitimate troubleshooting workflows being interrupted after several failing shell command handoffs.",
+                "Fixed repeated patch or shell failures being able to affect later continuation requests."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "一次聚焦 Agent 稳定性的热修复，改进客户端工具恢复与上游诊断。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "重复客户端工具失败默认继续回填给模型处理，不再直接变成代理层终止错误。",
+                "“请继续”等后续请求不再继承旧的客户端工具 handoff 停止状态。",
+                "上游响应体解码失败现在会记录更安全的网络、代理与上游诊断信息。"
+              ]
+            },
+            {
+              "title": "修复",
+              "items": [
+                "修复正常排障流程中多个 shell_command 失败后被过早中断的问题。",
+                "修复重复 apply_patch 或 shell 失败可能影响后续继续请求的问题。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": "0.5.3",
+      "released_at": "2026-07-06",
+      "notes": {
+        "en_us": {
+          "summary": "Release-readiness and desktop updater stability improvements.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "Added in-app update checks, download progress, cancellation, and passive installation on supported desktop builds.",
+                "Added Codex runtime catalog diagnostics and safer experimental Codex App model-list integration.",
+                "Improved full-context replay handling around Codex App model switches."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "发布准备与桌面更新稳定性改进。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "新增应用内检查更新、下载进度、取消下载和受支持桌面包的被动安装。",
+                "新增 Codex runtime catalog 诊断，并加固实验性 Codex App 模型列表集成。",
+                "改进 Codex App 切换模型时的 full-context replay 处理。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": "0.5.2",
+      "released_at": "2026-07-02",
+      "notes": {
+        "en_us": {
+          "summary": "A stability and billing-display update for long-running agent tasks.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "Added DeepSeek peak and off-peak billing estimates, enabled by default.",
+                "Improved Vision tool configuration layout and scoped right-click Select all to the active page or input.",
+                "Improved usage billing buckets by model and billing period."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "面向长时间 Agent 任务的稳定性与计费显示更新。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "新增并默认开启 DeepSeek 峰谷计费估算。",
+                "优化识图工具配置布局，并将右键全选限制在当前页面或输入框。",
+                "按模型和计费时段拆分用量计费桶。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "version": "0.5.1",
+      "released_at": "2026-06-23",
+      "notes": {
+        "en_us": {
+          "summary": "A stability and experience update for the Rust and Tauri desktop line.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "Refined Usage, Logs, settings, screenshots, and release-facing desktop UI.",
+                "Added optional DeepSeek Flash and Pro selection in Codex App while keeping CodeSeeX-side switching as the recommended path.",
+                "Improved Web Search probing, evidence opening, fallback behavior, and diagnostics."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "Rust 与 Tauri 桌面版本线的一次稳定性和体验更新。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "优化 Usage、Logs、设置、截图和发布相关的桌面 UI。",
+                "可选在 Codex App 中选择 DeepSeek Flash / Pro，仍建议优先从 CodeSeeX 内切换。",
+                "优化 Web Search 的源探针、证据打开、fallback 行为和诊断。"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

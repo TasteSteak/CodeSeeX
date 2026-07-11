@@ -35,7 +35,7 @@ struct UsageSessionQuery {
 }
 
 pub(crate) fn router() -> Router<ProxyState> {
-    let router = Router::new()
+    Router::new()
         .route("/health", get(health))
         .route("/api/status", get(api_status))
         .route("/api/usage", get(api_usage))
@@ -61,6 +61,7 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/tool-assets/{tool_id}/{file}", get(tool_asset))
         .route("/api/app-info", get(api_app_info))
         .route("/api/update-check", get(api_update_check))
+        .route("/api/release-notes", get(api_release_notes))
         .route("/api/deepseek/balance", get(api_balance))
         .route("/api/search-sources/health", get(search_sources_health))
         .route("/api/events", get(api_events))
@@ -75,8 +76,7 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route(
             "/api/codex-adapter/runtime",
             post(verify_codex_runtime).get(verify_codex_runtime),
-        );
-    router
+        )
 }
 
 pub(crate) fn ensure_catalog(config: &AppConfig) -> anyhow::Result<()> {
@@ -413,6 +413,14 @@ async fn api_update_check(State(state): State<ProxyState>) -> impl IntoResponse 
     manager_json_response(
         ManagerRuntime::from_proxy_state(&state)
             .handle_json("GET", "/api/update-check", None, None)
+            .await,
+    )
+}
+
+async fn api_release_notes(State(state): State<ProxyState>) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/release-notes", None, None)
             .await,
     )
 }

@@ -34,9 +34,8 @@ pub(super) fn tool_exposure_diagnostic(
     };
     let missing_expected_codeseex_tools = expected_codeseex_tools
         .iter()
-        .filter_map(|name| {
-            (!upstream_names.iter().any(|upstream| upstream == name)).then(|| name.to_owned())
-        })
+        .filter(|&name| !upstream_names.iter().any(|upstream| upstream == name))
+        .map(|name| name.to_owned())
         .collect::<Vec<_>>();
     let enabled_codeseex_tools_missing = !service_kind.is_service()
         && codeseex_base_tools_injected

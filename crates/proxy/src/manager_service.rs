@@ -16,14 +16,95 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const CODESEEX_WEBSITE_URL: &str = "https://tastesteak.github.io/CodeSeeX/";
 const CODESEEX_REPOSITORY_URL: &str = "https://github.com/TasteSteak/CodeSeeX";
+const CODESEEX_RELEASE_NOTES_RAW_BASE_URL: &str =
+    "https://raw.githubusercontent.com/TasteSteak/CodeSeeX";
+const RELEASE_NOTES_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const RELEASE_NOTES_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const EMBEDDED_RELEASE_NOTES: &str = include_str!("../../../docs/release-notes.json");
+
+#[derive(Clone, Default)]
+pub(crate) struct ReleaseNotesCache {
+    inner: Arc<Mutex<ReleaseNotesCacheState>>,
+}
+
+#[derive(Default)]
+struct ReleaseNotesCacheState {
+    document: Option<Value>,
+    etag: Option<String>,
+    fetched_at: Option<Instant>,
+    failed_at: Option<Instant>,
+    failure: Option<String>,
+}
+
+#[derive(Clone)]
+struct CachedReleaseNotes {
+    document: Value,
+    etag: Option<String>,
+}
+
+impl ReleaseNotesCache {
+    fn fresh_for(&self, version: &str) -> Option<Value> {
+        let state = self.inner.lock().ok()?;
+        let fetched_at = state.fetched_at?;
+        (fetched_at.elapsed() < RELEASE_NOTES_CACHE_TTL)
+            .then(|| state.document.clone())
+            .flatten()
+            .filter(|document| release_notes_document_is_valid(document, version))
+    }
+
+    fn cached_for(&self, version: &str) -> Option<CachedReleaseNotes> {
+        let state = self.inner.lock().ok()?;
+        let document = state.document.clone()?;
+        release_notes_document_is_valid(&document, version).then(|| CachedReleaseNotes {
+            document,
+            etag: state.etag.clone(),
+        })
+    }
+
+    fn store(&self, document: Value, etag: Option<String>) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.document = Some(document);
+            state.etag = etag;
+            state.fetched_at = Some(Instant::now());
+            state.failed_at = None;
+            state.failure = None;
+        }
+    }
+
+    fn mark_revalidated(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.fetched_at = Some(Instant::now());
+            state.failed_at = None;
+            state.failure = None;
+        }
+    }
+
+    fn recent_failure(&self) -> Option<String> {
+        let state = self.inner.lock().ok()?;
+        let failed_at = state.failed_at?;
+        (failed_at.elapsed() < RELEASE_NOTES_CACHE_TTL)
+            .then(|| state.failure.clone())
+            .flatten()
+    }
+
+    fn record_failure(&self, error: &str) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.failed_at = Some(Instant::now());
+            state.failure = Some(error.to_owned());
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ManagerRuntime {
     runtime_config: RuntimeConfigService,
     store: Store,
+    release_notes: ReleaseNotesCache,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +118,7 @@ impl ManagerRuntime {
         Ok(Self {
             store: Store::open(&config.data_dir).await?,
             runtime_config: RuntimeConfigService::new(config),
+            release_notes: ReleaseNotesCache::default(),
         })
     }
 
@@ -44,6 +126,7 @@ impl ManagerRuntime {
         Self {
             runtime_config: state.runtime_config.clone(),
             store: state.store.clone(),
+            release_notes: state.release_notes.clone(),
         }
     }
 
@@ -76,6 +159,7 @@ impl ManagerRuntime {
             ("GET", "/api/tools") => ok(self.tools()),
             ("GET", "/api/app-info") => ok(app_info()),
             ("GET", "/api/update-check") => ok(self.update_check().await),
+            ("GET", "/api/release-notes") => ok(self.release_notes().await),
             ("GET", "/api/deepseek/balance") => self.balance().await,
             ("GET", "/api/events") => self.events(query).await,
             ("GET", "/api/codex-adapter")
@@ -654,6 +738,98 @@ impl ManagerRuntime {
         })
     }
 
+    pub async fn release_notes(&self) -> Value {
+        let current_version = env!("CARGO_PKG_VERSION");
+        let fallback = embedded_release_notes(current_version);
+        if let Some(document) = self.release_notes.fresh_for(current_version) {
+            return release_notes_response(document, current_version, "cache", false, None);
+        }
+
+        let cached = self.release_notes.cached_for(current_version);
+        if let Some(error) = self.release_notes.recent_failure() {
+            return release_notes_fallback_response(cached, fallback, current_version, &error);
+        }
+        let mut request = self
+            .client()
+            .get(release_notes_url(current_version))
+            .header(reqwest::header::USER_AGENT, "CodeSeeX")
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(etag) = cached.as_ref().and_then(|entry| entry.etag.as_deref()) {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+
+        let response = tokio::time::timeout(RELEASE_NOTES_REQUEST_TIMEOUT, request.send()).await;
+        let Ok(Ok(response)) = response else {
+            self.release_notes
+                .record_failure("release_notes_unreachable");
+            return release_notes_fallback_response(
+                cached,
+                fallback,
+                current_version,
+                "release_notes_unreachable",
+            );
+        };
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            if let Some(cached) = cached {
+                self.release_notes.mark_revalidated();
+                return release_notes_response(
+                    cached.document,
+                    current_version,
+                    "cache",
+                    false,
+                    None,
+                );
+            }
+            self.release_notes
+                .record_failure("release_notes_cache_miss");
+            return release_notes_fallback_response(
+                None,
+                fallback,
+                current_version,
+                "release_notes_cache_miss",
+            );
+        }
+        if !response.status().is_success() {
+            self.release_notes
+                .record_failure("release_notes_http_error");
+            return release_notes_fallback_response(
+                cached,
+                fallback,
+                current_version,
+                "release_notes_http_error",
+            );
+        }
+
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let Ok(document) = response.json::<Value>().await else {
+            self.release_notes
+                .record_failure("release_notes_invalid_json");
+            return release_notes_fallback_response(
+                cached,
+                fallback,
+                current_version,
+                "release_notes_invalid_json",
+            );
+        };
+        if !release_notes_document_is_valid(&document, current_version) {
+            self.release_notes
+                .record_failure("release_notes_invalid_document");
+            return release_notes_fallback_response(
+                cached,
+                fallback,
+                current_version,
+                "release_notes_invalid_document",
+            );
+        }
+
+        self.release_notes.store(document.clone(), etag);
+        release_notes_response(document, current_version, "github", false, None)
+    }
+
     pub async fn balance(&self) -> ManagerJsonResponse {
         let config = self.active_config();
         let Some(api_key) = codeseex_core::codex_auth::read_codex_auth_api_key(true) else {
@@ -993,7 +1169,7 @@ fn catalog_diagnostic(
     let catalog_path = config.catalog_path();
     let toml_catalog_matches = toml_catalog_path
         .as_deref()
-        .map(|path| std::path::PathBuf::from(path) == catalog_path)
+        .map(|path| catalog_path.as_path() == std::path::Path::new(path))
         .unwrap_or(false);
     let repaired = !before.exact_current && after.exact_current;
     let mut status = if after.exists && after.readable && after.compatible && after.exact_current {
@@ -1282,6 +1458,83 @@ fn app_info() -> Value {
             "releases": format!("{CODESEEX_REPOSITORY_URL}/releases")
         }
     })
+}
+
+fn release_notes_url(version: &str) -> String {
+    format!("{CODESEEX_RELEASE_NOTES_RAW_BASE_URL}/v{version}/docs/release-notes.json")
+}
+
+fn embedded_release_notes(version: &str) -> Value {
+    let document = serde_json::from_str::<Value>(EMBEDDED_RELEASE_NOTES).unwrap_or_else(|_| {
+        json!({
+            "schema_version": 1,
+            "releases": []
+        })
+    });
+    debug_assert!(release_notes_document_is_valid(&document, version));
+    document
+}
+
+fn release_notes_fallback_response(
+    cached: Option<CachedReleaseNotes>,
+    fallback: Value,
+    current_version: &str,
+    error: &str,
+) -> Value {
+    if let Some(cached) = cached {
+        return release_notes_response(
+            cached.document,
+            current_version,
+            "cache",
+            true,
+            Some(error),
+        );
+    }
+    release_notes_response(fallback, current_version, "bundled", true, Some(error))
+}
+
+fn release_notes_response(
+    document: Value,
+    current_version: &str,
+    source: &str,
+    stale: bool,
+    error: Option<&str>,
+) -> Value {
+    json!({
+        "ok": true,
+        "current_version": current_version,
+        "source": source,
+        "stale": stale,
+        "error": error,
+        "release_notes": document
+    })
+}
+
+fn release_notes_document_is_valid(document: &Value, current_version: &str) -> bool {
+    if document.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return false;
+    }
+    document
+        .get("releases")
+        .and_then(Value::as_array)
+        .is_some_and(|releases| {
+            releases.iter().any(|release| {
+                release
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .is_some_and(|version| release_notes_version_matches(version, current_version))
+                    && release
+                        .pointer("/notes/en_us")
+                        .is_some_and(Value::is_object)
+                    && release
+                        .pointer("/notes/zh_cn")
+                        .is_some_and(Value::is_object)
+            })
+        })
+}
+
+fn release_notes_version_matches(value: &str, current_version: &str) -> bool {
+    value.trim().trim_start_matches('v') == current_version.trim().trim_start_matches('v')
 }
 
 fn normalize_balance_info(item: &Value) -> Value {
@@ -1716,5 +1969,49 @@ mod tests {
             info.pointer("/urls/website").and_then(Value::as_str),
             Some(CODESEEX_WEBSITE_URL)
         );
+    }
+
+    #[test]
+    fn embedded_release_notes_include_the_current_version_in_both_languages() {
+        let version = env!("CARGO_PKG_VERSION");
+        let document = embedded_release_notes(version);
+
+        assert!(release_notes_document_is_valid(&document, version));
+        let release = document["releases"]
+            .as_array()
+            .and_then(|releases| {
+                releases.iter().find(|release| {
+                    release
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| release_notes_version_matches(value, version))
+                })
+            })
+            .expect("current release notes");
+        assert!(release.pointer("/notes/en_us/sections").is_some());
+        assert!(release.pointer("/notes/zh_cn/sections").is_some());
+    }
+
+    #[test]
+    fn release_notes_cache_preserves_etag_and_only_accepts_current_documents() {
+        let version = env!("CARGO_PKG_VERSION");
+        let cache = ReleaseNotesCache::default();
+        let document = embedded_release_notes(version);
+        cache.store(document.clone(), Some("W/\"release-notes\"".to_owned()));
+
+        assert_eq!(cache.fresh_for(version), Some(document.clone()));
+        assert_eq!(
+            cache.cached_for(version).and_then(|entry| entry.etag),
+            Some("W/\"release-notes\"".to_owned())
+        );
+        assert!(cache.fresh_for("999.0.0").is_none());
+
+        cache.record_failure("release_notes_unreachable");
+        assert_eq!(
+            cache.recent_failure().as_deref(),
+            Some("release_notes_unreachable")
+        );
+        cache.store(document, None);
+        assert!(cache.recent_failure().is_none());
     }
 }

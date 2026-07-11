@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -135,8 +136,10 @@ fn malformed_tool_arguments_return_invalid_arguments() {
 async fn vision_analyze_missing_config_returns_unavailable() {
     let data_dir = temp_workspace("vision-analyze-missing-config");
     fs::create_dir_all(&data_dir).expect("create data dir");
-    let mut config = codeseex_core::AppConfig::default();
-    config.data_dir = data_dir.clone();
+    let config = codeseex_core::AppConfig {
+        data_dir: data_dir.clone(),
+        ..Default::default()
+    };
     let result = execute_tool_with_client(
         &reqwest::Client::new(),
         &config,
@@ -178,8 +181,10 @@ async fn vision_analyze_missing_config_returns_unavailable() {
 async fn vision_generate_missing_config_returns_unavailable() {
     let data_dir = temp_workspace("vision-generate-missing-config");
     fs::create_dir_all(&data_dir).expect("create data dir");
-    let mut config = codeseex_core::AppConfig::default();
-    config.data_dir = data_dir.clone();
+    let config = codeseex_core::AppConfig {
+        data_dir: data_dir.clone(),
+        ..Default::default()
+    };
     let result = execute_tool_with_client(
         &reqwest::Client::new(),
         &config,
@@ -221,8 +226,10 @@ async fn vision_generate_missing_config_returns_unavailable() {
 async fn image_gen_missing_config_reports_native_tool_name() {
     let data_dir = temp_workspace("image-gen-missing-config");
     fs::create_dir_all(&data_dir).expect("create data dir");
-    let mut config = codeseex_core::AppConfig::default();
-    config.data_dir = data_dir.clone();
+    let config = codeseex_core::AppConfig {
+        data_dir: data_dir.clone(),
+        ..Default::default()
+    };
     let result = execute_tool_with_client(
         &reqwest::Client::new(),
         &config,
@@ -296,6 +303,40 @@ fn read_file_range_supports_explicit_tail_lines() {
 }
 
 #[test]
+fn read_file_range_preserves_negative_line_range_semantics() {
+    let root = temp_workspace("read-range-negative-window");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::write(root.join("notes.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n").expect("write notes");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let from_end = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"notes.txt","start":-4,"count":2}"#,
+    );
+    assert_eq!(from_end.get("start").and_then(Value::as_u64), Some(3));
+    assert_eq!(from_end.get("end").and_then(Value::as_u64), Some(4));
+    assert_eq!(
+        from_end.get("text").and_then(Value::as_str),
+        Some("three\nfour")
+    );
+
+    let to_end = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"notes.txt","start":2,"end":-2}"#,
+    );
+    assert_eq!(to_end.get("start").and_then(Value::as_u64), Some(2));
+    assert_eq!(to_end.get("end").and_then(Value::as_u64), Some(5));
+    assert_eq!(
+        to_end.get("text").and_then(Value::as_str),
+        Some("two\nthree\nfour\nfive")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn read_file_range_supports_whole_file() {
     let root = temp_workspace("read-range-whole-file");
     fs::create_dir_all(&root).expect("create temp workspace");
@@ -309,7 +350,10 @@ fn read_file_range_supports_whole_file() {
     );
 
     assert_eq!(read.get("ok").and_then(Value::as_bool), Some(true));
-    assert_eq!(read.get("whole_file").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        read.get("whole_file_requested").and_then(Value::as_bool),
+        Some(true)
+    );
     assert_eq!(read.get("start").and_then(Value::as_u64), Some(1));
     assert_eq!(read.get("end").and_then(Value::as_u64), Some(4));
     assert_eq!(
@@ -337,10 +381,6 @@ fn read_file_range_strips_utf8_bom_from_visible_text() {
     assert_eq!(read.get("ok").and_then(Value::as_bool), Some(true));
     assert_eq!(read.get("has_bom").and_then(Value::as_bool), Some(true));
     assert_eq!(read.get("text").and_then(Value::as_str), Some("title"));
-    assert_eq!(
-        read.pointer("/lines/0/text").and_then(Value::as_str),
-        Some("title")
-    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -420,14 +460,212 @@ fn read_file_range_rejects_binary_markers_without_extension_hint() {
 }
 
 #[test]
-fn list_directory_defaults_to_current_directory_with_metadata_summary() {
+fn read_file_range_pages_files_larger_than_the_old_whole_file_limit() {
+    let root = temp_workspace("read-range-large-page");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::write(root.join("large.txt"), "line\n".repeat(300_000)).expect("write large text");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let read = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"large.txt","start":1,"count":2}"#,
+    );
+
+    assert_eq!(read.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(read.get("start").and_then(Value::as_u64), Some(1));
+    assert_eq!(read.get("end").and_then(Value::as_u64), Some(2));
+    assert_eq!(read.get("next_start").and_then(Value::as_u64), Some(3));
+    assert_eq!(read.get("truncated").and_then(Value::as_bool), Some(true));
+    assert_eq!(read.get("text").and_then(Value::as_str), Some("line\nline"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn read_file_range_continues_a_long_line_without_proxy_truncation() {
+    let root = temp_workspace("read-range-long-line");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::write(root.join("long.txt"), "x".repeat(MAX_READ_TEXT_CHARS + 50))
+        .expect("write long line");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let first = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"long.txt","count":1}"#,
+    );
+    assert_eq!(first.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        first.get("truncation_reason").and_then(Value::as_str),
+        Some("output_limit")
+    );
+    assert_eq!(first.get("next_start").and_then(Value::as_u64), Some(1));
+    assert_eq!(
+        first.get("next_column").and_then(Value::as_u64),
+        Some(MAX_READ_TEXT_CHARS as u64)
+    );
+
+    let second = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        &json!({
+            "path": "long.txt",
+            "start": 1,
+            "count": 1,
+            "start_column": MAX_READ_TEXT_CHARS
+        })
+        .to_string(),
+    );
+    assert_eq!(second.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        second.get("text").and_then(Value::as_str),
+        Some("x".repeat(50).as_str())
+    );
+    assert_eq!(
+        second.get("truncated").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert!(serialized_json_chars(&first) <= MAX_TOOL_RESULT_JSON_CHARS);
+    assert!(serialized_json_chars(&second) <= MAX_TOOL_RESULT_JSON_CHARS);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn read_file_range_counts_unicode_columns_and_keeps_reversed_ranges_empty() {
+    let root = temp_workspace("read-range-unicode-boundary");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::write(
+        root.join("unicode.txt"),
+        "中".repeat(MAX_READ_TEXT_CHARS.saturating_add(1)),
+    )
+    .expect("write unicode long line");
+    fs::write(root.join("lines.txt"), "one\ntwo\nthree\nfour\n").expect("write lines");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let first = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"unicode.txt","count":1}"#,
+    );
+    assert_eq!(
+        first
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| text.chars().count()),
+        Some(MAX_READ_TEXT_CHARS)
+    );
+    assert_eq!(
+        first.get("next_column").and_then(Value::as_u64),
+        Some(MAX_READ_TEXT_CHARS as u64)
+    );
+    assert!(serialized_json_chars(&first) <= MAX_TOOL_RESULT_JSON_CHARS);
+
+    let second = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        &json!({
+            "path": "unicode.txt",
+            "start": 1,
+            "count": 1,
+            "start_column": MAX_READ_TEXT_CHARS,
+        })
+        .to_string(),
+    );
+    assert_eq!(second.get("text").and_then(Value::as_str), Some("中"));
+    assert_eq!(
+        second.get("truncated").and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let reversed = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"lines.txt","start":4,"end":2}"#,
+    );
+    assert_eq!(reversed.get("text").and_then(Value::as_str), Some(""));
+    assert_eq!(reversed.get("end").and_then(Value::as_u64), Some(3));
+    assert_eq!(reversed.get("next_start"), Some(&Value::Null));
+    assert_eq!(
+        reversed.get("truncated").and_then(Value::as_bool),
+        Some(false)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "writes a file just above the 64MiB scan ceiling; run explicitly as a pressure test"]
+fn read_file_range_rejects_negative_ranges_above_the_scan_ceiling() {
+    let root = temp_workspace("read-range-scan-ceiling");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    let path = root.join("large.txt");
+    let mut file = fs::File::create(&path).expect("create large text file");
+    let chunk = b"line\n".repeat(16_384);
+    let mut written = 0_u64;
+    while written <= MAX_READ_SCAN_BYTES {
+        let remaining = MAX_READ_SCAN_BYTES
+            .saturating_add(1)
+            .saturating_sub(written);
+        let length = usize::try_from(remaining)
+            .unwrap_or(chunk.len())
+            .min(chunk.len());
+        file.write_all(&chunk[..length]).expect("write text chunk");
+        written = written.saturating_add(length as u64);
+    }
+    drop(file);
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let read = execute_tool_in_context(
+        &context,
+        "read_file_range",
+        r#"{"path":"large.txt","start":-1}"#,
+    );
+    assert_eq!(read.get("ok").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        read.get("error").and_then(Value::as_str),
+        Some("file_scan_limit_exceeded")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn read_file_range_redacts_credential_values() {
+    let root = temp_workspace("read-range-redact");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    let secret = "sk-test-000000000000000000000001";
+    fs::write(
+        root.join(".env"),
+        format!("DEEPSEEK_API_KEY={secret}\nSAFE_VALUE=visible\n"),
+    )
+    .expect("write env file");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let read = execute_tool_in_context(&context, "read_file_range", r#"{"path":".env"}"#);
+    let text = read.get("text").and_then(Value::as_str).unwrap_or_default();
+    assert!(!text.contains(secret));
+    assert!(text.contains("DEEPSEEK_API_KEY=[REDACTED]"));
+    assert_eq!(
+        read.get("redacted_sensitive_values")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn list_directory_pages_compact_entries_and_can_include_metadata() {
     let root = temp_workspace("list-metadata");
     fs::create_dir_all(root.join("src")).expect("create src");
     fs::write(root.join("README.md"), "hello").expect("write readme");
     fs::write(root.join("src").join("main.rs"), "fn main() {}").expect("write main");
 
     let context = ToolExecutionContext::new(vec![root.clone()], false);
-    let listed = execute_tool_in_context(&context, "list_directory", r#"{}"#);
+    let listed =
+        execute_tool_in_context(&context, "list_directory", r#"{"include_metadata":true}"#);
 
     assert_eq!(listed.get("ok").and_then(Value::as_bool), Some(true));
     assert_eq!(listed.get("depth").and_then(Value::as_u64), Some(0));
@@ -436,7 +674,7 @@ fn list_directory_defaults_to_current_directory_with_metadata_summary() {
         entry.get("type").and_then(Value::as_str) == Some("file")
             && entry.get("name").and_then(Value::as_str) == Some("README.md")
             && entry.get("size_bytes").and_then(Value::as_u64) == Some(5)
-            && entry.get("extension").and_then(Value::as_str) == Some("md")
+            && entry.get("path").and_then(Value::as_str) == Some("README.md")
     }));
     assert!(entries.iter().any(|entry| {
         entry.get("type").and_then(Value::as_str) == Some("dir")
@@ -447,9 +685,106 @@ fn list_directory_defaults_to_current_directory_with_metadata_summary() {
         .any(|entry| { entry.get("name").and_then(Value::as_str) == Some("main.rs") }));
     assert_eq!(
         listed
-            .pointer("/summary/extensions/md")
-            .and_then(Value::as_u64),
-        Some(1)
+            .pointer("/summary/metadata_included")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn list_directory_uses_compact_cursor_pages() {
+    let root = temp_workspace("list-cursor-pages");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    for index in 0..75 {
+        fs::write(root.join(format!("{index:03}.txt")), "x").expect("write entry");
+    }
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let first = execute_tool_in_context(&context, "list_directory", r#"{"path":"."}"#);
+    let first_entries = first.get("entries").and_then(Value::as_array).unwrap();
+    assert_eq!(first_entries.len(), DEFAULT_DIRECTORY_PAGE_SIZE);
+    assert_eq!(first.get("next_cursor").and_then(Value::as_u64), Some(60));
+    assert_eq!(
+        first.get("truncation_reason").and_then(Value::as_str),
+        Some("page_limit")
+    );
+    assert!(first_entries.iter().all(|entry| {
+        entry
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| !path.contains(":/"))
+    }));
+
+    let second = execute_tool_in_context(&context, "list_directory", r#"{"path":".","cursor":60}"#);
+    assert_eq!(
+        second
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(15)
+    );
+    assert_eq!(second.get("has_more").and_then(Value::as_bool), Some(false));
+    assert!(serialized_json_chars(&first) <= MAX_TOOL_RESULT_JSON_CHARS);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn list_directory_stops_without_a_repeating_cursor_when_entry_names_fill_output_budget() {
+    let root = temp_workspace("list-output-budget");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    let long_name = "a".repeat(160);
+    for index in 0..80 {
+        fs::write(root.join(format!("{index:03}-{long_name}.txt")), "x").expect("write entry");
+    }
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let listed = execute_tool_in_context(&context, "list_directory", r#"{"path":"."}"#);
+    assert_eq!(listed.get("ok").and_then(Value::as_bool), Some(true));
+    assert!(listed
+        .get("entries")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| !entries.is_empty() && entries.len() < DEFAULT_DIRECTORY_PAGE_SIZE));
+    assert_eq!(listed.get("has_more").and_then(Value::as_bool), Some(false));
+    assert!(listed.get("next_cursor").is_some_and(Value::is_null));
+    assert_eq!(
+        listed.get("truncation_reason").and_then(Value::as_str),
+        Some("output_budget")
+    );
+    assert_eq!(
+        listed.get("output_budget_reached").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(serialized_json_chars(&listed) <= MAX_TOOL_RESULT_JSON_CHARS);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn list_directory_does_not_offer_a_repeating_cursor_after_scan_limit() {
+    let root = temp_workspace("list-scan-limit");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    for index in 0..=MAX_DIRECTORY_SCAN_ENTRIES {
+        fs::write(root.join(format!("{index:04}.txt")), "x").expect("write entry");
+    }
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let listed = execute_tool_in_context(
+        &context,
+        "list_directory",
+        &json!({ "path": ".", "cursor": MAX_DIRECTORY_SCAN_ENTRIES }).to_string(),
+    );
+    assert_eq!(listed.get("has_more").and_then(Value::as_bool), Some(false));
+    assert!(listed.get("next_cursor").is_some_and(Value::is_null));
+    assert_eq!(
+        listed.get("truncation_reason").and_then(Value::as_str),
+        Some("scan_limit")
+    );
+    assert_eq!(
+        listed.get("scan_limit_reached").and_then(Value::as_bool),
+        Some(true)
     );
 
     let _ = fs::remove_dir_all(root);
@@ -478,7 +813,7 @@ fn workspace_search_supports_include_and_exclude_globs() {
         .get("path")
         .and_then(Value::as_str)
         .unwrap()
-        .ends_with("/src/main.rs"));
+        .eq("src/main.rs"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -526,7 +861,7 @@ fn workspace_search_defers_low_priority_dirs_from_broad_root() {
         .get("path")
         .and_then(Value::as_str)
         .unwrap()
-        .ends_with("/apps/ui/public/styles/pages/logs.css"));
+        .eq("apps/ui/public/styles/pages/logs.css"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -571,8 +906,8 @@ fn workspace_search_continues_into_deferred_dirs_by_default() {
         .iter()
         .filter_map(|item| item.get("path").and_then(Value::as_str))
         .collect::<Vec<_>>();
-    assert!(paths.iter().any(|path| path.ends_with("/src/lib.rs")));
-    assert!(paths.iter().any(|path| path.ends_with("/.git/config")));
+    assert!(paths.contains(&"src/lib.rs"));
+    assert!(paths.contains(&".git/config"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -611,7 +946,7 @@ fn workspace_search_can_search_explicit_low_priority_root() {
         .get("path")
         .and_then(Value::as_str)
         .unwrap()
-        .ends_with("/target/artifact.txt"));
+        .eq("target/artifact.txt"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -644,7 +979,7 @@ fn workspace_search_explicit_include_can_search_low_priority_dir() {
         .get("path")
         .and_then(Value::as_str)
         .unwrap()
-        .ends_with("/target/artifact.txt"));
+        .eq("target/artifact.txt"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -667,6 +1002,97 @@ fn workspace_search_supports_regex_mode() {
     let matches = searched.get("matches").and_then(Value::as_array).unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].get("line").and_then(Value::as_u64), Some(1));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_search_bounds_result_size_and_redacts_snippets() {
+    let root = temp_workspace("search-output-budget");
+    let src = root.join("src");
+    fs::create_dir_all(&src).expect("create source dir");
+    let secret = "sk-test-000000000000000000000002";
+    for index in 0..40 {
+        fs::write(
+            src.join(format!("{index:02}.txt")),
+            format!("API_KEY={secret}\nneedle {}\n", "x".repeat(1_200)),
+        )
+        .expect("write result file");
+    }
+    fs::write(root.join("large.txt"), "needle\n".repeat(300_000))
+        .expect("write oversized search file");
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let searched = execute_tool_in_context(
+        &context,
+        "workspace_search",
+        r#"{"query":"needle","path":"."}"#,
+    );
+    let matches = searched.get("matches").and_then(Value::as_array).unwrap();
+    let serialized = searched.to_string();
+    assert!(!matches.is_empty());
+    assert!(
+        matches.len() < 40,
+        "output budget should page broad matches"
+    );
+    assert!(searched
+        .get("truncation_reasons")
+        .and_then(Value::as_array)
+        .is_some_and(|reasons| {
+            reasons.iter().any(|reason| reason == "output_budget")
+                && reasons.iter().any(|reason| reason == "large_files_skipped")
+        }));
+    assert_eq!(
+        searched.get("files_skipped_large").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert!(!serialized.contains(secret));
+    assert!(searched
+        .get("redacted_sensitive_values")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0));
+    assert!(serialized_json_chars(&searched) <= MAX_TOOL_RESULT_JSON_CHARS);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "writes 33MiB to exercise the workspace search aggregate scan ceiling"]
+fn workspace_search_stops_at_its_total_scan_budget() {
+    let root = temp_workspace("search-scan-budget");
+    fs::create_dir_all(&root).expect("create temp workspace");
+    let content = "x".repeat(MAX_SEARCH_FILE_BYTES as usize);
+    for index in 0..33 {
+        fs::write(root.join(format!("{index:02}.txt")), &content).expect("write search file");
+    }
+
+    let context = ToolExecutionContext::new(vec![root.clone()], false);
+    let searched = execute_tool_in_context(
+        &context,
+        "workspace_search",
+        r#"{"query":"needle","path":"."}"#,
+    );
+    assert_eq!(searched.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        searched.get("files_scanned").and_then(Value::as_u64),
+        Some(32)
+    );
+    assert_eq!(
+        searched.get("bytes_scanned").and_then(Value::as_u64),
+        Some(MAX_SEARCH_BYTES)
+    );
+    assert_eq!(
+        searched
+            .get("matches")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0)
+    );
+    assert!(searched
+        .get("truncation_reasons")
+        .and_then(Value::as_array)
+        .is_some_and(|reasons| reasons.iter().any(|reason| reason == "scan_byte_limit")));
+    assert!(serialized_json_chars(&searched) <= MAX_TOOL_RESULT_JSON_CHARS);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -745,7 +1171,6 @@ fn read_only_tools_execute_inside_workspace_and_reject_escape() {
 
     let listed = execute_tool("list_directory", r#"{"path":".","depth":0}"#);
     assert_eq!(listed.get("ok").and_then(Value::as_bool), Some(true));
-    let root_text = absolute_display_path(&root);
     assert!(listed.to_string().contains("Cargo.toml"));
 
     let listed_virtual_root = execute_tool("list_directory", r#"{"path":"/","depth":0}"#);
@@ -753,10 +1178,9 @@ fn read_only_tools_execute_inside_workspace_and_reject_escape() {
         listed_virtual_root.get("ok").and_then(Value::as_bool),
         Some(true)
     );
-    let root_path_text = root_text.replace('\\', "/");
     assert_eq!(
         listed_virtual_root.get("path").and_then(Value::as_str),
-        Some(root_path_text.as_str())
+        Some(".")
     );
 
     let read = execute_tool("read_file_range", r#"{"path":"Cargo.toml","count":2}"#);
@@ -769,10 +1193,9 @@ fn read_only_tools_execute_inside_workspace_and_reject_escape() {
         read_with_virtual_root.get("ok").and_then(Value::as_bool),
         Some(true)
     );
-    let readme_text = absolute_display_path(&root.join("README.md"));
     assert_eq!(
         read_with_virtual_root.get("path").and_then(Value::as_str),
-        Some(readme_text.as_str())
+        Some("README.md")
     );
 
     let searched = execute_tool(

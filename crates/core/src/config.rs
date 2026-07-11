@@ -465,8 +465,10 @@ mod tests {
 
     #[test]
     fn network_proxy_prefers_new_user_config_over_legacy_web_search_config() {
-        let mut config = AppConfig::default();
-        config.network_proxy = NetworkProxyMode::System;
+        let mut config = AppConfig {
+            network_proxy: NetworkProxyMode::System,
+            ..Default::default()
+        };
         config.apply_user_config(UserConfig {
             network: Some(UserNetworkConfig {
                 proxy: Some(NetworkProxyMode::None),
@@ -485,8 +487,10 @@ mod tests {
 
     #[test]
     fn network_proxy_accepts_legacy_web_search_user_config() {
-        let mut config = AppConfig::default();
-        config.network_proxy = NetworkProxyMode::System;
+        let mut config = AppConfig {
+            network_proxy: NetworkProxyMode::System,
+            ..Default::default()
+        };
         config.apply_user_config(UserConfig {
             tools: Some(UserToolsConfig {
                 web_search: Some(UserWebSearchToolConfig {

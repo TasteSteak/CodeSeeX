@@ -5,25 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/panels.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/cards.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/forms.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/lists.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/menus.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/components/toml.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/pages/config.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/pages/about.css?v=0.5.4">
-  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.5.4">
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.6.0">
 </head>
 <body>
   <div class="layout-container">
@@ -553,10 +553,16 @@
                   <p class="about-product-description" id="appDescription" data-i18n="aboutProductDescription">Local Codex bridge with a desktop manager, proxy, catalog, and tool controls.</p>
                   <span class="about-version-chip tabular-nums" id="appVersion">v-</span>
                 </div>
-                <button class="about-action-button about-product-action" type="button" data-about-action="website">
-                  <span class="btn-icon btn-icon-link" aria-hidden="true"></span>
-                  <span data-i18n="officialWebsite">Official website</span>
-                </button>
+                <div class="about-product-actions">
+                  <button class="about-action-button about-product-action" type="button" data-about-action="website">
+                    <span class="btn-icon btn-icon-link" aria-hidden="true"></span>
+                    <span data-i18n="officialWebsite">Official website</span>
+                  </button>
+                  <button class="about-action-button about-product-action" type="button" data-about-action="release-notes">
+                    <span class="btn-icon btn-icon-update" aria-hidden="true"></span>
+                    <span data-i18n="releaseNotes">Release notes</span>
+                  </button>
+                </div>
                 <span id="appProductName" data-product-name hidden>CodeSeeX</span>
               </aside>
 
@@ -673,6 +679,23 @@
       <div class="modal-actions update-dialog-actions">
         <button class="btn btn-secondary" type="button" id="updateModalBackground" data-i18n="downloadInBackground">Download in background</button>
         <button class="btn btn-danger" type="button" id="updateCancel" data-i18n="cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay-layer" id="releaseNotesModal" hidden>
+    <div class="overlay-card modal-card release-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="releaseNotesTitle">
+      <div class="modal-header release-notes-header">
+        <div>
+          <h2 id="releaseNotesTitle" data-i18n="releaseNotesTitle">Release notes</h2>
+          <p id="releaseNotesSubtitle" data-i18n="releaseNotesLoading">Loading release notes...</p>
+        </div>
+        <span class="release-notes-source" id="releaseNotesSource" hidden></span>
+      </div>
+      <div class="release-notes-body" id="releaseNotesBody" aria-live="polite"></div>
+      <p class="release-notes-notice" id="releaseNotesNotice" hidden></p>
+      <div class="modal-actions">
+        <button class="btn btn-primary" type="button" id="releaseNotesClose" data-i18n="close">Close</button>
       </div>
     </div>
   </div>

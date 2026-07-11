@@ -82,6 +82,7 @@ pub(crate) fn context_compile_diagnostic_event(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn upstream_call_usage_breakdown_event(
     id: &str,
     phase: &str,
@@ -108,6 +109,7 @@ pub(crate) fn upstream_call_usage_breakdown_event(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn client_tool_handoff_diagnostic_event(
     id: &str,
     phase: &str,

@@ -128,14 +128,17 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "list_directory",
-                "description": "List files and folders.",
+                "description": "List files and folders in a compact, paginated page. Results use paths relative to the requested root. When has_more=true, call again with next_cursor. Metadata is omitted by default because names and paths are usually sufficient.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
                         "depth": { "type": "integer" },
                         "include_files": { "type": "boolean" },
-                        "include_dirs": { "type": "boolean" }
+                        "include_dirs": { "type": "boolean" },
+                        "max_entries": { "type": "integer", "description": "Page size. Defaults to 60 and is capped for stable output." },
+                        "cursor": { "type": "integer", "description": "Use next_cursor from the preceding page. Omit for the first page." },
+                        "include_metadata": { "type": "boolean", "description": "Include size, modified time, and readonly state only when needed." }
                     },
                     "additionalProperties": false
                 }
@@ -145,16 +148,17 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "read_file_range",
-                "description": "Read UTF-8 text from a file. Use whole_file=true for the full file, tail_lines for the last N lines, or start/end/count for a range. Do not use this tool for images, media, archives, PDFs, executables, or other binary files; it returns binary_file_not_supported for those.",
+                "description": "Read a bounded UTF-8 text page from a file. Use start/end/count for a range or tail_lines for the end. whole_file=true is paginated rather than unbounded: follow next_start/next_column until truncated=false. start_column is a zero-based character offset for continuing one very long line. Returned credential values are redacted. Do not use this tool for images, media, archives, PDFs, executables, or other binary files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Text file path to read." },
-                        "whole_file": { "type": "boolean", "description": "Read the entire file when true. Still limited by the maximum file byte size." },
-                        "start": { "type": "integer", "description": "1-based start line. Negative values count backward from EOF, so -50 starts 50 lines from the end." },
-                        "end": { "type": "integer", "description": "1-based end line. Negative values count backward from EOF." },
+                        "whole_file": { "type": "boolean", "description": "Start reading from the beginning and continue with next_start/next_column when the page is truncated." },
+                        "start": { "type": "integer", "description": "1-based start line. Negative values count backward from EOF, so -50 starts 50 lines from the end. Negative indexes require a bounded full-file line count." },
+                        "end": { "type": "integer", "description": "1-based inclusive end line. Negative values count backward from EOF. Prefer tail_lines when only the end of a file is needed." },
                         "count": { "type": "integer", "description": "Maximum number of lines to read from start." },
-                        "tail_lines": { "type": "integer", "description": "Read the last N lines of the file." }
+                        "tail_lines": { "type": "integer", "description": "Read the last N lines of the file." },
+                        "start_column": { "type": "integer", "description": "Zero-based character offset for continuing a long line from next_column." }
                     },
                     "required": ["path"],
                     "additionalProperties": false
@@ -165,7 +169,7 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "workspace_search",
-                "description": "Search text files and return compact path, line, and snippet matches. Literal search is the default; set regex=true only when a Rust regex pattern is needed.",
+                "description": "Search UTF-8 workspace text and return compact relative-path snippets. Literal search is the default; set regex=true only for Rust regex syntax. Broad searches are source-first, then include hidden or large directories by default while result/file/byte budgets remain. Inspect truncation_reasons and narrow path/include/query when a budget is reached. Returned credential values are redacted.",
                 "parameters": {
                     "type": "object",
                     "properties": {

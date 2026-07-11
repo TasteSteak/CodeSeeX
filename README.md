@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.5.4" src="https://img.shields.io/badge/version-0.5.4-1f6feb">
+  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.5.4`
+Current version: `0.6.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -80,7 +80,7 @@ The result is a tool for people who want DeepSeek inside Codex without giving up
 - CodeSeeX-hosted Web Search with bounded execution, source diagnostics, automatic evidence opening, and local/private target protection.
 - Read-only workspace tools for file and repository inspection.
 - Optional Vision module for OpenAI-compatible image understanding and image generation endpoints.
-- Context compilation with verified tool facts, compact summaries, binary/data URL redaction, and bounded tool-result replay.
+- Context compilation with authoritative Codex full replay, atomic tool-call/result groups, bounded tool outputs, binary/data URL redaction, and controlled context-limit diagnostics instead of proxy-side replay truncation.
 - Usage sessions that separate normal user turns, service requests, model iterations, tool phases, handoffs, cache hits, cache misses, output tokens, and estimated cost.
 - Desktop manager with tray controls, autostart, update checks, logs, usage, balance, settings, tools, and adapter setup.
 - Community tool discovery under `~/.codeseex/extension/tools/<tool>/manifest.json`, disabled by default and executed only through explicit command manifests.

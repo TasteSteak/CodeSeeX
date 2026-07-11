@@ -51,7 +51,7 @@ pub(crate) fn proxy_cache_key(proxy_mode: NetworkProxyMode) -> String {
 
 fn redacted_proxy_url(value: &str) -> String {
     let Ok(mut url) = reqwest::Url::parse(value) else {
-        return value.split('@').last().unwrap_or(value).to_owned();
+        return value.split('@').next_back().unwrap_or(value).to_owned();
     };
     if !url.username().is_empty() {
         let _ = url.set_username("redacted");

@@ -496,6 +496,31 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_repairs_only_unambiguous_update_hunk_blank_lines_in_a_multifile_patch() {
+        let patch = "*** Begin Patch\n*** Add File: notes.md\n+# Heading\n+\n+body\n*** Update File: src/lib.rs\n@@\n fn before() {}\n\n fn after() {}\n*** End Patch";
+        let normalized = normalize_apply_patch_response_input_with_diagnostic(
+            &json!({ "patch": patch }).to_string(),
+        );
+
+        assert_eq!(normalized.blank_context_lines_repaired, 1);
+        assert_eq!(
+            normalized.input,
+            "*** Begin Patch\n*** Add File: notes.md\n+# Heading\n+\n+body\n*** Update File: src/lib.rs\n@@\n fn before() {}\n \n fn after() {}\n*** End Patch"
+        );
+    }
+
+    #[test]
+    fn apply_patch_leaves_a_valid_multifile_native_patch_byte_for_byte_unchanged() {
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n old\n+new\n*** Update File: tests/lib.rs\n@@\n old test\n+new test\n*** Add File: docs/notes.md\n+# Notes\n+\n*** End Patch";
+        let normalized = normalize_apply_patch_response_input_with_diagnostic(
+            &json!({ "patch": patch }).to_string(),
+        );
+
+        assert_eq!(normalized.blank_context_lines_repaired, 0);
+        assert_eq!(normalized.input, patch);
+    }
+
+    #[test]
     fn apply_patch_preserves_add_file_blank_and_hash_content_lines() {
         let item = native_apply_patch_response_item_from_chat_call(&call(
             "call_patch",

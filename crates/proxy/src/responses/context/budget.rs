@@ -11,24 +11,24 @@ const BUDGET_MESSAGE_CONTENT_CHARS: usize = 192 * 1024;
 const BUDGET_REASONING_CHARS: usize = 64 * 1024;
 const FORCE_SHRINK_CONTENT_LIMITS: [usize; 6] =
     [32 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024, 1024];
-const CODEX_FULL_CONTEXT_REPLAY_BUDGET_TOKENS: u64 = 96_000;
 
 pub(crate) struct BudgetedContextMessages {
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) diagnostic: Value,
+    pub(crate) rejection: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BudgetMode {
     Standard,
-    CodexFullContextReplay,
+    AuthoritativeReplay,
 }
 
 impl BudgetMode {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Standard => "standard",
-            Self::CodexFullContextReplay => "codex_full_context_replay",
+            Self::AuthoritativeReplay => "authoritative_replay",
         }
     }
 }
@@ -52,6 +52,28 @@ pub(crate) fn budget_messages_for_upstream(
                 "dropped_blocks": 0,
                 "compacted_messages": 0
             }),
+            rejection: None,
+        };
+    }
+
+    if matches!(mode, BudgetMode::AuthoritativeReplay) {
+        return BudgetedContextMessages {
+            messages,
+            diagnostic: json!({
+                "triggered": true,
+                "mode": mode.label(),
+                "max_bytes": max_bytes,
+                "initial_bytes": initial_bytes,
+                "final_bytes": initial_bytes,
+                "dropped_blocks": 0,
+                "compacted_messages": 0,
+                "would_exceed_upstream_context": true
+            }),
+            rejection: Some(json!({
+                "code": "context_limit_exceeded",
+                "max_bytes": max_bytes,
+                "input_bytes": initial_bytes
+            })),
         };
     }
 
@@ -73,6 +95,7 @@ pub(crate) fn budget_messages_for_upstream(
                 "dropped_blocks": 0,
                 "compacted_messages": compacted_messages
             }),
+            rejection: None,
         };
     }
 
@@ -94,6 +117,7 @@ pub(crate) fn budget_messages_for_upstream(
             "force_shrink_passes": shrunken.passes,
             "over_budget_after_shrink": final_bytes > max_bytes
         }),
+        rejection: None,
     }
 }
 
@@ -316,7 +340,7 @@ fn truncate_for_budget(text: &str, max_chars: usize) -> String {
 
 pub(crate) fn upstream_context_budget_bytes(mode: BudgetMode) -> u64 {
     match mode {
-        BudgetMode::Standard => {
+        BudgetMode::Standard | BudgetMode::AuthoritativeReplay => {
             let effective_tokens = DEFAULT_CONTEXT_WINDOW
                 .saturating_mul(u64::from(DEFAULT_EFFECTIVE_CONTEXT_PERCENT))
                 / 100;
@@ -326,9 +350,6 @@ pub(crate) fn upstream_context_budget_bytes(mode: BudgetMode) -> u64 {
                 .saturating_mul(BYTES_PER_TOKEN_ESTIMATE)
                 .max(64 * 1024)
         }
-        BudgetMode::CodexFullContextReplay => CODEX_FULL_CONTEXT_REPLAY_BUDGET_TOKENS
-            .saturating_mul(BYTES_PER_TOKEN_ESTIMATE)
-            .max(64 * 1024),
     }
 }
 

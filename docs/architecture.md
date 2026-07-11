@@ -50,7 +50,7 @@ CodeSeeX uses the normal CodeSeeX data location. Any migration work should be fr
 
 ## State Boundary
 
-Codex owns the raw session transcript files and conversation context. CodeSeeX does not parse those files as protocol state and does not duplicate Codex request context into a database. When Codex sends a full-context request, the proxy uses it for the current upstream call and keeps only current-process bridge data needed to finish that request.
+Codex owns the raw session transcript files and conversation context. CodeSeeX does not parse those files as protocol state and does not duplicate Codex request context into a database. When Codex sends a full-context request, the proxy forwards that replay as the authority for the current upstream call. A bounded process-local Canonical Session Core retains only anonymous session keys and ordered message fingerprints to diagnose append, divergence, and Codex compaction checkpoints; it never persists the replay body or rewrites it into a tail-only continuation.
 
 The store keeps only current-process facts needed at the adapter boundary: request lifecycle, short-lived `previous_response_id` bridge data, usage, and diagnostics. Tool facts are evidence for CodeSeeX-owned tool execution during the current request/process, not a durable replacement for Codex's own tool/event transcript.
 

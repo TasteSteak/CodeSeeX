@@ -647,7 +647,7 @@ mod tests {
                 model.extra.get("base_instructions").and_then(Value::as_str),
                 Some("shared prompt")
             );
-            assert!(model.extra.get("model_messages").is_some());
+            assert!(model.extra.contains_key("model_messages"));
         }
     }
 

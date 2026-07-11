@@ -100,6 +100,12 @@ const els = {
   refreshBalanceButton: byId("refreshBalanceButton"),
   restartButton: byId("restartButton"),
   restartRequiredBadge: byId("restartRequiredBadge"),
+  releaseNotesBody: byId("releaseNotesBody"),
+  releaseNotesClose: byId("releaseNotesClose"),
+  releaseNotesModal: byId("releaseNotesModal"),
+  releaseNotesNotice: byId("releaseNotesNotice"),
+  releaseNotesSource: byId("releaseNotesSource"),
+  releaseNotesSubtitle: byId("releaseNotesSubtitle"),
   running: byId("running"),
   showThinking: byId("SHOW_THINKING"),
   startButton: byId("startButton"),
@@ -146,6 +152,9 @@ const els = {
 };
 
 let appInfo = null;
+let latestReleaseNotes = null;
+let releaseNotesLoad = null;
+let releaseNotesLoadFailed = false;
 let busy = false;
 let autosaveTimer = null;
 let configSaving = false;
@@ -322,6 +331,7 @@ function bind() {
   if (els.updateModalBackground) els.updateModalBackground.addEventListener("click", hideUpdateModalToBackground);
   if (els.updateBackgroundOpen) els.updateBackgroundOpen.addEventListener("click", showUpdateModal);
   if (els.updateCancel) els.updateCancel.addEventListener("click", cancelDesktopUpdate);
+  if (els.releaseNotesClose) els.releaseNotesClose.addEventListener("click", closeReleaseNotesModal);
   if (els.ccsApiKeyInput) {
     els.ccsApiKeyInput.addEventListener("input", updateCcsKeyConfirmState);
     els.ccsApiKeyInput.addEventListener("keydown", (event) => {
@@ -354,6 +364,7 @@ function bind() {
     if (event.key === "Escape" && els.ccsKeyModal && !els.ccsKeyModal.hidden) closeCcsKeyModal("");
     if (event.key === "Escape" && els.troubleshootModal && !els.troubleshootModal.hidden) closeTroubleshootModal();
     if (event.key === "Escape" && els.updateModal && !els.updateModal.hidden) hideUpdateModalToBackground();
+    if (event.key === "Escape" && els.releaseNotesModal && !els.releaseNotesModal.hidden) closeReleaseNotesModal();
     if (event.key === "Escape") hideContextMenu();
   });
   document.addEventListener("visibilitychange", () => scheduleNextRefresh(0));
@@ -3073,7 +3084,7 @@ function usageSegmentRow(segment) {
   row.append(
     combined,
     usageTraceCell(display.elapsed, true),
-    usageTraceInputCell(display.inputTotal, display.hit),
+    usageTraceInputCell(display.inputTotal, display.miss),
     usageTraceCell(display.output, true),
     usageTraceCell(display.cacheHitRate, true),
     usageTraceCell(
@@ -3105,19 +3116,18 @@ function usageSegmentDisplay(segment) {
     elapsed: segment && segment.request_ms ? formatDuration(segment.request_ms) : "-",
     inputTotal: hasTokens ? formatNumber(cached + miss) : "-",
     miss: hasTokens ? formatNumber(segment.cache_miss_input_tokens) : "-",
-    hit: hasTokens ? formatNumber(segment.cached_input_tokens) : "-",
     output: hasTokens ? formatNumber(segment.output_tokens) : "-",
     cacheHitRate: hasTokens ? usageCacheHitRate(segment.cached_input_tokens, segment.cache_miss_input_tokens) : "-",
     cost: hasRows || hasTokens ? formatCost(costForTokens(segment)) : "-",
   };
 }
 
-function usageTraceInputCell(total, hit) {
+function usageTraceInputCell(total, miss) {
   const cell = document.createElement("div");
   cell.className = "trace-cell trace-input-cell usage-text-right";
   cell.append(
     usageTraceInputLine("total", total),
-    usageTraceInputLine("hit", hit),
+    usageTraceInputLine("miss", miss),
   );
   return cell;
 }
@@ -3127,7 +3137,7 @@ function usageTraceInputLine(kind, value) {
   line.className = "trace-input-line";
   const label = document.createElement("span");
   label.className = "trace-input-label";
-  label.textContent = kind === "hit" ? t("usageCacheHitShort") : t("usageInputTotalShort");
+  label.textContent = kind === "miss" ? t("usageCacheMissShort") : t("usageInputTotalShort");
   const number = document.createElement("span");
   number.className = "trace-input-number";
   number.textContent = value || "-";
@@ -3876,11 +3886,167 @@ function setView(viewName) {
 function handleAboutAction(action) {
   if (!appInfo) return setAboutStatus(t("appInfoLoading"), true);
   const urls = appInfo.urls || {};
+  if (action === "release-notes") return openReleaseNotesModal();
   if (action === "website") return openOrExplain(urls.website, t("websiteUnavailable"));
   if (action === "feedback") return openOrExplain(urls.feedback, t("feedbackUnavailable"));
   if (action === "source") return openOrExplain(urls.source, t("sourceUnavailable"));
   if (action === "license") return openOrExplain(urls.license, t("licenseUnavailable"));
   if (action === "update") return handleUpdateCheck();
+}
+
+async function openReleaseNotesModal() {
+  if (!els.releaseNotesModal) return;
+  els.releaseNotesModal.hidden = false;
+  renderReleaseNotes();
+  if (latestReleaseNotes) return;
+  if (!releaseNotesLoad) {
+    releaseNotesLoadFailed = false;
+    releaseNotesLoad = apiJson("/api/release-notes", { cache: "no-store" })
+      .then((data) => {
+        if (data && typeof data === "object" && data.ok && data.release_notes) {
+          latestReleaseNotes = data;
+          return;
+        }
+        releaseNotesLoadFailed = true;
+      })
+      .catch(() => {
+        releaseNotesLoadFailed = true;
+      })
+      .finally(() => {
+        releaseNotesLoad = null;
+      });
+  }
+  await releaseNotesLoad;
+  if (els.releaseNotesModal && !els.releaseNotesModal.hidden) renderReleaseNotes();
+}
+
+function closeReleaseNotesModal() {
+  if (els.releaseNotesModal) els.releaseNotesModal.hidden = true;
+}
+
+function releaseNotesLanguageCandidates() {
+  const locale = normalizeLanguageId(uiLanguage);
+  const candidates = [locale];
+  candidates.push(FALLBACK_LANGUAGE);
+  return Array.from(new Set(candidates));
+}
+
+function releaseNotesLocaleEntry(notes) {
+  if (!notes || typeof notes !== "object") return null;
+  for (const locale of releaseNotesLanguageCandidates()) {
+    const entry = notes[locale];
+    if (entry && typeof entry === "object") return { entry, locale };
+  }
+  return null;
+}
+
+function releaseNotesSourceLabel(source) {
+  if (source === "github") return t("releaseNotesSourceGitHub");
+  if (source === "cache") return t("releaseNotesSourceCache");
+  return t("releaseNotesSourceBundled");
+}
+
+function renderReleaseNotes() {
+  if (!els.releaseNotesBody) return;
+  const data = latestReleaseNotes;
+  els.releaseNotesBody.replaceChildren();
+  if (els.releaseNotesSource) els.releaseNotesSource.hidden = true;
+  if (els.releaseNotesNotice) els.releaseNotesNotice.hidden = true;
+
+  if (!data) {
+    const text = t(releaseNotesLoadFailed ? "releaseNotesUnavailable" : "releaseNotesLoading");
+    if (els.releaseNotesSubtitle) els.releaseNotesSubtitle.textContent = text;
+    els.releaseNotesBody.append(releaseNotesEmpty(text));
+    return;
+  }
+
+  const version = String(data.current_version || "").trim();
+  if (els.releaseNotesSubtitle) {
+    els.releaseNotesSubtitle.textContent = version
+      ? t("releaseNotesCurrentVersion").replace("{version}", version)
+      : t("releaseNotesTitle");
+  }
+  if (!data.ok || !data.release_notes || typeof data.release_notes !== "object") {
+    els.releaseNotesBody.append(releaseNotesEmpty(t("releaseNotesUnavailable")));
+    return;
+  }
+
+  if (els.releaseNotesSource) {
+    els.releaseNotesSource.textContent = releaseNotesSourceLabel(data.source);
+    els.releaseNotesSource.hidden = false;
+  }
+
+  const releases = Array.isArray(data.release_notes.releases) ? data.release_notes.releases : [];
+  let rendered = 0;
+  let usedEnglishFallback = false;
+  for (const release of releases) {
+    const localized = releaseNotesLocaleEntry(release && release.notes);
+    if (!localized) continue;
+    usedEnglishFallback ||= localized.locale === FALLBACK_LANGUAGE && uiLanguage !== FALLBACK_LANGUAGE;
+    els.releaseNotesBody.append(renderReleaseNotesEntry(release, localized.entry));
+    rendered += 1;
+  }
+  if (rendered === 0) els.releaseNotesBody.append(releaseNotesEmpty(t("releaseNotesNoEntries")));
+
+  const notices = [];
+  if (data.stale) notices.push(t("releaseNotesOfflineFallback"));
+  if (usedEnglishFallback) notices.push(t("releaseNotesLanguageFallback"));
+  if (els.releaseNotesNotice && notices.length > 0) {
+    els.releaseNotesNotice.textContent = notices.join(" ");
+    els.releaseNotesNotice.hidden = false;
+  }
+}
+
+function renderReleaseNotesEntry(release, note) {
+  const entry = document.createElement("article");
+  entry.className = "release-notes-entry";
+  const heading = document.createElement("div");
+  heading.className = "release-notes-entry-head";
+  const version = document.createElement("strong");
+  version.className = "release-notes-version tabular-nums";
+  version.textContent = String(release && release.version || "-");
+  const date = document.createElement("time");
+  date.className = "release-notes-date tabular-nums";
+  date.textContent = String(release && release.released_at || "");
+  heading.append(version, date);
+  entry.appendChild(heading);
+
+  const summary = String(note && note.summary || "").trim();
+  if (summary) {
+    const summaryElement = document.createElement("p");
+    summaryElement.className = "release-notes-summary";
+    summaryElement.textContent = summary;
+    entry.appendChild(summaryElement);
+  }
+  for (const section of Array.isArray(note && note.sections) ? note.sections : []) {
+    const items = Array.isArray(section && section.items)
+      ? section.items.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (items.length === 0) continue;
+    const title = String(section && section.title || "").trim();
+    if (title) {
+      const titleElement = document.createElement("h3");
+      titleElement.className = "release-notes-section";
+      titleElement.textContent = title;
+      entry.appendChild(titleElement);
+    }
+    const list = document.createElement("ul");
+    list.className = "release-notes-list";
+    for (const item of items) {
+      const row = document.createElement("li");
+      row.textContent = item;
+      list.appendChild(row);
+    }
+    entry.appendChild(list);
+  }
+  return entry;
+}
+
+function releaseNotesEmpty(text) {
+  const empty = document.createElement("p");
+  empty.className = "release-notes-empty";
+  empty.textContent = text;
+  return empty;
 }
 
 async function handleUpdateCheck() {
@@ -4198,6 +4364,7 @@ function applyLanguage(value) {
   renderCodexAdapter(latestAdapter || {});
   renderUpdateState({ silent: true });
   renderUpdateProgress();
+  if (els.releaseNotesModal && !els.releaseNotesModal.hidden) renderReleaseNotes();
   updateContextMenuLabels();
   if (currentTools.length > 0) {
     currentToolsSignature = "";

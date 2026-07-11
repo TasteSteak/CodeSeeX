@@ -27,3 +27,27 @@
 .step-state.done { color: var(--success); }
 .step-state.failed { color: var(--danger); }
 .update-dialog-actions .btn { min-height: 32px; padding: 7px 12px; font-size: 12px; }
+
+.release-notes-dialog { width: min(540px, 100%); max-height: min(640px, calc(100vh - 48px)); display: flex; flex-direction: column; }
+.release-notes-header { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 0; padding-bottom: 14px; border-bottom: 1px solid var(--border-color); }
+.release-notes-source { flex: none; display: inline-flex; align-items: center; min-height: 22px; padding: 3px 7px; border: 1px solid var(--border-color); border-radius: 999px; background: var(--ctrl-bg); color: var(--text-secondary); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.release-notes-source[hidden] { display: none; }
+.release-notes-body { min-height: 0; flex: 1; overflow: auto; display: grid; padding-right: 4px; }
+.release-notes-entry { padding: 14px 0; border-bottom: 1px solid var(--border-color); }
+.release-notes-entry:last-child { border-bottom: 0; }
+.release-notes-entry-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.release-notes-version { color: var(--text-main); font-size: 13px; font-weight: 750; }
+.release-notes-date { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.release-notes-summary { margin: 6px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.release-notes-section { margin: 12px 0 0; color: var(--text-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; }
+.release-notes-list { display: grid; gap: 7px; margin: 7px 0 0; padding: 0; list-style: none; }
+.release-notes-list li { position: relative; padding-left: 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.release-notes-list li::before { position: absolute; left: 0; color: var(--success); content: "•"; }
+.release-notes-notice { margin: 12px 0 0; padding: 8px 10px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--ctrl-bg); color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.release-notes-notice[hidden] { display: none; }
+.release-notes-empty { padding: 18px 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+
+@media (max-width: 560px) {
+  .release-notes-dialog { max-height: calc(100vh - 32px); }
+  .release-notes-source { display: none; }
+}

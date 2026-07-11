@@ -1997,8 +1997,10 @@ mod tests {
             "codeseex-vision-generated-{}",
             Uuid::new_v4().simple()
         ));
-        let mut config = AppConfig::default();
-        config.data_dir = data_dir.clone();
+        let config = AppConfig {
+            data_dir: data_dir.clone(),
+            ..Default::default()
+        };
         let images = extract_generated_images(
             &config,
             &json!({
@@ -2044,8 +2046,10 @@ mod tests {
             "codeseex-vision-nested-generated-{}",
             Uuid::new_v4().simple()
         ));
-        let mut config = AppConfig::default();
-        config.data_dir = data_dir.clone();
+        let config = AppConfig {
+            data_dir: data_dir.clone(),
+            ..Default::default()
+        };
         let image_a = BASE64_STANDARD.encode(b"\x89PNG\r\n\x1a\nnested-a");
         let image_b = BASE64_STANDARD.encode(b"\x89PNG\r\n\x1a\nnested-b");
 
@@ -2119,8 +2123,10 @@ mod tests {
 
         let data_dir = temp_dir("vision-execute-image-gen");
         fs::create_dir_all(&data_dir).expect("create data dir");
-        let mut config = AppConfig::default();
-        config.data_dir = data_dir.clone();
+        let config = AppConfig {
+            data_dir: data_dir.clone(),
+            ..Default::default()
+        };
         let mut settings = BTreeMap::new();
         settings.insert(
             GENERATE_URL_KEY.to_owned(),

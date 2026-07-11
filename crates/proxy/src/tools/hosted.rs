@@ -421,10 +421,10 @@ fn generic_success_summary(result: &Value) -> Option<String> {
             ));
         }
     }
-    if result.get("stage").and_then(Value::as_str).is_some() {
-        if result.get("mode").and_then(Value::as_str) == Some("search") {
-            return Some(web_search_result_summary(result));
-        }
+    if result.get("stage").and_then(Value::as_str).is_some()
+        && result.get("mode").and_then(Value::as_str) == Some("search")
+    {
+        return Some(web_search_result_summary(result));
     }
     result
         .get("summary")

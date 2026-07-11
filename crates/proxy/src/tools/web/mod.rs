@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn web_search_total_timeout_stays_bounded() {
-        assert!(WEB_SEARCH_TOTAL_TIMEOUT_SECS <= 15);
+        const { assert!(WEB_SEARCH_TOTAL_TIMEOUT_SECS <= 15) }
     }
 
     #[test]

@@ -1559,17 +1559,16 @@ async fn fake_apply_patch_recovery_chat_completions(
         .map(|messages| {
             messages
                 .iter()
-                .filter_map(|message| {
-                    (message.get("role").and_then(Value::as_str) == Some("tool")
-                        && message.get("tool_call_id").and_then(Value::as_str)
-                            == Some("call_patch"))
-                    .then(|| {
-                        message
-                            .get("content")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned()
-                    })
+                .filter(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("tool")
+                        && message.get("tool_call_id").and_then(Value::as_str) == Some("call_patch")
+                })
+                .map(|message| {
+                    message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
                 })
                 .collect::<Vec<_>>()
         })
@@ -2395,6 +2394,7 @@ fn automatic_compaction_requires_explicit_context_management() {
             "budget": { "triggered": true }
         }),
         history_message_count: 0,
+        upstream_context_limit: None,
     };
     let request = json!({
         "instructions": "You are Codex.",
@@ -3359,12 +3359,13 @@ async fn codex_full_context_request_is_budgeted_before_upstream() {
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let proxy_app = Router::new()
         .route("/v1/responses", post(responses))
+        .layer(DefaultBodyLimit::max(RESPONSES_BODY_LIMIT_BYTES))
         .with_state(proxy_state);
     tokio::spawn(async move {
         axum::serve(proxy_listener, proxy_app).await.unwrap();
     });
 
-    let mut input_items = (0..110)
+    let mut input_items = (0..600)
         .map(|index| {
             json!({
                 "type": "message",
@@ -3396,47 +3397,26 @@ async fn codex_full_context_request_is_budgeted_before_upstream() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
     let requests = fake_state
         .requests
         .lock()
         .expect("fake upstream lock poisoned")
         .clone();
-    assert_eq!(requests.len(), 1);
-    let messages = requests[0]["messages"]
-        .as_array()
-        .expect("upstream messages");
-    let serialized_messages = serde_json::to_string(messages).unwrap();
-    assert!(serialized_messages.contains("answer briefly"));
-    assert!(serialized_messages.contains("latest full-context task"));
-    assert!(!serialized_messages.contains("old full context item 0"));
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let error = response.json::<Value>().await.unwrap();
+    assert_eq!(
+        error.pointer("/error/code").and_then(Value::as_str),
+        Some("context_limit_exceeded")
+    );
     assert!(
-        serialized_messages.len() < 420_000,
-        "messages too large: {}",
-        serialized_messages.len()
+        requests.is_empty(),
+        "over-limit replay must not reach upstream"
     );
 
     let (events, _) = store.recent_events(40, None).await.unwrap();
-    let diagnostic = events
+    assert!(events
         .iter()
-        .find(|event| event.event_type == "context_compile_diagnostic")
-        .and_then(|event| event.detail.as_ref())
-        .expect("context diagnostic");
-    assert_eq!(
-        diagnostic
-            .pointer("/context/budget_mode")
-            .and_then(Value::as_str),
-        Some("codex_full_context_replay")
-    );
-    let budget_triggered = diagnostic
-        .pointer("/context/budget/triggered")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let replay_canonicalized = diagnostic
-        .pointer("/context/codex_full_context_replay/tool_history_compaction/triggered")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    assert!(budget_triggered || replay_canonicalized);
+        .any(|event| event.event_type == "context_limit_exceeded"));
 
     let _ = std::fs::remove_dir_all(data_dir);
 }
@@ -3588,7 +3568,7 @@ async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
             .unwrap()
             .pointer("/context/codex_full_context_replay/strategy")
             .and_then(Value::as_str),
-        Some("local_prompt_cache_chain_current_tail")
+        Some("canonical_authoritative_replay")
     );
 
     let _ = std::fs::remove_dir_all(data_dir);
@@ -3773,23 +3753,11 @@ async fn codex_full_context_handoff_chain_advances_without_previous_response_id(
         let strategy = diagnostic
             .pointer("/context/codex_full_context_replay/strategy")
             .and_then(Value::as_str);
-        if step == 0 {
-            assert_eq!(strategy, Some("client_full_replay"));
-        } else {
-            assert_eq!(
-                strategy,
-                Some("local_prompt_cache_chain_current_tail"),
-                "step {step} context diagnostic: {diagnostic}"
-            );
-            assert_eq!(
-                diagnostic
-                    .pointer(
-                        "/context/codex_full_context_replay/local_replay_prefix_coverage/complete",
-                    )
-                    .and_then(Value::as_bool),
-                Some(true)
-            );
-        }
+        assert_eq!(
+            strategy,
+            Some("canonical_authoritative_replay"),
+            "step {step} context diagnostic: {diagnostic}"
+        );
     }
 
     let _ = std::fs::remove_dir_all(data_dir);
@@ -3908,7 +3876,7 @@ async fn codex_model_switch_keeps_client_replay_when_local_root_is_not_complete(
             .unwrap()
             .pointer("/context/codex_full_context_replay/strategy")
             .and_then(Value::as_str),
-        Some("client_full_replay")
+        Some("canonical_authoritative_replay")
     );
 
     let _ = std::fs::remove_dir_all(data_dir);

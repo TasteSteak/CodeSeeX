@@ -203,7 +203,7 @@ async fn run_codex_runtime_probe(
     let cli = find_codex_cli()
         .ok_or_else(|| anyhow::anyhow!("Codex CLI was not found on PATH or in npm globals"))?;
     match probe_codex_app_server_stdio(&cli, expected_path, expected_models).await {
-        Ok(probe) => return Ok(probe),
+        Ok(probe) => Ok(probe),
         Err(stdio_error) => {
             let port = free_loopback_port()?;
             let mut child = spawn_codex_app_server_ws(&cli, port).await?;
@@ -213,11 +213,11 @@ async fn run_codex_runtime_probe(
             }
             .await;
             terminate_codex_app_server(&mut child).await;
-            return result.map_err(|ws_error| {
+            result.map_err(|ws_error| {
                 anyhow::anyhow!(
                     "Codex app-server verification failed over stdio and websocket. stdio: {stdio_error}; websocket: {ws_error}"
                 )
-            });
+            })
         }
     }
 }
@@ -395,6 +395,7 @@ async fn spawn_codex_app_server_ws(cli: &std::path::Path, port: u16) -> anyhow::
     command.spawn().map_err(Into::into)
 }
 
+#[allow(clippy::needless_return)]
 fn codex_app_server_command(cli: &std::path::Path, listen: &str) -> TokioCommand {
     if cli
         .extension()
@@ -1720,6 +1721,7 @@ pub(crate) async fn launch_with_model_catalog_injection(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn codex_launch_injection_response(
     debug_port: u16,
     launch: Option<Value>,
@@ -2345,6 +2347,7 @@ fn find_codex_executable() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+#[allow(clippy::needless_return)]
 fn codex_executable_in_dir(path: &std::path::Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
