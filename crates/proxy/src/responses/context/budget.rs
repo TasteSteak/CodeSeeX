@@ -9,9 +9,9 @@ const BYTES_PER_TOKEN_ESTIMATE: u64 = 4;
 const BUDGET_TOOL_CONTENT_CHARS: usize = 512 * 1024;
 const BUDGET_MESSAGE_CONTENT_CHARS: usize = 192 * 1024;
 const BUDGET_REASONING_CHARS: usize = 64 * 1024;
+const FORCE_SHRINK_CONTENT_LIMITS: [usize; 6] =
+    [32 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024, 1024];
 const CODEX_FULL_CONTEXT_REPLAY_BUDGET_TOKENS: u64 = 96_000;
-const CODEX_FULL_CONTEXT_PROTECTED_USER_BYTES: u64 = 8 * 1024;
-const CODEX_FULL_CONTEXT_PROTECTED_USER_TOTAL_BYTES: u64 = 64 * 1024;
 
 pub(crate) struct BudgetedContextMessages {
     pub(crate) messages: Vec<ChatMessage>,
@@ -76,12 +76,12 @@ pub(crate) fn budget_messages_for_upstream(
         };
     }
 
-    let selected =
-        select_budgeted_message_blocks(compacted, protected_start_index, max_bytes, mode);
-    let final_bytes = messages_json_bytes(&selected.messages);
-    let compacted_messages = count_changed_messages(&messages, &selected.messages);
+    let selected = select_budgeted_message_blocks(compacted, protected_start_index, max_bytes);
+    let shrunken = force_shrink_messages_to_budget(selected.messages, max_bytes);
+    let final_bytes = messages_json_bytes(&shrunken.messages);
+    let compacted_messages = count_changed_messages(&messages, &shrunken.messages);
     BudgetedContextMessages {
-        messages: selected.messages,
+        messages: shrunken.messages,
         diagnostic: json!({
             "triggered": true,
             "mode": mode.label(),
@@ -90,9 +90,53 @@ pub(crate) fn budget_messages_for_upstream(
             "compacted_bytes": compacted_bytes,
             "final_bytes": final_bytes,
             "dropped_blocks": selected.dropped_blocks,
-            "compacted_messages": compacted_messages
+            "compacted_messages": compacted_messages,
+            "force_shrink_passes": shrunken.passes,
+            "over_budget_after_shrink": final_bytes > max_bytes
         }),
     }
+}
+
+struct ForceShrinkResult {
+    messages: Vec<ChatMessage>,
+    passes: usize,
+}
+
+fn force_shrink_messages_to_budget(
+    mut messages: Vec<ChatMessage>,
+    max_bytes: u64,
+) -> ForceShrinkResult {
+    let mut passes = 0_usize;
+    if messages_json_bytes(&messages) <= max_bytes {
+        return ForceShrinkResult { messages, passes };
+    }
+    for limit in FORCE_SHRINK_CONTENT_LIMITS {
+        passes = passes.saturating_add(1);
+        messages = messages
+            .into_iter()
+            .map(|message| force_shrink_message(message, limit))
+            .collect();
+        if messages_json_bytes(&messages) <= max_bytes {
+            return ForceShrinkResult { messages, passes };
+        }
+    }
+    ForceShrinkResult { messages, passes }
+}
+
+fn force_shrink_message(mut message: ChatMessage, content_limit: usize) -> ChatMessage {
+    if message.role == "system" {
+        return message;
+    }
+    if message.content.chars().count() > content_limit {
+        message.content = truncate_for_budget(&message.content, content_limit);
+    }
+    if let Some(reasoning) = &message.reasoning_content {
+        let reasoning_limit = content_limit.min(BUDGET_REASONING_CHARS);
+        if reasoning.chars().count() > reasoning_limit {
+            message.reasoning_content = Some(truncate_for_budget(reasoning, reasoning_limit));
+        }
+    }
+    message
 }
 
 struct SelectedMessages {
@@ -104,16 +148,12 @@ fn select_budgeted_message_blocks(
     messages: Vec<ChatMessage>,
     protected_start_index: usize,
     max_bytes: u64,
-    mode: BudgetMode,
 ) -> SelectedMessages {
     let mut selected_indexes = BTreeSet::new();
-    let protected_user_indexes =
-        protected_codex_full_context_user_indexes(&messages, mode, max_bytes);
     for (index, message) in messages.iter().enumerate() {
         if message.role == "system"
             || index >= protected_start_index
             || is_protected_context_message(message)
-            || protected_user_indexes.contains(&index)
         {
             selected_indexes.insert(index);
         }
@@ -244,35 +284,6 @@ fn is_protected_context_message(message: &ChatMessage) -> bool {
             .content
             .starts_with("Recovered CodeSeeX compaction summary")
         || message.content.starts_with("CodeSeeX compacted")
-}
-
-fn protected_codex_full_context_user_indexes(
-    messages: &[ChatMessage],
-    mode: BudgetMode,
-    max_bytes: u64,
-) -> HashSet<usize> {
-    let mut indexes = HashSet::new();
-    if mode != BudgetMode::CodexFullContextReplay {
-        return indexes;
-    }
-
-    let total_cap = CODEX_FULL_CONTEXT_PROTECTED_USER_TOTAL_BYTES.min(max_bytes / 2);
-    let mut total_bytes = 0_u64;
-    for (index, message) in messages.iter().enumerate().rev() {
-        if message.role != "user" {
-            continue;
-        }
-        let bytes = chat_message_json_bytes(message);
-        if bytes > CODEX_FULL_CONTEXT_PROTECTED_USER_BYTES {
-            continue;
-        }
-        if total_bytes.saturating_add(bytes) > total_cap {
-            continue;
-        }
-        indexes.insert(index);
-        total_bytes = total_bytes.saturating_add(bytes);
-    }
-    indexes
 }
 
 fn compact_message_for_budget(message: &ChatMessage) -> ChatMessage {

@@ -19,8 +19,8 @@ use crate::response_sse::{
 };
 use crate::responses::compaction::build_compaction_item;
 use crate::responses::context::{
-    build_response_context, chat_messages_to_values, codex_full_context_relevant_tail_start,
-    estimate_tokens_from_messages, estimate_tokens_from_text,
+    build_response_context, chat_messages_to_values, estimate_tokens_from_messages,
+    estimate_tokens_from_text,
 };
 use crate::responses::conversion::{
     chat_completion_to_response, chat_completion_tool_calls_to_response, final_chat_turn_message,
@@ -130,7 +130,7 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const RESPONSES_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
-const STORED_FULL_CONTEXT_TURN_CONTENT_CHARS: usize = 8 * 1024;
+const STORED_FULL_CONTEXT_TURN_CONTENT_CHARS: usize = 32 * 1024;
 
 pub async fn serve(config: AppConfig) -> anyhow::Result<()> {
     serve_with_shutdown(config, std::future::pending::<()>(), || {}).await
@@ -1568,10 +1568,7 @@ async fn responses(
 }
 
 fn full_context_current_turn_messages(messages: &[ChatMessage]) -> Vec<Value> {
-    let tail_start = codex_full_context_relevant_tail_start(messages);
     let current_turn = messages
-        .get(tail_start..)
-        .unwrap_or_default()
         .iter()
         .cloned()
         .map(compact_turn_message_for_runtime)
@@ -2007,8 +2004,45 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         Ok(bytes) => bytes,
                         Err(error) => {
                             let message = error.to_string();
-                            let detail = json!({ "error": message });
-                            let _ = state.store.finish_request(&response_id, RequestStatus::Failed, None, Some(&detail)).await;
+                            usage = merge_response_usage(&usage, &iteration_usage);
+                            let _ = state
+                                .store
+                                .record_event(
+                                    "info",
+                                    "upstream_call_usage_breakdown",
+                                    "CodeSeeX upstream call usage breakdown.",
+                                    Some(&upstream_call_usage_breakdown_event(
+                                        &response_id,
+                                        "streaming_iteration_failed",
+                                        iteration,
+                                        &original_request,
+                                        &current_payload,
+                                        Some(&iteration_usage),
+                                        Some(iteration_started.elapsed().as_millis() as u64),
+                                        false,
+                                    )),
+                                )
+                                .await;
+                            let failed_response = failed_billable_response(
+                                &response_id,
+                                &model,
+                                "upstream_stream_failed",
+                                &message,
+                                &usage,
+                            );
+                            let detail = json!({
+                                "error": message,
+                                "codeseex_lifecycle": "failed_billable"
+                            });
+                            let _ = state
+                                .store
+                                .finish_request(
+                                    &response_id,
+                                    RequestStatus::Failed,
+                                    Some(&failed_response),
+                                    Some(&detail),
+                                )
+                                .await;
                             let _ = state
                                 .store
                                 .record_event(

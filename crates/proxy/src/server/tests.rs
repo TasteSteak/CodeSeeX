@@ -1801,6 +1801,85 @@ async fn fake_final_chat_completions(
     .into_response()
 }
 
+async fn fake_chained_client_tool_chat_completions(
+    State(state): State<FakeUpstreamState>,
+    Json(payload): Json<Value>,
+) -> axum::response::Response {
+    let request_index = {
+        let mut requests = state.requests.lock().expect("fake upstream lock poisoned");
+        let request_index = requests.len();
+        requests.push(payload);
+        request_index
+    };
+    if request_index < 4 {
+        return Json(json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": format!("call_chain_{request_index}"),
+                        "type": "function",
+                        "function": {
+                            "name": "shell_command",
+                            "arguments": format!(r#"{{"command":"chain step {request_index}"}}"#)
+                        }
+                    }]
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 100 + request_index,
+                "prompt_cache_hit_tokens": 80 + request_index,
+                "completion_tokens": 5,
+                "total_tokens": 105 + request_index
+            }
+        }))
+        .into_response();
+    }
+    Json(json!({
+        "choices": [{
+            "message": { "role": "assistant", "content": "chain completed" }
+        }],
+        "usage": {
+            "prompt_tokens": 104,
+            "prompt_cache_hit_tokens": 84,
+            "completion_tokens": 3,
+            "total_tokens": 107
+        }
+    }))
+    .into_response()
+}
+
+fn assert_chat_tool_calls_are_paired(payload: &Value) {
+    let messages = payload["messages"]
+        .as_array()
+        .expect("chat request messages");
+    for (assistant_index, message) in messages.iter().enumerate() {
+        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for (offset, tool_call) in tool_calls.iter().enumerate() {
+            let call_id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("assistant tool call id");
+            let tool_message = messages
+                .get(assistant_index + offset + 1)
+                .expect("assistant tool call should have a following tool message");
+            assert_eq!(
+                tool_message.get("role").and_then(Value::as_str),
+                Some("tool")
+            );
+            assert_eq!(
+                tool_message.get("tool_call_id").and_then(Value::as_str),
+                Some(call_id),
+                "assistant tool call {call_id} should be paired immediately"
+            );
+        }
+    }
+}
+
 async fn fake_failed_chat_completions(
     State(state): State<FakeUpstreamState>,
     Json(payload): Json<Value>,
@@ -2300,6 +2379,39 @@ fn automatic_compaction_is_not_appended_to_client_tool_calls() {
 
     assert!(!append_auto_compaction_if_safe(&mut response, Some(&item)));
     assert_eq!(response["output"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn automatic_compaction_requires_explicit_context_management() {
+    let context = crate::responses::context::BuiltResponseContext {
+        messages: vec![ChatMessage::text("user", "large replay")],
+        current_messages: vec![ChatMessage::text("user", "large replay")],
+        current_image_refs: Vec::new(),
+        tool_facts: Vec::new(),
+        diagnostic: json!({
+            "codex_full_context_replay": {
+                "tool_history_compaction": { "triggered": true }
+            },
+            "budget": { "triggered": true }
+        }),
+        history_message_count: 0,
+    };
+    let request = json!({
+        "instructions": "You are Codex.",
+        "tools": [],
+        "prompt_cache_key": "thread",
+        "input": [{ "role": "user", "content": "continue" }]
+    });
+
+    let compact = build_automatic_compaction(
+        &AppConfig::default(),
+        &request,
+        "deepseek-v4-flash",
+        &context,
+    )
+    .expect("build compaction");
+
+    assert!(compact.is_none());
 }
 
 #[test]
@@ -3316,12 +3428,15 @@ async fn codex_full_context_request_is_budgeted_before_upstream() {
             .and_then(Value::as_str),
         Some("codex_full_context_replay")
     );
-    assert_eq!(
-        diagnostic
-            .pointer("/context/budget/triggered")
-            .and_then(Value::as_bool),
-        Some(true)
-    );
+    let budget_triggered = diagnostic
+        .pointer("/context/budget/triggered")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let replay_canonicalized = diagnostic
+        .pointer("/context/codex_full_context_replay/tool_history_compaction/triggered")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert!(budget_triggered || replay_canonicalized);
 
     let _ = std::fs::remove_dir_all(data_dir);
 }
@@ -3383,12 +3498,12 @@ async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{ "type": "input_text", "text": "client replay duplicate not in local chain" }]
+                    "content": [{ "type": "input_text", "text": "remember switch-anchor-marker" }]
                 },
                 {
                     "type": "message",
                     "role": "assistant",
-                    "content": [{ "type": "output_text", "text": "old client replay assistant text" }]
+                    "content": [{ "type": "output_text", "text": "tool result acknowledged" }]
                 },
                 {
                     "type": "message",
@@ -3411,8 +3526,16 @@ async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
     let second_messages = serde_json::to_string(&requests[1]["messages"]).unwrap();
     assert!(second_messages.contains("remember switch-anchor-marker"));
     assert!(second_messages.contains("what did I ask you to remember?"));
-    assert!(second_messages.contains("client replay duplicate not in local chain"));
-    assert!(second_messages.contains("old client replay assistant text"));
+    assert_eq!(
+        second_messages
+            .matches("remember switch-anchor-marker")
+            .count(),
+        1
+    );
+    assert_eq!(
+        second_messages.matches("tool result acknowledged").count(),
+        1
+    );
 
     let chain = store
         .response_context_chain("resp_anchor_flash", 2)
@@ -3465,8 +3588,209 @@ async fn codex_model_switch_full_context_uses_prompt_cache_session_anchor() {
             .unwrap()
             .pointer("/context/codex_full_context_replay/strategy")
             .and_then(Value::as_str),
-        Some("client_full_replay")
+        Some("local_prompt_cache_chain_current_tail")
     );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn codex_full_context_handoff_chain_advances_without_previous_response_id() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(fake_chained_client_tool_chat_completions),
+        )
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("codex-full-context-handoff-chain");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store.clone());
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let mut replay_items = vec![json!({
+        "type": "message",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": "complete four client tool steps" }]
+    })];
+    for step in 0..=4 {
+        let response = client
+            .post(format!("http://{proxy_addr}/v1/responses"))
+            .json(&json!({
+                "id": format!("resp_chain_{step}"),
+                "model": "deepseek-v4-pro",
+                "prompt_cache_key": "codex-thread-handoff-chain",
+                "client_metadata": { "x-codex-installation-id": "codex-chain-test" },
+                "instructions": "Use the requested client tool and then continue.",
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "shell_command",
+                        "description": "Run a client shell command.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "command": { "type": "string" } },
+                            "required": ["command"]
+                        }
+                    }
+                }],
+                "input": replay_items.clone()
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<Value>().await.unwrap();
+        let expected_anchor = format!("resp_chain_{step}");
+        assert_eq!(
+            store
+                .latest_completed_context_response_for_prompt_cache_key(
+                    "codex-thread-handoff-chain",
+                )
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(expected_anchor.as_str()),
+            "completed client handoffs should advance the prompt-cache anchor"
+        );
+        if step == 4 {
+            assert_eq!(
+                body.pointer("/output/0/content/0/text")
+                    .and_then(Value::as_str),
+                Some("chain completed")
+            );
+            continue;
+        }
+        let tool_call = body
+            .get("output")
+            .and_then(Value::as_array)
+            .and_then(|output| {
+                output.iter().find(|item| {
+                    matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("function_call") | Some("custom_tool_call")
+                    )
+                })
+            })
+            .cloned()
+            .expect("client tool call");
+        let call_id = tool_call
+            .get("call_id")
+            .and_then(Value::as_str)
+            .expect("call id")
+            .to_owned();
+        replay_items.push(tool_call);
+        replay_items.push(json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": format!("CHAIN_OUTPUT_{step}")
+        }));
+    }
+
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 5);
+    for (request_index, request) in requests.iter().enumerate() {
+        assert_chat_tool_calls_are_paired(request);
+        let rendered = serde_json::to_string(&request["messages"]).unwrap();
+        for marker_index in 0..request_index {
+            assert_eq!(
+                rendered
+                    .matches(&format!("CHAIN_OUTPUT_{marker_index}"))
+                    .count(),
+                1,
+                "request {request_index} should contain marker {marker_index} exactly once"
+            );
+        }
+        let message_count = request["messages"].as_array().map(Vec::len).unwrap_or(0);
+        assert!(
+            message_count <= 3 + request_index * 3,
+            "request {request_index} grew unexpectedly to {message_count} messages"
+        );
+    }
+
+    let chain = store
+        .response_context_chain("resp_chain_4", 10)
+        .await
+        .unwrap();
+    assert_eq!(chain.len(), 5);
+    for (index, record) in chain.iter().enumerate() {
+        let expected_previous = (index > 0).then(|| format!("resp_chain_{}", index - 1));
+        assert_eq!(record.previous_response_id, expected_previous);
+        if index < 4 {
+            let expected_call_id = format!("call_chain_{index}");
+            assert!(record.turn_messages.iter().any(|message| {
+                message
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            call.get("id").and_then(Value::as_str)
+                                == Some(expected_call_id.as_str())
+                        })
+                    })
+            }));
+        }
+    }
+
+    let (events, _) = store.recent_events(200, None).await.unwrap();
+    assert!(events
+        .iter()
+        .all(|event| event.event_type != "context_compacted"));
+    for step in 0..=4 {
+        let id = format!("resp_chain_{step}");
+        let diagnostic = events
+            .iter()
+            .find(|event| {
+                event.event_type == "context_compile_diagnostic"
+                    && event
+                        .detail
+                        .as_ref()
+                        .and_then(|detail| detail.get("id"))
+                        .and_then(Value::as_str)
+                        == Some(id.as_str())
+            })
+            .and_then(|event| event.detail.as_ref())
+            .expect("context diagnostic");
+        let strategy = diagnostic
+            .pointer("/context/codex_full_context_replay/strategy")
+            .and_then(Value::as_str);
+        if step == 0 {
+            assert_eq!(strategy, Some("client_full_replay"));
+        } else {
+            assert_eq!(
+                strategy,
+                Some("local_prompt_cache_chain_current_tail"),
+                "step {step} context diagnostic: {diagnostic}"
+            );
+            assert_eq!(
+                diagnostic
+                    .pointer(
+                        "/context/codex_full_context_replay/local_replay_prefix_coverage/complete",
+                    )
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
+        }
+    }
 
     let _ = std::fs::remove_dir_all(data_dir);
 }
@@ -3561,6 +3885,7 @@ async fn codex_model_switch_keeps_client_replay_when_local_root_is_not_complete(
     assert_eq!(requests.len(), 2);
     let second_messages = serde_json::to_string(&requests[1]["messages"]).unwrap();
     assert!(second_messages.contains("legacy answer that only Codex replay still has"));
+    assert!(second_messages.contains("legacy thread item 0"));
     assert!(second_messages.contains("continue safely"));
 
     let (events, _) = store.recent_events(80, None).await.unwrap();
@@ -7561,15 +7886,23 @@ async fn codex_shaped_client_handoff_avoids_proxy_tool_and_context_pollution() {
     let parent_turn_messages = &parent_chain[0].turn_messages;
     assert_eq!(
         parent_turn_messages.len(),
-        2,
-        "full-context parent should retain a bounded user anchor and appended assistant tool call"
+        full_context_items.len() + 1,
+        "full-context parent should retain every replay message and one assistant tool call"
     );
+    let serialized_parent_turn_messages = serde_json::to_string(parent_turn_messages).unwrap();
+    assert!(serialized_parent_turn_messages.contains("prior compact context item 0"));
+    assert!(serialized_parent_turn_messages.contains("prior compact context item 94"));
     assert!(parent_turn_messages
         .iter()
         .any(|message| message.get("role").and_then(Value::as_str) == Some("user")));
-    assert!(parent_turn_messages
-        .iter()
-        .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant")));
+    assert_eq!(
+        parent_turn_messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .count(),
+        1,
+        "non-streaming handoff must persist the assistant tool call exactly once"
+    );
     assert!(parent_turn_messages
         .iter()
         .all(|message| message.get("role").and_then(Value::as_str) != Some("tool")));
@@ -7655,13 +7988,42 @@ async fn codex_shaped_client_handoff_avoids_proxy_tool_and_context_pollution() {
             .count()
     );
     let second_messages = requests[1]["messages"].as_array().expect("messages");
-    assert_eq!(second_messages.len(), 5, "{}", requests[1]);
-    assert!(!serde_json::to_string(&requests[1])
+    assert_eq!(
+        second_messages.len(),
+        full_context_items.len() + 4,
+        "{}",
+        requests[1]
+    );
+    assert_eq!(
+        second_messages
+            .iter()
+            .filter(|message| {
+                message.get("role").and_then(Value::as_str) == Some("user")
+                    && message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| content.starts_with("prior compact context item "))
+            })
+            .count(),
+        full_context_items.len(),
+        "every client replay message must remain exactly once"
+    );
+    assert!(serde_json::to_string(&requests[1])
         .unwrap()
         .contains("prior compact context item 0"));
     assert!(serde_json::to_string(&requests[1])
         .unwrap()
         .contains("prior compact context item 94"));
+    assert_eq!(
+        second_messages
+            .iter()
+            .filter(|message| {
+                message.pointer("/tool_calls/0/id").and_then(Value::as_str) == Some("call_shell")
+            })
+            .count(),
+        1,
+        "the parent tool call must be represented once for its output"
+    );
     let tool_message = second_messages
         .iter()
         .find(|message| {

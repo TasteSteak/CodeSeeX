@@ -179,7 +179,7 @@ pub(super) async fn resolve_prompt_cache_session_anchor(
         .filter(|value| !value.is_empty())?;
     let anchor = state
         .store
-        .latest_completed_final_response_for_prompt_cache_key(prompt_cache_key)
+        .latest_completed_context_response_for_prompt_cache_key(prompt_cache_key)
         .await
         .ok()
         .flatten()?;
@@ -247,7 +247,14 @@ pub(super) async fn runtime_context_storage_diagnostic(
     previous_for_context: Option<&str>,
 ) -> RuntimeContextStorageDiagnostic {
     let input_items = input.get("input").and_then(Value::as_array).map(Vec::len);
-    let current_full_context_not_stored = request_looks_like_codex_full_context(input);
+    let has_resolved_explicit_previous = previous_for_context.is_some()
+        && input
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+    let current_full_context_not_stored =
+        request_looks_like_codex_full_context(input) && !has_resolved_explicit_previous;
     let current_original_input_hash = current_full_context_not_stored.then(|| {
         stable_log_hash_hex(
             &serde_json::to_vec(input.get("input").unwrap_or(&Value::Null)).unwrap_or_default(),
@@ -384,7 +391,12 @@ pub(super) fn build_automatic_compaction(
     model: &str,
     context: &crate::responses::context::BuiltResponseContext,
 ) -> anyhow::Result<Option<Value>> {
-    let Some(threshold) = resolve_compact_threshold(request.get("context_management")) else {
+    let threshold = if request.get("context_management").is_some() {
+        let Some(threshold) = resolve_compact_threshold(request.get("context_management")) else {
+            return Ok(None);
+        };
+        threshold
+    } else {
         return Ok(None);
     };
     let estimated_tokens = estimate_tokens_from_messages(&context.messages);

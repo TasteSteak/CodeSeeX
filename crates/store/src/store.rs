@@ -406,6 +406,7 @@ pub struct StoredResponse {
     pub response: Value,
     pub turn_messages: Vec<Value>,
     pub tool_facts: Vec<String>,
+    pub diagnostic: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -668,6 +669,7 @@ impl Store {
                 response: request.response.clone(),
                 turn_messages: request.turn_messages.clone(),
                 tool_facts: request.tool_facts.clone(),
+                diagnostic: request.diagnostic.clone(),
             });
             cursor = request.previous_response_id.clone();
         }
@@ -703,6 +705,39 @@ impl Store {
                 request.status == RequestStatus::Completed
                     && request_is_completed_final_turn(request)
                     && request_prompt_cache_key(request).as_deref() == Some(prompt_cache_key)
+            })
+            .map(|request| request.id.clone()))
+    }
+
+    pub async fn latest_completed_context_response_for_prompt_cache_key(
+        &self,
+        prompt_cache_key: &str,
+    ) -> Result<Option<String>> {
+        let prompt_cache_key = prompt_cache_key.trim();
+        if prompt_cache_key.is_empty() {
+            return Ok(None);
+        }
+        let inner = self.lock_inner()?;
+        Ok(inner
+            .request_order
+            .iter()
+            .rev()
+            .filter_map(|id| inner.requests.get(id))
+            .find(|request| {
+                if request.status != RequestStatus::Completed
+                    || request_prompt_cache_key(request).as_deref() != Some(prompt_cache_key)
+                {
+                    return false;
+                }
+                matches!(
+                    request_lifecycle(request).as_str(),
+                    "final_turn" | "client_tool_handoff"
+                ) && request
+                    .diagnostic
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.get("client_tool_handoff_guard_stopped"))
+                    .and_then(Value::as_bool)
+                    != Some(true)
             })
             .map(|request| request.id.clone()))
     }
@@ -1142,8 +1177,9 @@ impl Store {
 
     fn push_runtime_event(&self, event: EventRecord) -> Result<()> {
         let mut inner = self.lock_inner()?;
+        let usage_fallback_changed = apply_upstream_usage_event_to_request(&mut inner, &event);
         bump_event_revision(&mut inner);
-        if event_affects_usage(&event.event_type) {
+        if event_affects_usage(&event.event_type) || usage_fallback_changed {
             bump_usage_revision(&mut inner);
         }
         inner.events.push_back(event);
@@ -3230,6 +3266,119 @@ fn event_affects_usage(event_type: &str) -> bool {
     ) || event_type.contains("usage")
 }
 
+fn apply_upstream_usage_event_to_request(inner: &mut StoreInner, event: &EventRecord) -> bool {
+    if event.event_type != "upstream_call_usage_breakdown" {
+        return false;
+    }
+    let Some(detail) = event.detail.as_ref() else {
+        return false;
+    };
+    let Some(request_id) = detail.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    let usage = detail.get("usage").unwrap_or(&Value::Null);
+    if !usage_has_tokens(usage) {
+        return false;
+    }
+    let Some(request) = inner.requests.get_mut(request_id) else {
+        return false;
+    };
+    let existing_is_fallback = request
+        .response
+        .get("_codeseex_runtime_usage_fallback")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if usage_value(&request.response).is_some() && !existing_is_fallback {
+        return false;
+    }
+    let next_usage = normalized_usage_value(usage);
+    let merged_usage = if existing_is_fallback {
+        merge_usage_values(
+            usage_value(&request.response).unwrap_or(&Value::Null),
+            &next_usage,
+        )
+    } else {
+        next_usage
+    };
+    request.response = json!({
+        "object": "codeseex_usage_fallback",
+        "_codeseex_runtime_usage_fallback": true,
+        "model": request.model.as_deref().unwrap_or_default(),
+        "usage": merged_usage
+    });
+    request.updated_at = Utc::now();
+    true
+}
+
+fn normalized_usage_value(usage: &Value) -> Value {
+    let cached_input_tokens = first_u64(
+        usage,
+        &[
+            "cached_input_tokens",
+            "input_cached_tokens",
+            "prompt_cache_hit_tokens",
+            "cache_hit_input_tokens",
+            "cached_tokens",
+        ],
+    )
+    .or_else(|| {
+        usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(value_to_u64)
+    })
+    .or_else(|| {
+        usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(value_to_u64)
+    })
+    .unwrap_or(0);
+    let input_tokens = first_u64(usage, &["input_tokens", "prompt_tokens"]).unwrap_or(0);
+    let cache_miss_input_tokens = first_u64(
+        usage,
+        &[
+            "cache_miss_input_tokens",
+            "input_cache_miss_tokens",
+            "prompt_cache_miss_tokens",
+            "cache_miss_tokens",
+        ],
+    )
+    .unwrap_or_else(|| input_tokens.saturating_sub(cached_input_tokens));
+    let output_tokens = first_u64(usage, &["output_tokens", "completion_tokens"]).unwrap_or(0);
+    let total_tokens = first_u64(usage, &["total_tokens"]).unwrap_or_else(|| {
+        cached_input_tokens
+            .saturating_add(cache_miss_input_tokens)
+            .saturating_add(output_tokens)
+    });
+    json!({
+        "input_tokens": cached_input_tokens.saturating_add(cache_miss_input_tokens),
+        "cached_input_tokens": cached_input_tokens,
+        "cache_miss_input_tokens": cache_miss_input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens
+    })
+}
+
+fn merge_usage_values(left: &Value, right: &Value) -> Value {
+    let left = normalized_usage_value(left);
+    let right = normalized_usage_value(right);
+    let cached = first_u64(&left, &["cached_input_tokens"])
+        .unwrap_or(0)
+        .saturating_add(first_u64(&right, &["cached_input_tokens"]).unwrap_or(0));
+    let miss = first_u64(&left, &["cache_miss_input_tokens"])
+        .unwrap_or(0)
+        .saturating_add(first_u64(&right, &["cache_miss_input_tokens"]).unwrap_or(0));
+    let output = first_u64(&left, &["output_tokens"])
+        .unwrap_or(0)
+        .saturating_add(first_u64(&right, &["output_tokens"]).unwrap_or(0));
+    json!({
+        "input_tokens": cached.saturating_add(miss),
+        "cached_input_tokens": cached,
+        "cache_miss_input_tokens": miss,
+        "output_tokens": output,
+        "total_tokens": cached.saturating_add(miss).saturating_add(output)
+    })
+}
+
 fn prune_runtime_requests(inner: &mut StoreInner) {
     if mark_stale_in_progress_requests(inner) {
         bump_usage_revision(inner);
@@ -5106,7 +5255,7 @@ fn request_ms(created_at: DateTime<Utc>, updated_at: DateTime<Utc>) -> u64 {
     u64::try_from(millis).unwrap_or(0)
 }
 
-fn request_input_for_runtime(_previous_response_id: Option<&str>, value: &Value) -> Value {
+fn request_input_for_runtime(previous_response_id: Option<&str>, value: &Value) -> Value {
     let Some(object) = value.as_object() else {
         return memory_json_value(value);
     };
@@ -5129,7 +5278,13 @@ fn request_input_for_runtime(_previous_response_id: Option<&str>, value: &Value)
         );
     }
     if let Some(input) = object.get("input") {
-        if request_looks_like_codex_full_context(value) {
+        let has_resolved_explicit_previous = previous_response_id.is_some()
+            && object
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+        if request_looks_like_codex_full_context(value) && !has_resolved_explicit_previous {
             let item_count = input.as_array().map(Vec::len).unwrap_or(0);
             let latest_user_summary = latest_user_summary_from_input(value);
             stored.insert("input".to_owned(), Value::Array(Vec::new()));
@@ -5468,6 +5623,91 @@ mod tests {
         assert!(summary.billable_history[0].billable);
         assert_eq!(summary.total_cache_miss_input_tokens, 5);
         assert_eq!(summary.total_output_tokens, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn prompt_cache_context_anchor_advances_through_completed_handoffs() {
+        let dir = temp_dir("prompt-cache-context-anchor");
+        let store = Store::open(&dir).await.expect("open store");
+        let input = json!({
+            "model": "deepseek-v4-pro",
+            "prompt_cache_key": "thread-anchor",
+            "input": "continue the agent turn"
+        });
+
+        store
+            .checkpoint_request("resp_final", None, Some("deepseek-v4-pro"), &input)
+            .await
+            .expect("checkpoint final");
+        store
+            .finish_request(
+                "resp_final",
+                RequestStatus::Completed,
+                Some(&json!({ "output": [] })),
+                None,
+            )
+            .await
+            .expect("finish final");
+
+        for (id, previous) in [
+            ("resp_handoff_1", "resp_final"),
+            ("resp_handoff_2", "resp_handoff_1"),
+        ] {
+            store
+                .checkpoint_request(id, Some(previous), Some("deepseek-v4-pro"), &input)
+                .await
+                .expect("checkpoint handoff");
+            store
+                .finish_request(
+                    id,
+                    RequestStatus::Completed,
+                    Some(&json!({ "output": [] })),
+                    Some(&json!({ "codeseex_lifecycle": "client_tool_handoff" })),
+                )
+                .await
+                .expect("finish handoff");
+        }
+
+        store
+            .checkpoint_request(
+                "resp_guard_stopped",
+                Some("resp_handoff_2"),
+                Some("deepseek-v4-pro"),
+                &input,
+            )
+            .await
+            .expect("checkpoint guard-stopped handoff");
+        store
+            .finish_request(
+                "resp_guard_stopped",
+                RequestStatus::Completed,
+                Some(&json!({ "output": [] })),
+                Some(&json!({
+                    "codeseex_lifecycle": "client_tool_handoff",
+                    "client_tool_handoff_guard_stopped": true
+                })),
+            )
+            .await
+            .expect("finish guard-stopped handoff");
+
+        assert_eq!(
+            store
+                .latest_completed_final_response_for_prompt_cache_key("thread-anchor")
+                .await
+                .expect("latest final anchor")
+                .as_deref(),
+            Some("resp_final")
+        );
+        assert_eq!(
+            store
+                .latest_completed_context_response_for_prompt_cache_key("thread-anchor")
+                .await
+                .expect("latest context anchor")
+                .as_deref(),
+            Some("resp_handoff_2")
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6980,6 +7220,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_summary_accounts_upstream_usage_event_when_request_fails_without_body() {
+        let dir = temp_dir("upstream-usage-fallback");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .checkpoint_request(
+                "resp_orphan_usage",
+                None,
+                Some("deepseek-v4-flash"),
+                &json!({ "model": "deepseek-v4-flash", "input": "run a long tool task" }),
+            )
+            .await
+            .expect("checkpoint");
+        store
+            .record_event(
+                "info",
+                "upstream_call_usage_breakdown",
+                "CodeSeeX upstream call usage breakdown.",
+                Some(&json!({
+                    "id": "resp_orphan_usage",
+                    "phase": "streaming_iteration",
+                    "iteration": 0,
+                    "usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 70,
+                        "cache_miss_input_tokens": 30,
+                        "output_tokens": 8,
+                        "total_tokens": 108
+                    }
+                })),
+            )
+            .await
+            .expect("record usage event");
+        store
+            .finish_request(
+                "resp_orphan_usage",
+                RequestStatus::Failed,
+                None,
+                Some(&json!({ "error": "stream disconnected before completion" })),
+            )
+            .await
+            .expect("finish failed without response body");
+
+        let summary = store.runtime_summary(10).await.expect("summary");
+        assert_eq!(summary.request_count, 0);
+        assert_eq!(summary.failed_request_count, 1);
+        assert_eq!(summary.billable_request_count, 1);
+        assert_eq!(summary.total_cached_input_tokens, 70);
+        assert_eq!(summary.total_cache_miss_input_tokens, 30);
+        assert_eq!(summary.total_output_tokens, 8);
+        assert_eq!(summary.billable_history[0].id, "resp_orphan_usage");
+        assert_eq!(summary.billable_history[0].lifecycle, "failed_billable");
+        assert_eq!(summary.billable_history[0].total_tokens, 108);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn finish_request_does_not_overwrite_interrupted_status() {
         let dir = temp_dir("finish-interrupted");
         let store = Store::open(&dir).await.expect("open store");
@@ -7702,6 +7999,77 @@ mod tests {
             chain[0].input["_codeseex_runtime"]["mode"],
             "codex_full_context_not_stored"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn codex_explicit_previous_incremental_input_is_kept_for_tool_replay() {
+        let dir = temp_dir("explicit-previous-incremental");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .checkpoint_request(
+                "resp_parent",
+                None,
+                Some("deepseek-v4-pro"),
+                &json!({ "model": "deepseek-v4-pro", "input": "start" }),
+            )
+            .await
+            .expect("checkpoint parent");
+        store
+            .finish_request(
+                "resp_parent",
+                RequestStatus::Completed,
+                Some(&json!({ "model": "deepseek-v4-pro", "output": [] })),
+                Some(&json!({ "codeseex_lifecycle": "client_tool_handoff" })),
+            )
+            .await
+            .expect("finish parent");
+
+        store
+            .checkpoint_request(
+                "resp_child",
+                Some("resp_parent"),
+                Some("deepseek-v4-pro"),
+                &json!({
+                    "model": "deepseek-v4-pro",
+                    "previous_response_id": "resp_parent",
+                    "prompt_cache_key": "thread-explicit-previous",
+                    "instructions": "continue",
+                    "tools": [],
+                    "input": [{
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_patch",
+                        "output": "patch applied"
+                    }]
+                }),
+            )
+            .await
+            .expect("checkpoint child");
+        store
+            .finish_request(
+                "resp_child",
+                RequestStatus::Completed,
+                Some(&json!({ "model": "deepseek-v4-pro", "output": [] })),
+                None,
+            )
+            .await
+            .expect("finish child");
+
+        let chain = store
+            .response_context_chain("resp_child", 2)
+            .await
+            .expect("chain");
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1].input["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            chain[1]
+                .input
+                .pointer("/input/0/call_id")
+                .and_then(Value::as_str),
+            Some("call_patch")
+        );
+        assert!(chain[1].input.pointer("/_codeseex_runtime/mode").is_none());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
