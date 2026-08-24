@@ -2005,7 +2005,6 @@ mod tests {
                 vision_analyze: Some(codeseex_core::UserVisionToolConfig {
                     generate_url: Some(String::new()),
                     generate_model: Some(String::new()),
-                    api_key: Some("legacy-shared-key".to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
