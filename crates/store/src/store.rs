@@ -2013,6 +2013,10 @@ fn event_summary(event: &EventRecord, object: Option<&Map<String, Value>>) -> St
         "tool_result" => compact_log_string(
             &[
                 detail_string(object, "name").map(|value| format!("tool={value}")),
+                nested_string(object, "vision", "model").map(|value| format!("model={value}")),
+                nested_u64(object, "vision", "duration_ms")
+                    .map(|value| format!("duration={value}ms")),
+                nested_u64(object, "vision", "image_count").map(|value| format!("images={value}")),
                 detail_bool(object, "ok").map(|ok| format!("ok={ok}")),
                 detail_string(object, "summary"),
             ]
@@ -2933,6 +2937,19 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                             "browser_fallback",
                         ][..],
                     ),
+                    (
+                        "vision",
+                        &[
+                            "provider",
+                            "backend",
+                            "model",
+                            "transport",
+                            "image_count",
+                            "image_detail",
+                            "duration_ms",
+                            "usage",
+                        ][..],
+                    ),
                 ],
             );
             if let Some(summary) = object.get("summary") {
@@ -3525,15 +3542,22 @@ fn runtime_summary_from_inner(
         .filter(|request| request_is_completed_billable_request(request))
         .filter_map(turn_from_request)
         .collect::<Vec<_>>();
+    let vision_totals = usage_vision_totals(inner);
     let total_cached_input_tokens = billable_totals
         .iter()
         .map(|turn| turn.cached_input_tokens)
-        .sum();
+        .sum::<u64>()
+        .saturating_add(vision_totals.0);
     let total_cache_miss_input_tokens = billable_totals
         .iter()
         .map(|turn| turn.cache_miss_input_tokens)
-        .sum();
-    let total_output_tokens = billable_totals.iter().map(|turn| turn.output_tokens).sum();
+        .sum::<u64>()
+        .saturating_add(vision_totals.1);
+    let total_output_tokens = billable_totals
+        .iter()
+        .map(|turn| turn.output_tokens)
+        .sum::<u64>()
+        .saturating_add(vision_totals.2);
     let average_ms = if billable_totals.is_empty() {
         0
     } else {
@@ -3636,7 +3660,7 @@ fn usage_session_summary(session: &UsageSession) -> UsageSessionSummary {
         output_tokens: session.output_tokens,
         total_tokens: session.total_tokens,
         request_ms: session.request_ms,
-        billing_buckets: usage_billing_buckets_from_rows(&session.rows),
+        billing_buckets: usage_billing_buckets_from_session(session),
         row_count: session.rows.len(),
         segment_count: session.segments.len(),
         session_revision: stable_hash_hex(
@@ -3673,9 +3697,34 @@ fn usage_billing_buckets(inner: &StoreInner) -> Vec<UsageBillingBucket> {
     {
         add_usage_billing_bucket(&mut buckets, &turn);
     }
+    for segment in inner
+        .events
+        .iter()
+        .filter(|event| event.event_type == "tool_result")
+        .filter_map(usage_vision_segment_from_event)
+        .filter(vision_segment_is_deepseek_billable)
+    {
+        add_usage_billing_bucket(&mut buckets, &segment);
+    }
     sorted_usage_billing_buckets(buckets)
 }
 
+fn usage_billing_buckets_from_session(session: &UsageSession) -> Vec<UsageBillingBucket> {
+    let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
+    for row in &session.rows {
+        add_usage_billing_bucket(&mut buckets, row);
+    }
+    for segment in session
+        .segments
+        .iter()
+        .filter(|segment| vision_segment_is_deepseek_billable(segment))
+    {
+        add_usage_billing_bucket(&mut buckets, segment);
+    }
+    sorted_usage_billing_buckets(buckets)
+}
+
+#[cfg(test)]
 fn usage_billing_buckets_from_rows(rows: &[UsageSessionRow]) -> Vec<UsageBillingBucket> {
     let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
     for row in rows {
@@ -3749,6 +3798,30 @@ impl UsageBillingSource for UsageSessionRow {
         self.output_tokens
     }
 
+    fn total_tokens(&self) -> u64 {
+        self.total_tokens
+    }
+}
+
+impl UsageBillingSource for UsageSegment {
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn requested_model(&self) -> &str {
+        &self.requested_model
+    }
+    fn completed_at(&self) -> &str {
+        self.completed_at.as_deref().unwrap_or("")
+    }
+    fn cached_input_tokens(&self) -> u64 {
+        self.cached_input_tokens
+    }
+    fn cache_miss_input_tokens(&self) -> u64 {
+        self.cache_miss_input_tokens
+    }
+    fn output_tokens(&self) -> u64 {
+        self.output_tokens
+    }
     fn total_tokens(&self) -> u64 {
         self.total_tokens
     }
@@ -4204,10 +4277,10 @@ fn usage_session_from_rows(
     conversation_turn: bool,
     inner: &StoreInner,
 ) -> UsageSession {
-    let cached_input_tokens = rows.iter().map(|row| row.cached_input_tokens).sum();
-    let cache_miss_input_tokens = rows.iter().map(|row| row.cache_miss_input_tokens).sum();
-    let output_tokens = rows.iter().map(|row| row.output_tokens).sum();
-    let total_tokens = rows.iter().map(|row| row.total_tokens).sum();
+    let cached_input_tokens: u64 = rows.iter().map(|row| row.cached_input_tokens).sum();
+    let cache_miss_input_tokens: u64 = rows.iter().map(|row| row.cache_miss_input_tokens).sum();
+    let output_tokens: u64 = rows.iter().map(|row| row.output_tokens).sum();
+    let total_tokens: u64 = rows.iter().map(|row| row.total_tokens).sum();
     let request_ms = rows.iter().map(|row| row.request_ms).sum();
     let status = if rows.iter().any(|row| row.status == "failed") {
         "failed"
@@ -4217,6 +4290,7 @@ fn usage_session_from_rows(
     .to_owned();
     let (title, title_source) = usage_session_title(anchor, anchor_request);
     let segments = usage_session_segments(inner, &rows);
+    let vision_tokens = usage_vision_token_totals(&segments);
     UsageSession {
         id: anchor.id.clone(),
         title,
@@ -4224,10 +4298,10 @@ fn usage_session_from_rows(
         completed_at: anchor.completed_at.clone(),
         conversation_turn,
         status,
-        cached_input_tokens,
-        cache_miss_input_tokens,
-        output_tokens,
-        total_tokens,
+        cached_input_tokens: cached_input_tokens.saturating_add(vision_tokens.0),
+        cache_miss_input_tokens: cache_miss_input_tokens.saturating_add(vision_tokens.1),
+        output_tokens: output_tokens.saturating_add(vision_tokens.2),
+        total_tokens: total_tokens.saturating_add(vision_tokens.3),
         request_ms,
         segments,
         technical_details: usage_session_technical_details(anchor, &rows),
@@ -4297,6 +4371,35 @@ fn usage_session_from_active_request(
     })
 }
 
+fn usage_vision_token_totals(segments: &[UsageSegment]) -> (u64, u64, u64, u64) {
+    segments
+        .iter()
+        .filter(|segment| segment.kind == "vision")
+        .fold((0, 0, 0, 0), |totals, segment| {
+            (
+                totals.0.saturating_add(segment.cached_input_tokens),
+                totals.1.saturating_add(segment.cache_miss_input_tokens),
+                totals.2.saturating_add(segment.output_tokens),
+                totals.3.saturating_add(segment.total_tokens),
+            )
+        })
+}
+
+fn usage_vision_totals(inner: &StoreInner) -> (u64, u64, u64) {
+    inner
+        .events
+        .iter()
+        .filter(|event| event.event_type == "tool_result")
+        .filter_map(usage_vision_segment_from_event)
+        .fold((0, 0, 0), |totals, segment| {
+            (
+                totals.0.saturating_add(segment.cached_input_tokens),
+                totals.1.saturating_add(segment.cache_miss_input_tokens),
+                totals.2.saturating_add(segment.output_tokens),
+            )
+        })
+}
+
 fn usage_non_final_session_from_rows(
     inner: &StoreInner,
     anchor_row: UsageSessionRow,
@@ -4318,10 +4421,10 @@ fn usage_non_final_session_from_rows(
         total_tokens: anchor_row.total_tokens,
         request_ms: anchor_row.request_ms,
     };
-    let cached_input_tokens = rows.iter().map(|row| row.cached_input_tokens).sum();
-    let cache_miss_input_tokens = rows.iter().map(|row| row.cache_miss_input_tokens).sum();
-    let output_tokens = rows.iter().map(|row| row.output_tokens).sum();
-    let total_tokens = rows.iter().map(|row| row.total_tokens).sum();
+    let cached_input_tokens: u64 = rows.iter().map(|row| row.cached_input_tokens).sum();
+    let cache_miss_input_tokens: u64 = rows.iter().map(|row| row.cache_miss_input_tokens).sum();
+    let output_tokens: u64 = rows.iter().map(|row| row.output_tokens).sum();
+    let total_tokens: u64 = rows.iter().map(|row| row.total_tokens).sum();
     let request_ms = rows.iter().map(|row| row.request_ms).sum();
     let status = if rows.iter().any(|row| row.status == "failed") {
         "failed"
@@ -4331,6 +4434,7 @@ fn usage_non_final_session_from_rows(
     .to_owned();
     let (title, title_source) = usage_session_title(&title_turn, anchor_request);
     let segments = usage_session_segments(inner, &rows);
+    let vision_tokens = usage_vision_token_totals(&segments);
     UsageSession {
         id: anchor_row.id.clone(),
         title,
@@ -4338,10 +4442,10 @@ fn usage_non_final_session_from_rows(
         completed_at: anchor_row.completed_at.clone(),
         conversation_turn: false,
         status,
-        cached_input_tokens,
-        cache_miss_input_tokens,
-        output_tokens,
-        total_tokens,
+        cached_input_tokens: cached_input_tokens.saturating_add(vision_tokens.0),
+        cache_miss_input_tokens: cache_miss_input_tokens.saturating_add(vision_tokens.1),
+        output_tokens: output_tokens.saturating_add(vision_tokens.2),
+        total_tokens: total_tokens.saturating_add(vision_tokens.3),
         request_ms,
         segments,
         rows,
@@ -4710,6 +4814,7 @@ fn usage_tool_segment_from_event(
     } else {
         "completed"
     };
+    let vision = usage_vision_segment_from_event(event);
     Some(UsageSegment {
         id: format!(
             "{}:tool:{}:{}:{}",
@@ -4720,16 +4825,32 @@ fn usage_tool_segment_from_event(
                 .unwrap_or_else(|| event.id.to_string()),
             sanitize_segment_id(&tool_name)
         ),
-        kind: "tool_result".to_owned(),
-        label: usage_tool_segment_label_key(&tool_name).to_owned(),
+        kind: if vision.is_some() {
+            "vision"
+        } else {
+            "tool_result"
+        }
+        .to_owned(),
+        label: if vision.is_some() {
+            "usage_vision_stage"
+        } else {
+            usage_tool_segment_label_key(&tool_name)
+        }
+        .to_owned(),
         hint: if ok == Some(false) {
             "usage_tool_failed"
         } else {
             "usage_tool_completed"
         }
         .to_owned(),
-        model: tool_name.clone(),
-        requested_model: String::new(),
+        model: vision
+            .as_ref()
+            .map(|segment| segment.model.clone())
+            .unwrap_or_else(|| tool_name.clone()),
+        requested_model: vision
+            .as_ref()
+            .map(|segment| segment.requested_model.clone())
+            .unwrap_or_default(),
         reasoning_effort: String::new(),
         lifecycle: row.lifecycle.clone(),
         status: status.to_owned(),
@@ -4741,13 +4862,106 @@ fn usage_tool_segment_from_event(
             .and_then(|detail| detail.get("summary"))
             .and_then(compact_usage_segment_summary),
         completed_at: Some(event.ts.clone()),
-        cached_input_tokens: 0,
-        cache_miss_input_tokens: 0,
-        output_tokens: 0,
-        total_tokens: 0,
-        request_ms: 0,
+        cached_input_tokens: vision
+            .as_ref()
+            .map(|segment| segment.cached_input_tokens)
+            .unwrap_or(0),
+        cache_miss_input_tokens: vision
+            .as_ref()
+            .map(|segment| segment.cache_miss_input_tokens)
+            .unwrap_or(0),
+        output_tokens: vision
+            .as_ref()
+            .map(|segment| segment.output_tokens)
+            .unwrap_or(0),
+        total_tokens: vision
+            .as_ref()
+            .map(|segment| segment.total_tokens)
+            .unwrap_or(0),
+        request_ms: vision
+            .as_ref()
+            .map(|segment| segment.request_ms)
+            .unwrap_or(0),
         rows: Vec::new(),
     })
+}
+
+fn usage_vision_segment_from_event(event: &EventRecord) -> Option<UsageSegment> {
+    let detail = event.detail.as_ref()?;
+    let vision = detail.get("vision")?;
+    let usage = vision.get("usage")?;
+    let input = first_u64(usage, &["input_tokens", "prompt_tokens"])?;
+    let cached = first_u64(
+        usage,
+        &[
+            "cached_input_tokens",
+            "input_cached_tokens",
+            "prompt_cache_hit_tokens",
+            "cached_tokens",
+        ],
+    )
+    .unwrap_or_else(|| {
+        vision
+            .pointer("/usage/input_tokens_details/cached_tokens")
+            .and_then(value_to_u64)
+            .unwrap_or(0)
+    });
+    let miss = first_u64(
+        usage,
+        &["cache_miss_input_tokens", "input_cache_miss_tokens"],
+    )
+    .unwrap_or_else(|| input.saturating_sub(cached));
+    let output = first_u64(usage, &["output_tokens", "completion_tokens"]).unwrap_or(0);
+    let total = first_u64(usage, &["total_tokens"])
+        .unwrap_or_else(|| cached.saturating_add(miss).saturating_add(output));
+    let model = vision.get("model").and_then(Value::as_str)?.to_owned();
+    Some(UsageSegment {
+        id: format!("vision:{}", event.id),
+        kind: "vision".to_owned(),
+        label: "usage_vision_stage".to_owned(),
+        hint: "usage_vision_completed".to_owned(),
+        model,
+        requested_model: vision
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        reasoning_effort: String::new(),
+        lifecycle: "vision_tool".to_owned(),
+        status: if detail.get("ok").and_then(Value::as_bool) == Some(false) {
+            "failed".to_owned()
+        } else {
+            "completed".to_owned()
+        },
+        tool_name: Some(
+            detail
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("vision_analyze")
+                .to_owned(),
+        ),
+        iteration: detail
+            .get("iteration")
+            .and_then(value_to_u64)
+            .map(|value| value as u32),
+        summary: detail
+            .get("summary")
+            .and_then(compact_usage_segment_summary),
+        completed_at: Some(event.ts.clone()),
+        cached_input_tokens: cached,
+        cache_miss_input_tokens: miss,
+        output_tokens: output,
+        total_tokens: total,
+        request_ms: vision
+            .get("duration_ms")
+            .and_then(value_to_u64)
+            .unwrap_or(0),
+        rows: Vec::new(),
+    })
+}
+
+fn vision_segment_is_deepseek_billable(segment: &UsageSegment) -> bool {
+    segment.kind == "vision" && segment.model == "deepseek-v4-flash-vision-exp"
 }
 
 fn usage_tool_call_segment_from_event(
@@ -6994,6 +7208,85 @@ mod tests {
         assert!(tool_segments
             .iter()
             .all(|segment| segment.iteration == Some(3)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn vision_tool_usage_is_recorded_as_a_separate_billable_segment() {
+        let dir = temp_dir("vision-usage-segment");
+        let store = Store::open(&dir).await.expect("open store");
+        store
+            .checkpoint_request(
+                "resp_vision_usage",
+                None,
+                Some("deepseek-v4-flash"),
+                &json!({
+                    "model": "deepseek-v4-flash",
+                    "input": [{ "role": "user", "content": "inspect this" }]
+                }),
+            )
+            .await
+            .expect("checkpoint vision request");
+        store
+            .finish_request(
+                "resp_vision_usage",
+                RequestStatus::Completed,
+                Some(&json!({
+                    "model": "deepseek-v4-flash",
+                    "usage": { "input_tokens": 10, "output_tokens": 2, "total_tokens": 12 }
+                })),
+                None,
+            )
+            .await
+            .expect("finish vision request");
+        store
+            .record_event(
+                "info",
+                "tool_result",
+                "Vision tool result returned.",
+                Some(&json!({
+                    "id": "resp_vision_usage",
+                    "name": "vision_analyze",
+                    "iteration": 1,
+                    "ok": true,
+                    "summary": "vision_analyze ok",
+                    "vision": {
+                        "provider": "deepseek",
+                        "backend": "deepseek",
+                        "model": "deepseek-v4-flash-vision-exp",
+                        "transport": "responses",
+                        "image_count": 1,
+                        "image_detail": "auto",
+                        "duration_ms": 1200,
+                        "usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 80,
+                            "cache_miss_input_tokens": 20,
+                            "output_tokens": 7,
+                            "total_tokens": 107
+                        }
+                    }
+                })),
+            )
+            .await
+            .expect("record vision result");
+
+        let summary = store.runtime_summary(20).await.expect("runtime summary");
+        assert_eq!(summary.total_cached_input_tokens, 80);
+        assert_eq!(summary.total_cache_miss_input_tokens, 30);
+        assert_eq!(summary.total_output_tokens, 9);
+        let session = summary.usage_sessions.first().expect("vision session");
+        assert!(session.segments.iter().any(|segment| {
+            segment.kind == "vision"
+                && segment.model == "deepseek-v4-flash-vision-exp"
+                && segment.total_tokens == 107
+        }));
+        assert!(
+            usage_billing_buckets(&store.lock_inner().expect("store lock"))
+                .iter()
+                .any(|bucket| bucket.model == "deepseek-v4-flash-vision-exp"
+                    && bucket.total_tokens == 107)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -6,7 +6,7 @@
     <meta name="description" content="How CodeSeeX preserves Codex agent semantics while routing requests to DeepSeek-compatible upstreams.">
     <title>Runtime · CodeSeeX</title>
     <link rel="icon" href="assets/app.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="assets/site.css?v=0.6.0">
+    <link rel="stylesheet" href="assets/site.css?v=0.7.0">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -67,12 +67,12 @@
             <article class="feature">
               <span class="feature-kicker">BRIDGE</span>
               <h3 data-i18n="runtime.layer2Title">Agent bridge</h3>
-              <p data-i18n="runtime.layer2Copy">Request classification, client tool handoff, context compilation, and replay controls.</p>
+              <p data-i18n="runtime.layer2Copy">Request classification, client tool handoff, context compilation, and ownership-based local-tool execution.</p>
             </article>
             <article class="feature">
               <span class="feature-kicker">PROVIDER</span>
               <h3 data-i18n="runtime.layer3Title">Provider adapter</h3>
-              <p data-i18n="runtime.layer3Copy">DeepSeek streaming, reasoning, DSML tool protocol parsing, and usage normalization.</p>
+              <p data-i18n="runtime.layer3Copy">DeepSeek Responses by default, explicit Chat compatibility, reasoning continuity, and usage normalization.</p>
             </article>
             <article class="feature">
               <span class="feature-kicker">DESKTOP</span>
@@ -109,7 +109,7 @@
             <article class="panel">
               <span class="eyebrow neutral" data-i18n="runtime.protocolTitle">Provider protocol handling</span>
               <h2 data-i18n="runtime.protocolTitle">Provider protocol handling</h2>
-              <p data-i18n="runtime.protocolCopy">DeepSeek-specific protocol text is treated as provider protocol, not user-visible prose. When tools are available it becomes standard tool calls; otherwise it is consumed at the safety boundary.</p>
+              <p data-i18n="runtime.protocolCopy">Official model calls use native Responses by default. Requests that require CodeSeeX-owned local tools use the established compatibility executor, while provider failures never trigger a silent protocol fallback.</p>
             </article>
             <article class="panel">
               <span class="eyebrow neutral" data-i18n="runtime.usageTitle">Usage that follows user work</span>
@@ -132,7 +132,7 @@
           <p data-i18n="home.ctaCopy">Start with the generated TOML, keep the manager open for observability, and use the docs when you need to reason about tools, state, or privacy.</p>
           <div class="hero-actions">
             <a class="button primary" href="setup.html" data-i18n="home.secondaryCta">Setup guide</a>
-            <a class="button" href="https://github.com/TasteSteak/CodeSeeX/blob/main/docs/architecture.md" data-i18n="common.docs">Read docs</a>
+                <a class="button" href="https://github.com/TasteSteak/CodeSeeX/blob/main/docs/deepseek-official-responses-v0.7.0-design.md" data-i18n="common.docs">Read docs</a>
           </div>
         </section>
       </main>
@@ -162,12 +162,12 @@
           </div>
         </div>
         <div class="fine-print">
-          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.</span>
+          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, image-service, and search-provider terms.</span>
           <span> © <span data-current-year></span> TasteSteak and CodeSeeX contributors. AGPL-3.0-only.</span>
         </div>
       </footer>
     </div>
-    <script src="assets/i18n.js?v=0.6.0"></script>
-    <script src="assets/site.js?v=0.6.0"></script>
+    <script src="assets/i18n.js?v=0.7.0"></script>
+    <script src="assets/site.js?v=0.7.0"></script>
   </body>
 </html>

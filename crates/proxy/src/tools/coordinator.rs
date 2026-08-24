@@ -169,7 +169,13 @@ pub(crate) async fn complete_chat_with_tools(
         }
         let proxy_executed_calls = proxy_executed_calls_in_order(&tool_calls, &partition);
         if let Some(disabled) = proxy_executed_calls.iter().find(|call| {
-            !is_code_tool_executable(&call.name, context.enabled_tools, context.community_tools)
+            !is_code_tool_executable(
+                &call.name,
+                context.enabled_tools,
+                context.community_tools,
+                context.config.web_search_backend
+                    != codeseex_core::config::WebSearchBackend::Official,
+            )
         }) {
             return Err(ToolLoopError::new(
                 format!(

@@ -13,9 +13,10 @@ pub use catalog::{
     AppServerReasoningEffortOption,
 };
 pub use config::{
-    parse_network_proxy_mode, AppConfig, NetworkProxyMode, UpstreamConfig, UserBillingConfig,
-    UserCatalogConfig, UserConfig, UserModelConfig, UserNetworkConfig, UserProxyConfig,
-    UserToolsConfig, UserUiConfig, UserUpstreamConfig, UserVisionToolConfig,
-    UserWebSearchToolConfig,
+    parse_network_proxy_mode, AppConfig, NetworkProxyMode, UpstreamConfig, UpstreamTransport,
+    UserBillingConfig, UserCatalogConfig, UserConfig, UserModelConfig, UserNetworkConfig,
+    UserProxyConfig, UserToolsConfig, UserUiConfig, UserUpstreamConfig,
+    UserVisionGenerateToolConfig, UserVisionToolConfig, UserWebSearchToolConfig,
+    VisionAnalyzeBackend, VisionImageDetail, WebSearchBackend, IMAGE_CAPABILITY_SCHEMA_VERSION,
 };
 pub use models::{available_models, ModelInfo, TemperaturePreset, UpstreamModelOverride};

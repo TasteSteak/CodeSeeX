@@ -24,6 +24,7 @@ mod tests {
         UpstreamConfig {
             base_url: base_url.to_owned(),
             official_v1_compat: true,
+            transport: Default::default(),
             api_key: None,
             timeout_ms: 120_000,
         }

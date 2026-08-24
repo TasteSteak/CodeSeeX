@@ -56,6 +56,9 @@
   margin-left: 0;
 }
 .tool-card-body textarea.inline-control { min-height: 84px; resize: vertical; }
+.tool-card-body .tool-readonly-field { display: flex; align-items: center; min-height: 38px; color: var(--text-secondary); background: var(--hover-bg); cursor: default; overflow-wrap: anywhere; }
+.tool-card-body .setting-item[hidden],
+.tool-card-body .setting-divider[hidden] { display: none; }
 .tool-card-body .segmented-control { flex: 0 1 auto; max-width: 100%; min-width: 0; margin-left: auto; flex-wrap: wrap; }
 .tool-card-body .segmented-control label { min-width: 0; white-space: normal; line-height: 1.15; }
 

@@ -1,8 +1,9 @@
 use codeseex_core::models::{TemperaturePreset, UpstreamModelOverride};
 use codeseex_core::{
-    parse_network_proxy_mode, AppConfig, NetworkProxyMode, UserBillingConfig, UserConfig,
-    UserModelConfig, UserNetworkConfig, UserProxyConfig, UserToolsConfig, UserUiConfig,
-    UserUpstreamConfig, UserVisionToolConfig,
+    parse_network_proxy_mode, AppConfig, NetworkProxyMode, UpstreamTransport, UserBillingConfig,
+    UserConfig, UserModelConfig, UserNetworkConfig, UserProxyConfig, UserToolsConfig, UserUiConfig,
+    UserUpstreamConfig, UserVisionGenerateToolConfig, UserVisionToolConfig,
+    UserWebSearchToolConfig, WebSearchBackend,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -19,6 +20,7 @@ pub(crate) fn user_config_from_payload(
 
     if payload.get("DEEPSEEK_BASE_URL").is_some()
         || payload.get("DEEPSEEK_OFFICIAL_V1_COMPAT").is_some()
+        || payload.get("DEEPSEEK_TRANSPORT").is_some()
     {
         let upstream = config
             .upstream
@@ -28,6 +30,9 @@ pub(crate) fn user_config_from_payload(
         }
         if payload.get("DEEPSEEK_OFFICIAL_V1_COMPAT").is_some() {
             upstream.official_v1_compat = value_bool(payload, "DEEPSEEK_OFFICIAL_V1_COMPAT");
+        }
+        if payload.get("DEEPSEEK_TRANSPORT").is_some() {
+            upstream.transport = value_upstream_transport(payload, "DEEPSEEK_TRANSPORT");
         }
     }
 
@@ -87,6 +92,9 @@ pub(crate) fn user_config_from_payload(
         || payload.get("BILLING_PRO_CACHED_INPUT_CNY").is_some()
         || payload.get("BILLING_PRO_CACHE_MISS_INPUT_CNY").is_some()
         || payload.get("BILLING_PRO_OUTPUT_CNY").is_some()
+        || payload.get("BILLING_VISION_CACHED_INPUT_CNY").is_some()
+        || payload.get("BILLING_VISION_CACHE_MISS_INPUT_CNY").is_some()
+        || payload.get("BILLING_VISION_OUTPUT_CNY").is_some()
     {
         let billing = config
             .billing
@@ -114,6 +122,16 @@ pub(crate) fn user_config_from_payload(
         if payload.get("BILLING_PRO_OUTPUT_CNY").is_some() {
             billing.pro_output_cny = value_f64(payload, "BILLING_PRO_OUTPUT_CNY");
         }
+        if payload.get("BILLING_VISION_CACHED_INPUT_CNY").is_some() {
+            billing.vision_cached_input_cny = value_f64(payload, "BILLING_VISION_CACHED_INPUT_CNY");
+        }
+        if payload.get("BILLING_VISION_CACHE_MISS_INPUT_CNY").is_some() {
+            billing.vision_cache_miss_input_cny =
+                value_f64(payload, "BILLING_VISION_CACHE_MISS_INPUT_CNY");
+        }
+        if payload.get("BILLING_VISION_OUTPUT_CNY").is_some() {
+            billing.vision_output_cny = value_f64(payload, "BILLING_VISION_OUTPUT_CNY");
+        }
     }
 
     if payload.get("NETWORK_PROXY_MODE").is_some() || payload.get("WEB_SEARCH_PROXY_MODE").is_some()
@@ -126,6 +144,14 @@ pub(crate) fn user_config_from_payload(
         clear_legacy_web_search_proxy(&mut config);
     }
 
+    if payload.get("WEB_SEARCH_BACKEND").is_some() {
+        let tools = config.tools.get_or_insert_with(UserToolsConfig::default);
+        let web_search = tools
+            .web_search
+            .get_or_insert_with(UserWebSearchToolConfig::default);
+        web_search.backend = value_web_search_backend(payload, "WEB_SEARCH_BACKEND");
+    }
+
     let mut tool_config_keys = crate::tools::registry::builtin_tool_config_keys();
     tool_config_keys.extend(crate::community_tools::community_tool_config_keys(
         &app_config.data_dir,
@@ -135,6 +161,7 @@ pub(crate) fn user_config_from_payload(
         .any(|key| payload.get(key).is_some());
     if payload.get("ENABLED_TOOLS").is_some() || has_tool_settings {
         let tools = config.tools.get_or_insert_with(UserToolsConfig::default);
+        tools.capability_schema_version = Some(codeseex_core::IMAGE_CAPABILITY_SCHEMA_VERSION);
         if payload.get("ENABLED_TOOLS").is_some() {
             tools.enabled = value_string_list(payload, "ENABLED_TOOLS").map(configurable_tool_ids);
         }
@@ -168,6 +195,35 @@ pub(crate) fn tool_settings_from_user_config(config: &UserConfig) -> BTreeMap<St
     };
     let mut settings = tools.settings.clone().unwrap_or_default();
     if let Some(vision) = tools.vision_analyze.as_ref() {
+        let backend = vision
+            .backend
+            .map(|value| match value {
+                codeseex_core::VisionAnalyzeBackend::Deepseek => "deepseek",
+                codeseex_core::VisionAnalyzeBackend::External => "external",
+            })
+            .or_else(|| {
+                (vision.analyze_url.is_some() || vision.analyze_model.is_some())
+                    .then_some("external")
+            })
+            .or(Some("deepseek"));
+        insert_tool_setting(
+            &mut settings,
+            crate::tools::vision::ANALYZE_BACKEND_KEY,
+            backend,
+        );
+        let image_detail = vision
+            .image_detail
+            .map(|value| match value {
+                codeseex_core::VisionImageDetail::Auto => "auto",
+                codeseex_core::VisionImageDetail::Low => "low",
+                codeseex_core::VisionImageDetail::Original => "original",
+            })
+            .or(Some("auto"));
+        insert_tool_setting(
+            &mut settings,
+            crate::tools::vision::IMAGE_DETAIL_KEY,
+            image_detail,
+        );
         insert_tool_setting(
             &mut settings,
             crate::tools::vision::ANALYZE_URL_KEY,
@@ -190,7 +246,29 @@ pub(crate) fn tool_settings_from_user_config(config: &UserConfig) -> BTreeMap<St
         );
         insert_tool_setting(
             &mut settings,
+            crate::tools::vision::ANALYZE_API_KEY_KEY,
+            vision.analyze_api_key.as_deref(),
+        );
+        insert_tool_setting(
+            &mut settings,
             crate::tools::vision::API_KEY_KEY,
+            vision.api_key.as_deref(),
+        );
+    }
+    if let Some(vision) = tools.vision_generate.as_ref() {
+        insert_tool_setting(
+            &mut settings,
+            crate::tools::vision::GENERATE_URL_KEY,
+            vision.generate_url.as_deref(),
+        );
+        insert_tool_setting(
+            &mut settings,
+            crate::tools::vision::GENERATE_MODEL_KEY,
+            vision.generate_model.as_deref(),
+        );
+        insert_tool_setting(
+            &mut settings,
+            crate::tools::vision::GENERATE_API_KEY_KEY,
             vision.api_key.as_deref(),
         );
     }
@@ -229,6 +307,13 @@ fn cleanup_tool_settings(tools: &mut UserToolsConfig) {
     {
         tools.vision_analyze = None;
     }
+    if tools
+        .vision_generate
+        .as_ref()
+        .is_some_and(vision_generate_tool_config_is_empty)
+    {
+        tools.vision_generate = None;
+    }
 }
 
 fn is_vision_tool_config_key(key: &str) -> bool {
@@ -248,23 +333,59 @@ fn set_vision_tool_setting(tools: &mut UserToolsConfig, key: &str, value: Option
     let value = value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    let vision = tools
-        .vision_analyze
-        .get_or_insert_with(UserVisionToolConfig::default);
     match key {
+        crate::tools::vision::ANALYZE_BACKEND_KEY => {
+            let vision = tools
+                .vision_analyze
+                .get_or_insert_with(UserVisionToolConfig::default);
+            vision.backend = value.and_then(|value| match value.as_str() {
+                "external" | "custom" => Some(codeseex_core::VisionAnalyzeBackend::External),
+                "deepseek" => Some(codeseex_core::VisionAnalyzeBackend::Deepseek),
+                _ => None,
+            });
+        }
+        crate::tools::vision::IMAGE_DETAIL_KEY => {
+            let vision = tools
+                .vision_analyze
+                .get_or_insert_with(UserVisionToolConfig::default);
+            vision.image_detail = value.and_then(|value| match value.as_str() {
+                "auto" => Some(codeseex_core::VisionImageDetail::Auto),
+                "low" => Some(codeseex_core::VisionImageDetail::Low),
+                "original" => Some(codeseex_core::VisionImageDetail::Original),
+                _ => None,
+            });
+        }
         crate::tools::vision::ANALYZE_URL_KEY => {
-            vision.analyze_url = value;
+            tools
+                .vision_analyze
+                .get_or_insert_with(UserVisionToolConfig::default)
+                .analyze_url = value;
         }
         crate::tools::vision::ANALYZE_MODEL_KEY => {
-            vision.analyze_model = value;
+            tools
+                .vision_analyze
+                .get_or_insert_with(UserVisionToolConfig::default)
+                .analyze_model = value;
         }
         crate::tools::vision::GENERATE_URL_KEY => {
-            vision.generate_url = value;
+            tools
+                .vision_generate
+                .get_or_insert_with(UserVisionGenerateToolConfig::default)
+                .generate_url = value;
         }
         crate::tools::vision::GENERATE_MODEL_KEY => {
-            vision.generate_model = value;
+            tools
+                .vision_generate
+                .get_or_insert_with(UserVisionGenerateToolConfig::default)
+                .generate_model = value;
         }
         crate::tools::vision::API_KEY_KEY => {
+            let _ = value;
+        }
+        crate::tools::vision::ANALYZE_API_KEY_KEY => {
+            let _ = value;
+        }
+        crate::tools::vision::GENERATE_API_KEY_KEY => {
             let _ = value;
         }
         _ => {}
@@ -279,9 +400,18 @@ fn insert_tool_setting(settings: &mut BTreeMap<String, String>, key: &str, value
 }
 
 fn vision_tool_config_is_empty(config: &UserVisionToolConfig) -> bool {
-    option_string_is_empty(config.analyze_url.as_deref())
+    config.backend.is_none()
+        && config.image_detail.is_none()
+        && option_string_is_empty(config.analyze_url.as_deref())
         && option_string_is_empty(config.analyze_model.as_deref())
         && option_string_is_empty(config.generate_url.as_deref())
+        && option_string_is_empty(config.generate_model.as_deref())
+        && option_string_is_empty(config.api_key.as_deref())
+        && option_string_is_empty(config.analyze_api_key.as_deref())
+}
+
+fn vision_generate_tool_config_is_empty(config: &UserVisionGenerateToolConfig) -> bool {
+    option_string_is_empty(config.generate_url.as_deref())
         && option_string_is_empty(config.generate_model.as_deref())
         && option_string_is_empty(config.api_key.as_deref())
 }
@@ -313,7 +443,7 @@ fn configurable_tool_ids(ids: Vec<String>) -> Vec<String> {
                     | "image_generate"
                     | "create_image"
             ) {
-                "vision_analyze".to_owned()
+                "image_gen".to_owned()
             } else {
                 id
             }
@@ -447,6 +577,38 @@ pub(crate) fn temperature_to_ui(value: TemperaturePreset) -> &'static str {
     }
 }
 
+pub(crate) fn upstream_transport_to_ui(value: UpstreamTransport) -> &'static str {
+    match value {
+        UpstreamTransport::Auto => "auto",
+        UpstreamTransport::NativeResponses => "native_responses",
+        UpstreamTransport::ChatCompat => "chat_compat",
+    }
+}
+
+pub(crate) fn web_search_backend_to_ui(value: WebSearchBackend) -> &'static str {
+    match value {
+        WebSearchBackend::Local => "local",
+        WebSearchBackend::Official => "official",
+    }
+}
+
+fn value_upstream_transport(payload: &Value, key: &str) -> Option<UpstreamTransport> {
+    match value_string(payload, key)?.to_ascii_lowercase().as_str() {
+        "auto" => Some(UpstreamTransport::Auto),
+        "native" | "native_responses" | "responses" => Some(UpstreamTransport::NativeResponses),
+        "chat" | "chat_compat" | "compat" => Some(UpstreamTransport::ChatCompat),
+        _ => None,
+    }
+}
+
+fn value_web_search_backend(payload: &Value, key: &str) -> Option<WebSearchBackend> {
+    match value_string(payload, key)?.to_ascii_lowercase().as_str() {
+        "local" | "codeseex" => Some(WebSearchBackend::Local),
+        "official" | "deepseek" => Some(WebSearchBackend::Official),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,7 +645,9 @@ mod tests {
     fn payload_persists_vision_tool_settings() {
         let config = user_config_from_payload(
             &json!({
-                "ENABLED_TOOLS": ["vision_analyze"],
+                "ENABLED_TOOLS": ["vision_analyze", "image_gen"],
+                "VISION_ANALYZE_BACKEND": "external",
+                "VISION_IMAGE_DETAIL": "low",
                 "VISION_ANALYZE_URL": "https://vision.example.com/v1",
                 "VISION_ANALYZE_MODEL": "vision-model",
                 "VISION_GENERATE_URL": "https://vision.example.com/v1/images/generations",
@@ -495,8 +659,12 @@ mod tests {
         );
         let tools = config.tools.expect("tools config");
         assert_eq!(
+            tools.capability_schema_version,
+            Some(codeseex_core::IMAGE_CAPABILITY_SCHEMA_VERSION)
+        );
+        assert_eq!(
             tools.enabled.as_deref(),
-            Some(&["vision_analyze".to_owned()][..])
+            Some(&["image_gen".to_owned(), "vision_analyze".to_owned()][..])
         );
         assert!(tools.settings.is_none());
         let vision = tools.vision_analyze.expect("vision config");
@@ -506,11 +674,22 @@ mod tests {
         );
         assert_eq!(vision.analyze_model.as_deref(), Some("vision-model"));
         assert_eq!(
-            vision.generate_url.as_deref(),
+            vision.backend,
+            Some(codeseex_core::VisionAnalyzeBackend::External)
+        );
+        assert_eq!(
+            vision.image_detail,
+            Some(codeseex_core::VisionImageDetail::Low)
+        );
+        assert!(vision.api_key.is_none());
+        assert!(vision.analyze_api_key.is_none());
+        let generation = tools.vision_generate.expect("generation config");
+        assert_eq!(
+            generation.generate_url.as_deref(),
             Some("https://vision.example.com/v1/images/generations")
         );
-        assert_eq!(vision.generate_model.as_deref(), Some("image-model"));
-        assert!(vision.api_key.is_none());
+        assert_eq!(generation.generate_model.as_deref(), Some("image-model"));
+        assert!(generation.api_key.is_none());
     }
 
     #[test]
@@ -546,6 +725,7 @@ mod tests {
                 tools: Some(UserToolsConfig {
                     web_search: Some(codeseex_core::UserWebSearchToolConfig {
                         proxy: Some(NetworkProxyMode::System),
+                        backend: None,
                     }),
                     ..Default::default()
                 }),
@@ -600,6 +780,39 @@ mod tests {
     }
 
     #[test]
+    fn payload_persists_transport_and_explicit_web_search_backend_independently() {
+        let config = user_config_from_payload(
+            &json!({
+                "DEEPSEEK_TRANSPORT": "native_responses",
+                "WEB_SEARCH_BACKEND": "official",
+                "NETWORK_PROXY_MODE": "none"
+            }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+
+        assert_eq!(
+            config
+                .upstream
+                .as_ref()
+                .and_then(|upstream| upstream.transport),
+            Some(UpstreamTransport::NativeResponses)
+        );
+        assert_eq!(
+            config
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.web_search.as_ref())
+                .and_then(|web_search| web_search.backend),
+            Some(WebSearchBackend::Official)
+        );
+        assert_eq!(
+            config.network.as_ref().and_then(|network| network.proxy),
+            Some(NetworkProxyMode::None)
+        );
+    }
+
+    #[test]
     fn payload_accepts_legacy_web_search_proxy_key_as_network_proxy() {
         let config = user_config_from_payload(
             &json!({ "WEB_SEARCH_PROXY_MODE": "none" }),
@@ -614,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_canonicalizes_vision_generate_to_vision_module() {
+    fn payload_canonicalizes_vision_generate_to_image_generation() {
         let config = user_config_from_payload(
             &json!({ "ENABLED_TOOLS": ["vision_generate", "image_gen"] }),
             UserConfig::default(),
@@ -623,7 +836,7 @@ mod tests {
         let tools = config.tools.expect("tools config");
         assert_eq!(
             tools.enabled.as_deref(),
-            Some(&["vision_analyze".to_owned()][..])
+            Some(&["image_gen".to_owned()][..])
         );
     }
 }

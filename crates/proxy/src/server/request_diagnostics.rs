@@ -20,15 +20,19 @@ pub(super) fn tool_exposure_diagnostic(
     bridge_decision: &CodexToolSearchBridgeDecision,
     codeseex_enabled_tools: &[String],
     codeseex_base_tools_injected: bool,
+    local_web_search_injected: bool,
     service_kind: CodexServiceRequestKind,
 ) -> Value {
     let upstream_names = upstream_tool_names(upstream_tools);
     let configurable_tools_disabled_by_config =
         codeseex_base_tools_injected && codeseex_enabled_tools.is_empty();
     let expected_codeseex_tools = if codeseex_base_tools_injected {
-        upstream_tool_names(&crate::tools::upstream_tool_definitions(
-            codeseex_enabled_tools,
-        ))
+        upstream_tool_names(
+            &crate::tools::upstream_tool_definitions_with_local_web_search(
+                codeseex_enabled_tools,
+                local_web_search_injected,
+            ),
+        )
     } else {
         Vec::new()
     };
@@ -48,6 +52,8 @@ pub(super) fn tool_exposure_diagnostic(
         "codeseex_enabled_tools": limited_tool_names(codeseex_enabled_tools.to_vec()),
         "codeseex_expected_upstream_tools": limited_tool_names(expected_codeseex_tools),
         "codeseex_base_tools_injected": codeseex_base_tools_injected,
+        "local_web_search_injected": local_web_search_injected,
+        "local_web_search_unavailable": codeseex_base_tools_injected && !local_web_search_injected,
         "configurable_tools_disabled_by_config": configurable_tools_disabled_by_config,
         "missing_expected_codeseex_tools": limited_tool_names(missing_expected_codeseex_tools),
         "warning": enabled_codeseex_tools_missing

@@ -9,6 +9,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+pub const IMAGE_CAPABILITY_SCHEMA_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub data_dir: PathBuf,
@@ -18,15 +20,34 @@ pub struct AppConfig {
     pub model_override: UpstreamModelOverride,
     pub temperature: TemperaturePreset,
     pub network_proxy: NetworkProxyMode,
+    pub web_search_backend: WebSearchBackend,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     pub base_url: String,
     pub official_v1_compat: bool,
+    pub transport: UpstreamTransport,
     // Process environment fallback only. Manager/user TOML is not credential storage.
     pub api_key: Option<String>,
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamTransport {
+    #[default]
+    Auto,
+    NativeResponses,
+    ChatCompat,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchBackend {
+    #[default]
+    Local,
+    Official,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -51,6 +72,7 @@ pub struct UserProxyConfig {
 pub struct UserUpstreamConfig {
     pub base_url: Option<String>,
     pub official_v1_compat: Option<bool>,
+    pub transport: Option<UpstreamTransport>,
     // Kept to deserialize legacy TOML, but ignored when applying user config.
     pub api_key: Option<String>,
     pub timeout_ms: Option<u64>,
@@ -94,28 +116,60 @@ pub struct UserBillingConfig {
     pub pro_cached_input_cny: Option<f64>,
     pub pro_cache_miss_input_cny: Option<f64>,
     pub pro_output_cny: Option<f64>,
+    pub vision_cached_input_cny: Option<f64>,
+    pub vision_cache_miss_input_cny: Option<f64>,
+    pub vision_output_cny: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserToolsConfig {
+    pub capability_schema_version: Option<u8>,
     pub enabled: Option<Vec<String>>,
     pub web_search: Option<UserWebSearchToolConfig>,
     pub vision_analyze: Option<UserVisionToolConfig>,
+    pub vision_generate: Option<UserVisionGenerateToolConfig>,
     pub settings: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserWebSearchToolConfig {
     pub proxy: Option<NetworkProxyMode>,
+    pub backend: Option<WebSearchBackend>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserVisionToolConfig {
+    pub backend: Option<VisionAnalyzeBackend>,
+    pub image_detail: Option<VisionImageDetail>,
     pub analyze_url: Option<String>,
     pub analyze_model: Option<String>,
+    // Legacy fields are retained for TOML migration only.
     pub generate_url: Option<String>,
     pub generate_model: Option<String>,
     pub api_key: Option<String>,
+    pub analyze_api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserVisionGenerateToolConfig {
+    pub generate_url: Option<String>,
+    pub generate_model: Option<String>,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionAnalyzeBackend {
+    Deepseek,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionImageDetail {
+    Auto,
+    Low,
+    Original,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +192,7 @@ impl Default for AppConfig {
             model_override: env_model_override("UPSTREAM_MODEL_OVERRIDE"),
             temperature: env_temperature("DEEPSEEK_TEMPERATURE_PRESET"),
             network_proxy: env_network_proxy(),
+            web_search_backend: env_web_search_backend(),
         }
     }
 }
@@ -149,6 +204,7 @@ impl Default for UpstreamConfig {
         Self {
             base_url: normalize_base_url(&raw_base),
             official_v1_compat: env_bool("DEEPSEEK_OFFICIAL_V1_COMPAT", true),
+            transport: env_upstream_transport(),
             api_key: env::var("DEEPSEEK_API_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -221,6 +277,11 @@ impl AppConfig {
                     self.upstream.official_v1_compat = official_v1_compat;
                 }
             }
+            if env::var("DEEPSEEK_TRANSPORT").is_err() {
+                if let Some(transport) = upstream.transport {
+                    self.upstream.transport = transport;
+                }
+            }
             if env::var("UPSTREAM_REQUEST_TIMEOUT_MS").is_err() {
                 if let Some(timeout_ms) = upstream.timeout_ms {
                     self.upstream.timeout_ms = timeout_ms;
@@ -255,6 +316,16 @@ impl AppConfig {
         if env::var("NETWORK_PROXY_MODE").is_err() && env::var("WEB_SEARCH_PROXY_MODE").is_err() {
             if let Some(proxy) = user_network_proxy {
                 self.network_proxy = proxy;
+            }
+        }
+        if env::var("WEB_SEARCH_BACKEND").is_err() {
+            if let Some(backend) = user_config
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.web_search.as_ref())
+                .and_then(|web_search| web_search.backend)
+            {
+                self.web_search_backend = backend;
             }
         }
     }
@@ -402,6 +473,37 @@ fn env_network_proxy() -> NetworkProxyMode {
         .unwrap_or(NetworkProxyMode::System)
 }
 
+fn env_upstream_transport() -> UpstreamTransport {
+    env::var("DEEPSEEK_TRANSPORT")
+        .ok()
+        .and_then(|value| parse_upstream_transport(&value))
+        .unwrap_or_default()
+}
+
+pub fn parse_upstream_transport(value: &str) -> Option<UpstreamTransport> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => Some(UpstreamTransport::Auto),
+        "native" | "native_responses" | "responses" => Some(UpstreamTransport::NativeResponses),
+        "chat" | "chat_compat" | "compat" => Some(UpstreamTransport::ChatCompat),
+        _ => None,
+    }
+}
+
+fn env_web_search_backend() -> WebSearchBackend {
+    env::var("WEB_SEARCH_BACKEND")
+        .ok()
+        .and_then(|value| parse_web_search_backend(&value))
+        .unwrap_or_default()
+}
+
+pub fn parse_web_search_backend(value: &str) -> Option<WebSearchBackend> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "local" | "codeseex" => Some(WebSearchBackend::Local),
+        "official" | "deepseek" => Some(WebSearchBackend::Official),
+        _ => None,
+    }
+}
+
 pub fn parse_network_proxy_mode(value: &str) -> Option<NetworkProxyMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "none" | "no_proxy" | "direct" => Some(NetworkProxyMode::None),
@@ -476,6 +578,7 @@ mod tests {
             tools: Some(UserToolsConfig {
                 web_search: Some(UserWebSearchToolConfig {
                     proxy: Some(NetworkProxyMode::System),
+                    backend: None,
                 }),
                 ..Default::default()
             }),
@@ -495,6 +598,7 @@ mod tests {
             tools: Some(UserToolsConfig {
                 web_search: Some(UserWebSearchToolConfig {
                     proxy: Some(NetworkProxyMode::None),
+                    backend: None,
                 }),
                 ..Default::default()
             }),
@@ -502,5 +606,50 @@ mod tests {
         });
 
         assert_eq!(config.network_proxy, NetworkProxyMode::None);
+    }
+
+    #[test]
+    fn web_search_backend_is_local_by_default_and_official_is_explicit() {
+        assert_eq!(WebSearchBackend::default(), WebSearchBackend::Local);
+        assert_eq!(
+            parse_web_search_backend("local"),
+            Some(WebSearchBackend::Local)
+        );
+        assert_eq!(
+            parse_web_search_backend("codeseex"),
+            Some(WebSearchBackend::Local)
+        );
+        assert_eq!(
+            parse_web_search_backend("official"),
+            Some(WebSearchBackend::Official)
+        );
+        assert_eq!(
+            parse_web_search_backend("deepseek"),
+            Some(WebSearchBackend::Official)
+        );
+        assert_eq!(parse_web_search_backend("unknown"), None);
+    }
+
+    #[test]
+    fn legacy_user_config_without_transport_keeps_auto_default() {
+        let mut config = AppConfig {
+            upstream: UpstreamConfig {
+                transport: UpstreamTransport::Auto,
+                ..UpstreamConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        config.apply_user_config(UserConfig {
+            upstream: Some(UserUpstreamConfig {
+                base_url: Some("https://api.deepseek.com".to_owned()),
+                official_v1_compat: Some(true),
+                transport: None,
+                api_key: None,
+                timeout_ms: None,
+            }),
+            ..UserConfig::default()
+        });
+
+        assert_eq!(config.upstream.transport, UpstreamTransport::Auto);
     }
 }

@@ -29,6 +29,25 @@ pub fn chat_completions_url(base_url: &str, official_v1_compat: bool) -> String 
     format!("{}/chat/completions", normalized.trim_end_matches('/'))
 }
 
+pub fn responses_url(base_url: &str) -> Result<String, url::ParseError> {
+    let normalized = normalize_base_url(base_url);
+    let mut url = Url::parse(&normalized)?;
+    if is_official_deepseek_url(&url) {
+        url.set_path("/responses");
+    } else {
+        let path = url.path().trim_end_matches('/');
+        let responses_path = if path.is_empty() || path == "/" {
+            "/responses".to_owned()
+        } else {
+            format!("{path}/responses")
+        };
+        url.set_path(&responses_path);
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
 pub fn balance_url(base_url: &str) -> Result<String, url::ParseError> {
     let normalized = normalize_base_url(base_url);
     let mut url = Url::parse(&normalized)?;
@@ -53,6 +72,11 @@ pub fn is_official_deepseek_url(url: &Url) -> bool {
             .host_str()
             .map(|v| v.eq_ignore_ascii_case("api.deepseek.com"))
             != Some(true)
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
     {
         return false;
     }
@@ -106,5 +130,37 @@ mod tests {
             balance_url("http://127.0.0.1:9000/openai/v1").unwrap(),
             "http://127.0.0.1:9000/openai/user/balance"
         );
+    }
+
+    #[test]
+    fn official_responses_url_uses_root_responses_path() {
+        assert_eq!(
+            responses_url("https://api.deepseek.com/v1/").unwrap(),
+            "https://api.deepseek.com/responses"
+        );
+    }
+
+    #[test]
+    fn custom_responses_url_preserves_custom_prefix() {
+        assert_eq!(
+            responses_url("http://127.0.0.1:9000/openai/v1").unwrap(),
+            "http://127.0.0.1:9000/openai/v1/responses"
+        );
+    }
+
+    #[test]
+    fn only_the_canonical_https_deepseek_endpoint_is_treated_as_official() {
+        assert!(is_official_deepseek_url(
+            &Url::parse("https://api.deepseek.com:443/v1").unwrap()
+        ));
+        assert!(!is_official_deepseek_url(
+            &Url::parse("https://api.deepseek.com:8443/v1").unwrap()
+        ));
+        assert!(!is_official_deepseek_url(
+            &Url::parse("https://api.deepseek.com/v1?via=proxy").unwrap()
+        ));
+        assert!(!is_official_deepseek_url(
+            &Url::parse("https://user@api.deepseek.com/v1").unwrap()
+        ));
     }
 }

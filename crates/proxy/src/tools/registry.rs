@@ -7,6 +7,7 @@ pub(crate) fn tool_registry(
     enabled_tools: &[String],
     settings: &BTreeMap<String, String>,
 ) -> Value {
+    let selected = enabled_tools;
     let mut tools = match json!([
         {
             "id": "apply_patch",
@@ -97,16 +98,30 @@ pub(crate) fn tool_registry(
         },
         {
             "id": "vision_analyze",
-            "name": "Vision",
-            "nameKey": "toolVisionName",
-            "description": "Analyze images and generate images with configured OpenAI-compatible endpoints. Use /responses by default.",
-            "descriptionKey": "toolVisionDescription",
+            "name": "Image understanding",
+            "nameKey": "toolVisionAnalyzeName",
+            "description": "Inspect images with DeepSeek Vision or a custom image understanding endpoint.",
+            "descriptionKey": "toolVisionAnalyzeDescription",
             "source": "builtin",
             "system": false,
             "configurable": true,
-            "enabled": builtin_tool_enabled(enabled_tools, "vision_analyze"),
+            "enabled": selected.iter().any(|id| canonical_builtin_tool_id(id) == "vision_analyze"),
             "iconPath": "/assets/icons/vision.svg",
-            "config": crate::tools::vision::registry_config_fields(settings),
+            "config": crate::tools::vision::analyze_registry_config_fields(config, settings),
+            "labels": [{ "id": "built_in", "labelKey": "toolLabelBuiltIn", "label": "Built-in" }]
+        },
+        {
+            "id": "image_gen",
+            "name": "Image generation",
+            "nameKey": "toolVisionGenerateName",
+            "description": "Generate images through a separately configured image generation endpoint.",
+            "descriptionKey": "toolVisionGenerateDescription",
+            "source": "builtin",
+            "system": false,
+            "configurable": true,
+            "enabled": selected.iter().any(|id| canonical_builtin_tool_id(id) == "image_gen"),
+            "iconPath": "/assets/icons/vision.svg",
+            "config": crate::tools::vision::generate_registry_config_fields(settings),
             "labels": [{ "id": "built_in", "labelKey": "toolLabelBuiltIn", "label": "Built-in" }]
         }
     ]) {
@@ -121,11 +136,20 @@ pub(crate) fn tool_registry(
     Value::Array(tools)
 }
 
+pub(crate) fn selected_tool_ids(config: &AppConfig) -> Vec<String> {
+    let user_config = UserConfig::read_from(&config.config_path()).ok();
+    let explicit = user_config
+        .as_ref()
+        .and_then(|user_config| user_config.tools.as_ref())
+        .and_then(|tools| tools.enabled.clone());
+    let enabled = explicit
+        .clone()
+        .unwrap_or_else(crate::tools::default_enabled_tool_ids);
+    enabled
+}
+
 pub(crate) fn enabled_tool_ids(config: &AppConfig) -> Vec<String> {
-    UserConfig::read_from(&config.config_path())
-        .ok()
-        .and_then(|user_config| user_config.tools.and_then(|tools| tools.enabled))
-        .unwrap_or_else(crate::tools::default_enabled_tool_ids)
+    selected_tool_ids(config)
 }
 
 pub(crate) fn tool_settings(config: &AppConfig) -> BTreeMap<String, String> {
@@ -133,8 +157,17 @@ pub(crate) fn tool_settings(config: &AppConfig) -> BTreeMap<String, String> {
         .ok()
         .map(|user_config| crate::config_payload::tool_settings_from_user_config(&user_config))
         .unwrap_or_default();
-    if let Some(api_key) = crate::secrets::vision_api_key(config) {
-        settings.insert(crate::tools::vision::API_KEY_KEY.to_owned(), api_key);
+    if let Some(api_key) = crate::secrets::vision_analyze_api_key(config) {
+        settings.insert(
+            crate::tools::vision::ANALYZE_API_KEY_KEY.to_owned(),
+            api_key,
+        );
+    }
+    if let Some(api_key) = crate::secrets::vision_generate_api_key(config) {
+        settings.insert(
+            crate::tools::vision::GENERATE_API_KEY_KEY.to_owned(),
+            api_key,
+        );
     }
     settings
 }
@@ -196,8 +229,8 @@ fn builtin_tool_enabled(enabled_tools: &[String], id: &str) -> bool {
 
 fn canonical_builtin_tool_id(id: &str) -> &str {
     match id {
-        "vision_generate" | "image_gen" | "imagegen" | "image_generation" | "generate_image"
-        | "image_generate" | "create_image" => "vision_analyze",
+        "vision_generate" | "imagegen" | "image_generation" | "generate_image"
+        | "image_generate" | "create_image" => "image_gen",
         _ => id,
     }
 }
@@ -250,6 +283,7 @@ mod tests {
     fn vision_registry_exposes_config_fields_and_i18n_keys() {
         let config = AppConfig::default();
         let mut settings = BTreeMap::new();
+        settings.insert("VISION_ANALYZE_BACKEND".to_owned(), "external".to_owned());
         settings.insert(
             "VISION_ANALYZE_URL".to_owned(),
             "https://vision.example.com/v1".to_owned(),
@@ -260,8 +294,19 @@ mod tests {
             "https://vision.example.com/v1/images/generations".to_owned(),
         );
         settings.insert("VISION_GENERATE_MODEL".to_owned(), "image-model".to_owned());
-        settings.insert("VISION_API_KEY".to_owned(), "secret-key".to_owned());
-        let tools = tool_registry(&config, &["vision_analyze".to_owned()], &settings);
+        settings.insert(
+            "VISION_ANALYZE_API_KEY".to_owned(),
+            "analyze-key".to_owned(),
+        );
+        settings.insert(
+            "VISION_GENERATE_API_KEY".to_owned(),
+            "generate-key".to_owned(),
+        );
+        let tools = tool_registry(
+            &config,
+            &["vision_analyze".to_owned(), "image_gen".to_owned()],
+            &settings,
+        );
         let vision = tools
             .as_array()
             .expect("tools array")
@@ -271,44 +316,78 @@ mod tests {
 
         assert_eq!(
             vision.get("nameKey").and_then(Value::as_str),
-            Some("toolVisionName")
+            Some("toolVisionAnalyzeName")
         );
         assert_eq!(
             vision.get("descriptionKey").and_then(Value::as_str),
-            Some("toolVisionDescription")
+            Some("toolVisionAnalyzeDescription")
         );
         assert_eq!(vision.get("enabled").and_then(Value::as_bool), Some(true));
         assert_eq!(
             vision.pointer("/config/0/key").and_then(Value::as_str),
-            Some("VISION_ANALYZE_URL")
+            Some("VISION_ANALYZE_BACKEND")
         );
         assert_eq!(
             vision.pointer("/config/0/value").and_then(Value::as_str),
-            Some("https://vision.example.com/v1")
+            Some("external")
         );
         assert_eq!(
-            vision.pointer("/config/0/width").and_then(Value::as_str),
-            Some("wide")
+            vision.pointer("/config/5/key").and_then(Value::as_str),
+            Some("VISION_ANALYZE_URL")
         );
         assert_eq!(
-            vision.pointer("/config/1/width").and_then(Value::as_str),
-            Some("compact")
+            vision.pointer("/config/6/key").and_then(Value::as_str),
+            Some("VISION_ANALYZE_MODEL")
         );
         assert_eq!(
-            vision.pointer("/config/2/key").and_then(Value::as_str),
+            vision.pointer("/config/7/type").and_then(Value::as_str),
+            Some("password")
+        );
+        let generation = tools
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool.get("id").and_then(Value::as_str) == Some("image_gen"))
+            .expect("image generation tool");
+        assert_eq!(
+            generation.get("nameKey").and_then(Value::as_str),
+            Some("toolVisionGenerateName")
+        );
+        assert_eq!(
+            generation.pointer("/config/0/key").and_then(Value::as_str),
             Some("VISION_GENERATE_URL")
         );
         assert_eq!(
-            vision.pointer("/config/3/key").and_then(Value::as_str),
-            Some("VISION_GENERATE_MODEL")
+            generation.pointer("/config/2/key").and_then(Value::as_str),
+            Some("VISION_GENERATE_API_KEY")
         );
-        assert_eq!(
-            vision.pointer("/config/4/type").and_then(Value::as_str),
-            Some("password")
-        );
-        assert_eq!(
-            vision.pointer("/config/4/width").and_then(Value::as_str),
-            Some("wide")
-        );
+    }
+
+    #[test]
+    fn legacy_generation_fields_do_not_implicitly_enable_image_generation() {
+        let config = AppConfig {
+            data_dir: std::env::temp_dir().join(format!(
+                "codeseex-vision-registry-{}",
+                uuid::Uuid::new_v4().simple()
+            )),
+            ..Default::default()
+        };
+        UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                enabled: Some(vec!["vision_analyze".to_owned()]),
+                vision_analyze: Some(codeseex_core::UserVisionToolConfig {
+                    generate_url: Some("https://example.com/v1/images/generations".to_owned()),
+                    generate_model: Some("image-model".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .write_atomic(&config.config_path())
+        .expect("write legacy vision config");
+        let selected = selected_tool_ids(&config);
+        assert_eq!(selected, vec!["vision_analyze"]);
+        let _ = std::fs::remove_dir_all(config.data_dir);
     }
 }

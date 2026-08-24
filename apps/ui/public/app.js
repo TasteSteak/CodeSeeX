@@ -32,6 +32,7 @@ const DEFAULT_TEMPERATURE_PRESET = "default";
 const DEFAULT_BILLING_RATES_CNY = Object.freeze({
   flash: Object.freeze({ cached: 0.02, cacheMiss: 1, output: 2 }),
   pro: Object.freeze({ cached: 0.025, cacheMiss: 3, output: 6 }),
+  vision: Object.freeze({ cached: 0.05, cacheMiss: 1.5, output: 4.5 }),
 });
 const BILLING_PEAK_MULTIPLIER = 2;
 const RESTART_REQUIRED_KEYS = new Set([
@@ -64,6 +65,9 @@ const els = {
   billingProCachedInput: byId("BILLING_PRO_CACHED_INPUT_CNY"),
   billingProCacheMissInput: byId("BILLING_PRO_CACHE_MISS_INPUT_CNY"),
   billingProOutput: byId("BILLING_PRO_OUTPUT_CNY"),
+  billingVisionCachedInput: byId("BILLING_VISION_CACHED_INPUT_CNY"),
+  billingVisionCacheMissInput: byId("BILLING_VISION_CACHE_MISS_INPUT_CNY"),
+  billingVisionOutput: byId("BILLING_VISION_OUTPUT_CNY"),
   completedTurns: byId("completedTurns"),
   autoStart: byId("AUTO_START"),
   catalogNotice: byId("catalogNotice"),
@@ -394,6 +398,8 @@ function bind() {
   onRadioChange("UPSTREAM_MODEL_OVERRIDE", handleConfigInput);
   onRadioChange("DEEPSEEK_TEMPERATURE_PRESET", handleConfigInput);
   onRadioChange("DEEPSEEK_THINKING", handleConfigInput);
+  onRadioChange("DEEPSEEK_TRANSPORT", handleConfigInput);
+  onRadioChange("WEB_SEARCH_BACKEND", handleConfigInput);
   onRadioChange("NETWORK_PROXY_MODE", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
@@ -1359,6 +1365,8 @@ function renderConfig(config) {
   setRadioValue("DEEPSEEK_THINKING", config.DEEPSEEK_THINKING || "auto");
   setRadioValue("UPSTREAM_MODEL_OVERRIDE", normalizeUpstreamModelOverride(config.UPSTREAM_MODEL_OVERRIDE));
   setRadioValue("DEEPSEEK_TEMPERATURE_PRESET", normalizeTemperaturePreset(config.DEEPSEEK_TEMPERATURE_PRESET));
+  setRadioValue("DEEPSEEK_TRANSPORT", normalizeUpstreamTransport(config.DEEPSEEK_TRANSPORT));
+  setRadioValue("WEB_SEARCH_BACKEND", normalizeWebSearchBackend(config.WEB_SEARCH_BACKEND));
   setRadioValue("NETWORK_PROXY_MODE", normalizeNetworkProxyMode(config.NETWORK_PROXY_MODE || config.WEB_SEARCH_PROXY_MODE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
@@ -2217,6 +2225,8 @@ function renderTools(tools, config) {
       defaultValue: field.defaultValue,
       configured: Boolean(field.configured),
       width: field.width,
+      valueKey: field.valueKey,
+      visibleWhen: field.visibleWhen,
       options: (field.options || []).map((option) => option.value),
     })),
   })));
@@ -2226,6 +2236,7 @@ function renderTools(tools, config) {
     currentToolsSignature = signature;
     els.toolConfigList.replaceChildren(...nextTools.map(renderToolCard));
     rebuildToolConfigControlCache();
+    applyToolFieldVisibility();
   } else if (toolConfigControlCache.size === 0) {
     rebuildToolConfigControlCache();
   }
@@ -2282,7 +2293,11 @@ function renderToolCard(tool) {
   const fields = Array.isArray(tool.config) ? tool.config : [];
   if (fields.length > 0) {
     fields.forEach((field, index) => {
-      if (index > 0) body.appendChild(settingDivider());
+      if (index > 0) {
+        const divider = settingDivider();
+        divider.dataset.toolFieldDivider = "true";
+        body.appendChild(divider);
+      }
       body.appendChild(renderToolField(field));
     });
   }
@@ -2336,6 +2351,10 @@ function renderToolLabel(label) {
 function renderToolField(field) {
   const item = document.createElement("div");
   item.className = "setting-item";
+  if (field && field.visibleWhen && field.visibleWhen.key) {
+    item.dataset.visibleWhenKey = String(field.visibleWhen.key);
+    item.dataset.visibleWhenValue = String(field.visibleWhen.value || "");
+  }
 
   const labelWrap = document.createElement("span");
   const label = document.createElement("span");
@@ -2352,6 +2371,8 @@ function renderToolField(field) {
 
   if (field.type === "segmented") {
     item.appendChild(renderSegmentedField(field));
+  } else if (field.type === "readonly") {
+    item.appendChild(renderReadonlyField(field));
   } else if (field.type === "select") {
     item.appendChild(renderSelectField(field));
   } else if (field.type === "boolean") {
@@ -2449,6 +2470,13 @@ function renderTextAreaField(field) {
   return textarea;
 }
 
+function renderReadonlyField(field) {
+  const output = document.createElement("output");
+  output.className = `inline-control tool-readonly-field ${toolFieldWidthClass(field)}`.trim();
+  output.textContent = translateToolText(field.valueKey, field.value || field.defaultValue || "-");
+  return output;
+}
+
 function renderPasswordField(field) {
   const wrap = document.createElement("div");
   wrap.className = `tool-secret-field ${toolFieldWidthClass(field)}`.trim();
@@ -2537,6 +2565,7 @@ function applyToolConfigValues(config) {
     if (input) input.checked = enabledTools.includes(id);
   }
   for (const field of toolConfigFields()) {
+    if (field.type === "readonly") continue;
     const value = values[field.key] !== undefined ? String(values[field.key]) : String(field.defaultValue || "");
     if (field.type === "segmented") setToolRadioValue(field.key, value);
     else if (field.type === "boolean") {
@@ -2550,6 +2579,35 @@ function applyToolConfigValues(config) {
     const clearInput = toolFieldInput(field.key + "_CLEAR");
     if (clearInput) clearInput.checked = false;
   }
+  applyToolFieldVisibility();
+}
+
+function applyToolFieldVisibility() {
+  if (!els.toolConfigList) return;
+  els.toolConfigList.querySelectorAll(".tool-card-body").forEach((body) => {
+    const rows = Array.from(body.querySelectorAll(":scope > .setting-item"));
+    for (const row of rows) {
+      const key = row.dataset.visibleWhenKey;
+      if (!key) {
+        row.hidden = false;
+        continue;
+      }
+      const expected = row.dataset.visibleWhenValue || "";
+      const actual = getToolRadioValue(key) || String(toolFieldInput(key) && toolFieldInput(key).value || "");
+      row.hidden = actual !== expected;
+    }
+    let hasVisibleRow = false;
+    for (const child of Array.from(body.children)) {
+      if (child.matches(".setting-item")) {
+        if (!child.hidden) hasVisibleRow = true;
+        continue;
+      }
+      if (!child.matches("[data-tool-field-divider]")) continue;
+      let next = child.nextElementSibling;
+      while (next && !next.matches(".setting-item")) next = next.nextElementSibling;
+      child.hidden = !hasVisibleRow || !next || next.hidden;
+    }
+  });
 }
 
 function collectToolConfigPayload() {
@@ -2565,6 +2623,7 @@ function collectToolConfigPayload() {
   payload[ENABLED_TOOLS_KEY] = stringifyEnabledTools(enabledTools);
   for (const field of toolConfigFields()) {
     if (!field.key) continue;
+    if (field.type === "readonly") continue;
     if (field.type === "segmented") payload[field.key] = getToolRadioValue(field.key) || field.defaultValue || "";
     else if (field.type === "boolean") {
       const input = toolFieldInput(field.key);
@@ -3189,7 +3248,7 @@ function usageStageClass(segment) {
   if (!segment) return "";
   if (segment.status === "failed" || segment.kind === "failed_reply") return "failed";
   if (segment.status === "running" || segment.kind === "in_progress_reply" || segment.kind === "tool_call") return "running";
-  if (segment.kind === "tool_result") return "tool";
+  if (segment.kind === "tool_result" || segment.kind === "vision") return "tool";
   if (segment.kind === "final_reply") return "final";
   if (segment.kind === "service" || segment.lifecycle === "service_ephemeral") return "service";
   return "reply";
@@ -3198,6 +3257,7 @@ function usageStageClass(segment) {
 function usageStageLabel(segment) {
   if (!segment) return "-";
   if (segment.status === "failed" || segment.kind === "failed_reply") return t("usageFailedBillable");
+  if (segment.kind === "vision") return t("usageVisionStage");
   if (segment.kind === "tool_result" || segment.kind === "tool_call") return t("usageToolStage");
   if (segment.kind === "final_reply") return t("usageFinalReply");
   if (segment.kind === "service" || segment.lifecycle === "service_ephemeral") return t("usageServiceRequest");
@@ -3215,6 +3275,7 @@ function usageTagTelemetry(segment) {
   if (!segment) return "-";
   if (segment.status === "failed") return "failed";
   if (segment.status === "running" || segment.kind === "tool_call") return "open";
+  if (segment.kind === "vision") return "vision";
   if (segment.kind === "tool_result") {
     const summary = String(segment.summary || "").toLowerCase();
     if (summary.includes("opened") || summary.includes("open_page")) return "open";
@@ -3359,6 +3420,10 @@ function usageSemanticText(value) {
       return t("usageWebSearchStage");
     case "usage_tool_stage":
       return t("usageToolStage");
+    case "usage_vision_stage":
+      return t("usageVisionStage");
+    case "usage_vision_completed":
+      return t("usageVisionCompleted");
     case "usage_tool_completed":
       return t("usageToolCompleted");
     case "usage_tool_failed":
@@ -4153,6 +4218,7 @@ function codexConfigPathHint() {
 
 function handleConfigInput(event) {
   if (!lastSavedConfig) return;
+  applyToolFieldVisibility();
   refreshUsageForBillingConfigInput(event);
   const nextPayload = buildConfigPayload();
   const next = normalizeConfigPayload(nextPayload);
@@ -4162,7 +4228,7 @@ function handleConfigInput(event) {
     renderConfigSaveState(sameConfigPayload(next, lastSavedConfig) ? "clean" : "draft");
     return;
   }
-  if (sameConfigPayload(next, lastSavedConfig)) {
+  if (sameConfigPayload(next, lastSavedConfig) && !secretConfigPayloadChanged(nextPayload)) {
     pendingConfig = null;
     clearAutosaveTimer();
     renderConfigSaveState(restartRequired ? "savedRestart" : "clean");
@@ -4198,7 +4264,9 @@ function configAutosaveDelayForEvent(event) {
 function shouldKeepConfigAsDraft(event) {
   if (!event || event.type !== "input") return false;
   const target = event.target;
-  if (!target || !SENSITIVE_CONFIG_INPUT_IDS.has(target.id || target.name)) return false;
+  if (!target) return false;
+  if (isSecretConfigKey(target.id || target.name)) return true;
+  if (!SENSITIVE_CONFIG_INPUT_IDS.has(target.id || target.name)) return false;
   return isTextConfigInput(target);
 }
 
@@ -4218,6 +4286,8 @@ function buildConfigPayload() {
     DEEPSEEK_THINKING: getRadioValue("DEEPSEEK_THINKING") || "auto",
     UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE")),
     DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(getRadioValue("DEEPSEEK_TEMPERATURE_PRESET")),
+    DEEPSEEK_TRANSPORT: selectedUpstreamTransportForSave(),
+    WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND")),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     DEEPSEEK_OFFICIAL_V1_COMPAT: els.deepseekOfficialV1Compat && els.deepseekOfficialV1Compat.checked ? "true" : "false",
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
@@ -4237,6 +4307,9 @@ function buildConfigPayload() {
     BILLING_PRO_CACHED_INPUT_CNY: normalizeRateInput(els.billingProCachedInput ? els.billingProCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cached),
     BILLING_PRO_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingProCacheMissInput ? els.billingProCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cacheMiss),
     BILLING_PRO_OUTPUT_CNY: normalizeRateInput(els.billingProOutput ? els.billingProOutput.value : "", DEFAULT_BILLING_RATES_CNY.pro.output),
+    BILLING_VISION_CACHED_INPUT_CNY: normalizeRateInput(els.billingVisionCachedInput ? els.billingVisionCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cached),
+    BILLING_VISION_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingVisionCacheMissInput ? els.billingVisionCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cacheMiss),
+    BILLING_VISION_OUTPUT_CNY: normalizeRateInput(els.billingVisionOutput ? els.billingVisionOutput.value : "", DEFAULT_BILLING_RATES_CNY.vision.output),
   };
 }
 
@@ -4244,6 +4317,7 @@ function normalizeConfigPayload(payload) {
   const output = {};
   for (const [key, value] of Object.entries(payload || {})) {
     if (key === "CONFIG_VERSION" || key === "config_version") continue;
+    if (isSecretConfigKey(key)) continue;
     if (Array.isArray(value)) {
       output[key] = key === ENABLED_TOOLS_KEY
         ? stringifyEnabledTools(value)
@@ -4253,6 +4327,25 @@ function normalizeConfigPayload(payload) {
     }
   }
   return output;
+}
+
+function isSecretConfigKey(key) {
+  const normalized = String(key || "").trim().toUpperCase();
+  return normalized === "VISION_API_KEY"
+    || normalized === "VISION_ANALYZE_API_KEY"
+    || normalized === "VISION_GENERATE_API_KEY"
+    || normalized.endsWith("_API_KEY_CLEAR")
+    || normalized.endsWith("_SECRET_CLEAR");
+}
+
+function secretConfigPayloadChanged(payload) {
+  return Object.entries(payload || {}).some(([key, value]) => {
+    if (!isSecretConfigKey(key)) return false;
+    const text = String(value || "").trim().toLowerCase();
+    return text === "true"
+      || text === "1"
+      || (text !== "" && !key.toUpperCase().endsWith("_CONFIGURED"));
+  });
 }
 
 function sameConfigPayload(left, right) {
@@ -4502,6 +4595,9 @@ function billingInputs() {
     els.billingProCachedInput,
     els.billingProCacheMissInput,
     els.billingProOutput,
+    els.billingVisionCachedInput,
+    els.billingVisionCacheMissInput,
+    els.billingVisionOutput,
   ];
 }
 
@@ -4513,6 +4609,9 @@ function setBillingInputValues(config = {}) {
   setInputValue(els.billingProCachedInput, config.BILLING_PRO_CACHED_INPUT_CNY || config.BILLING_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.cached);
   setInputValue(els.billingProCacheMissInput, config.BILLING_PRO_CACHE_MISS_INPUT_CNY || config.BILLING_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.cacheMiss);
   setInputValue(els.billingProOutput, config.BILLING_PRO_OUTPUT_CNY || config.BILLING_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.output);
+  setInputValue(els.billingVisionCachedInput, config.BILLING_VISION_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.vision.cached);
+  setInputValue(els.billingVisionCacheMissInput, config.BILLING_VISION_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.vision.cacheMiss);
+  setInputValue(els.billingVisionOutput, config.BILLING_VISION_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.vision.output);
 }
 
 function setInputValue(input, value, fallback) {
@@ -4525,6 +4624,7 @@ function currentBillingSignature() {
     peakValleyEnabled: currentPeakValleyBillingEnabled(),
     flash: currentBillingRates("deepseek-v4-flash"),
     pro: currentBillingRates("deepseek-v4-pro"),
+    vision: currentBillingRates("deepseek-v4-flash-vision-exp"),
   });
 }
 
@@ -4533,7 +4633,13 @@ function currentPeakValleyBillingEnabled() {
 }
 
 function currentBillingRates(model) {
-  const group = String(model || "").toLowerCase().includes("flash") ? "flash" : "pro";
+  const normalized = String(model || "").toLowerCase();
+  const group = normalized.includes("vision") ? "vision" : (normalized.includes("flash") ? "flash" : "pro");
+  if (group === "vision") return {
+    cached: normalizeRateInput(els.billingVisionCachedInput ? els.billingVisionCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cached),
+    cacheMiss: normalizeRateInput(els.billingVisionCacheMissInput ? els.billingVisionCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cacheMiss),
+    output: normalizeRateInput(els.billingVisionOutput ? els.billingVisionOutput.value : "", DEFAULT_BILLING_RATES_CNY.vision.output),
+  };
   if (group === "flash") {
     return {
       cached: normalizeRateInput(els.billingFlashCachedInput ? els.billingFlashCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cached),
@@ -4590,6 +4696,31 @@ function normalizeTemperaturePreset(value) {
   if (normalized === "general" || normalized === "chat" || normalized === "translation") return "general";
   if (normalized === "creative" || normalized === "creation") return "creative";
   return DEFAULT_TEMPERATURE_PRESET;
+}
+
+function normalizeUpstreamTransport(value) {
+  const normalized = String(value || "auto").trim().toLowerCase();
+  if (normalized === "chat" || normalized === "chat_compat" || normalized === "compat") {
+    return "chat_compat";
+  }
+  return "auto";
+}
+
+function selectedUpstreamTransportForSave() {
+  const selected = normalizeUpstreamTransport(getRadioValue("DEEPSEEK_TRANSPORT"));
+  // `native_responses` remains an advanced TOML/environment option for a
+  // custom endpoint. The two-choice UI intentionally presents it as the
+  // default Responses option, so editing an unrelated setting must not
+  // silently replace that explicit configuration with `auto`.
+  if (selected === "auto" && lastSavedConfig && lastSavedConfig.DEEPSEEK_TRANSPORT === "native_responses") {
+    return "native_responses";
+  }
+  return selected;
+}
+
+function normalizeWebSearchBackend(value) {
+  const normalized = String(value || "local").trim().toLowerCase();
+  return normalized === "official" || normalized === "deepseek" ? "official" : "local";
 }
 
 function normalizeNetworkProxyMode(value) {

@@ -7,6 +7,8 @@ mod http_response;
 mod http_utils;
 mod manager_api;
 mod manager_service;
+mod native_coordinator;
+mod native_responses;
 mod network;
 mod response_sse;
 mod responses;

@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-1f6feb">
+  <img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.
+  Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, image-service, and search-provider terms.
 </p>
 
 CodeSeeX connects Codex Desktop to DeepSeek-compatible upstreams through a local `/v1` adapter. Its role is not just to translate one HTTP API into another. CodeSeeX sits at the agent boundary where Codex requests, tool calls, context replay, reasoning behavior, web search, local file operations, usage accounting, and desktop management all meet.
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.6.0`
+Current version: `0.7.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -73,17 +73,22 @@ The result is a tool for people who want DeepSeek inside Codex without giving up
 ## What You Get
 
 - DeepSeek V4 models exposed to Codex as `deepseek-v4-pro` and `deepseek-v4-flash`.
+- Official DeepSeek endpoints use the native Responses API by default; Chat API compatibility is an explicit experimental fallback.
+- Image understanding and image generation are separate optional tools; DeepSeek Vision does not enter the main Codex model catalog.
+- Web Search can use the default CodeSeeX local backend or the separately selected DeepSeek official backend.
+- Requests that require CodeSeeX-owned local workspace, Vision, community, or local Web Search execution use the established Chat compatibility executor path; this ownership-based selection is diagnosed separately from upstream failure recovery.
 - Generated Codex TOML with machine-specific `model_catalog_json` and local `base_url`.
 - Embedded model catalog for first-run machines without a native Codex catalog.
 - 1M context metadata with a 95% effective context window for Flash and Pro.
 - Codex-native Apply Patch handling and client-tool handoff behavior.
 - CodeSeeX-hosted Web Search with bounded execution, source diagnostics, automatic evidence opening, and local/private target protection.
 - Read-only workspace tools for file and repository inspection.
-- Optional Vision module for OpenAI-compatible image understanding and image generation endpoints.
+- Optional image capabilities for DeepSeek Vision, custom image understanding, and independent image generation endpoints.
 - Context compilation with authoritative Codex full replay, atomic tool-call/result groups, bounded tool outputs, binary/data URL redaction, and controlled context-limit diagnostics instead of proxy-side replay truncation.
 - Usage sessions that separate normal user turns, service requests, model iterations, tool phases, handoffs, cache hits, cache misses, output tokens, and estimated cost.
 - Desktop manager with tray controls, autostart, update checks, logs, usage, balance, settings, tools, and adapter setup.
 - Community tool discovery under `~/.codeseex/extension/tools/<tool>/manifest.json`, disabled by default and executed only through explicit command manifests.
+- DeepSeek thinking-mode assistant turns retain `reasoning_content` across Chat compatibility follow-up requests.
 
 ## Screenshots
 
@@ -112,7 +117,7 @@ The gallery below uses English UI sample data and real CodeSeeX/Codex screens.
   <tr>
     <td width="50%">
       <strong>Tool Settings</strong><br>
-      Built-in workspace tools, Web Search, Vision endpoints, and tool-specific credentials.<br><br>
+      Built-in workspace tools, Web Search, separate image capabilities, and tool-specific credentials.<br><br>
       <img alt="CodeSeeX tool settings for hosted tools and Vision" src="docs/img/release-settings-tools.png" width="100%">
     </td>
     <td width="50%">
@@ -134,7 +139,7 @@ The gallery below uses English UI sample data and real CodeSeeX/Codex screens.
     </td>
     <td width="50%">
       <strong>Vision Example</strong><br>
-      Optional Vision module used from Codex through the CodeSeeX tool runtime.<br><br>
+      Separate image understanding and image generation capabilities used from Codex through the CodeSeeX tool runtime.<br><br>
       <img alt="CodeSeeX Vision example in Codex" src="docs/img/release-codex-vision.png" width="100%">
     </td>
   </tr>
@@ -181,7 +186,7 @@ The desktop app is the control plane for the local runtime:
 - Logs: compact operational events and safe diagnostics.
 - Settings: upstream URL, model behavior, proxy mode, UI options, billing rates, and tools.
 - Adapter: generated Codex TOML and model catalog status.
-- Tools: built-in tool enablement, Web Search, Vision settings, and community tool discovery.
+- Tools: built-in tool enablement, Web Search, separate image settings, and community tool discovery.
 
 The proxy is still the core service. Once running, the desktop UI should not be required for Codex requests to continue flowing.
 
@@ -221,30 +226,35 @@ CodeSeeX exposes `deepseek-v4-pro` and `deepseek-v4-flash` to Codex through its 
 
 The local Codex endpoint remains under `http://127.0.0.1:8787/v1` by default. If you change the listen port, copy the generated TOML again and restart Codex.
 
-## Vision Module
+## Image Capabilities
 
-The Vision module is optional and configurable from the desktop Tools settings. Configure full request URLs, model names, and an API key for the endpoints you want to use:
+Image understanding and image generation are separate optional tools in desktop Settings:
 
-- Analyze endpoints: OpenAI-compatible `/responses` or `/chat/completions`.
-- Generate endpoints: OpenAI-compatible `/responses` with image generation support or `/images/generations`.
+- Image understanding is enabled by default for new installs and once when upgrading legacy configurations. After the capability schema is migrated, later user changes are preserved.
+- Image understanding can use the official DeepSeek Vision Responses endpoint or a custom OpenAI-compatible `/responses` or `/chat/completions` endpoint.
+- DeepSeek Vision uses the dedicated `deepseek-v4-flash-vision-exp` model. It is managed as a tool capability and is not added to the main Codex model catalog.
+- Image generation uses an independent custom `/responses` or `/images/generations` endpoint, model, enable state, and credential, and remains disabled by default.
+- Custom image understanding and image generation credentials are stored separately in the OS credential store and are never returned by the config API.
 - Image inputs: current Codex `input_image` attachments, HTTP(S) URL, `data:image` URL, `file://` URL, workspace path, or permitted local absolute path.
 - Image generation results are returned as display-ready Markdown and local files; generated base64 payloads are saved to disk instead of being sent back inline.
 
-CodeSeeX does not rewrite Vision endpoint URLs. The request URL you configure is the request URL that will be used. When a local image is analyzed through a remote endpoint, the image pixels are sent to that configured service.
+Custom image endpoint URLs are used exactly as configured. In DeepSeek mode, image pixels are sent directly to the official DeepSeek Vision endpoint; in custom mode, they are sent to the configured service.
+
+See [Image Capabilities](docs/image-capabilities.md) for provider selection, credential boundaries, limits, usage accounting, and privacy behavior.
 
 ## Install And Update
 
-On Windows, use the NSIS `Windows-CodeSeeX.Setup.*.exe` installer for normal desktop installs and updates. It supports installer language selection, current-user or all-users install mode, and migration from the earlier Electron build by uninstalling the legacy app before installing the Tauri build.
+On Windows, use the NSIS installer from GitHub Releases for normal desktop installs and updates. It supports installer language selection, current-user or all-users install mode, and migration from the earlier Electron build by uninstalling the legacy app before installing the Tauri build.
 
 ## Credential Boundary
 
 CodeSeeX manager settings are not intended to be upstream credential storage. Balance checks read the direct Codex auth source or a cached request `Authorization: Bearer ...` header. A legacy `DEEPSEEK_API_KEY` environment value can still act as a fallback for direct upstream requests, but it is not the balance credential source.
 
-Tool-specific credentials, such as Vision credentials, belong to the configured tool endpoint and should be treated as local secrets. Do not enable community tools unless you trust their command manifests.
+Tool-specific credentials, such as custom image understanding and image generation credentials, belong to their configured endpoints and are stored as separate local secrets. Do not enable community tools unless you trust their command manifests.
 
 ## Privacy Notes
 
-CodeSeeX is a local bridge, but model requests are forwarded to the configured upstream service. Vision analysis sends image pixels to the configured Vision endpoint. Web Search may request search-result pages or regular web pages from third-party websites. Those services may apply their own terms, retention policies, rate limits, and anti-abuse rules.
+CodeSeeX is a local bridge, but model requests are forwarded to the configured upstream service. Image understanding and image generation send image data to their separately selected providers. Web Search may request search-result pages or regular web pages from third-party websites. Those services may apply their own terms, retention policies, rate limits, and anti-abuse rules.
 
 Default logs are compact and redacted. Development diagnostics can expose more request-shape information and should only be enabled when needed for debugging.
 

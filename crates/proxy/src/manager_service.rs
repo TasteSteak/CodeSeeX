@@ -1,8 +1,11 @@
 use crate::app_state::ProxyState;
-use crate::config_payload::{model_override_to_ui, temperature_to_ui, user_config_from_payload};
+use crate::config_payload::{
+    model_override_to_ui, temperature_to_ui, upstream_transport_to_ui, user_config_from_payload,
+    web_search_backend_to_ui,
+};
 use crate::http_utils::{config_version, is_newer_version, normalize_version_label, now_seconds};
 use crate::runtime_config::{RuntimeConfigChangeSource, RuntimeConfigService};
-use crate::tools::registry::{enabled_tool_ids, tool_registry, tool_settings};
+use crate::tools::registry::{selected_tool_ids, tool_registry, tool_settings};
 use codeseex_core::catalog::{
     app_server_model_list, build_codeseex_catalog, catalog_file_is_compatible, codex_toml_snippet,
     write_catalog_atomic,
@@ -115,6 +118,13 @@ pub struct ManagerJsonResponse {
 
 impl ManagerRuntime {
     pub async fn open(config: AppConfig) -> anyhow::Result<Self> {
+        if let Err(error) = migrate_image_capability_config(&config) {
+            tracing::warn!(
+                error = %error,
+                path = %config.config_path().display(),
+                "image capability migration was not completed; keeping the existing configuration"
+            );
+        }
         Ok(Self {
             store: Store::open(&config.data_dir).await?,
             runtime_config: RuntimeConfigService::new(config),
@@ -505,11 +515,13 @@ impl ManagerRuntime {
             "PROXY_PORT_SOURCE": proxy_port_source(proxy.and_then(|value| value.port)),
             "DEEPSEEK_BASE_URL": upstream_base_url,
             "DEEPSEEK_OFFICIAL_V1_COMPAT": upstream.and_then(|value| value.official_v1_compat).unwrap_or(config.upstream.official_v1_compat).to_string(),
+            "DEEPSEEK_TRANSPORT": upstream_transport_to_ui(upstream.and_then(|value| value.transport).unwrap_or(config.upstream.transport)),
             "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(model_override),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
             "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
             "SHOW_THINKING": ui.and_then(|value| value.show_thinking).unwrap_or(true).to_string(),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
+            "WEB_SEARCH_BACKEND": web_search_backend_to_ui(tools.and_then(|value| value.web_search.as_ref()).and_then(|value| value.backend).unwrap_or(config.web_search_backend)),
             "AUTO_START": ui.and_then(|value| value.auto_start).unwrap_or(false).to_string(),
             "CODEX_APP_MODEL_LIST_INJECTION": ui.and_then(|value| value.codex_app_model_list_injection).unwrap_or(true).to_string(),
             "UI_THEME": ui.and_then(|value| value.theme.as_deref()).unwrap_or("system"),
@@ -523,34 +535,53 @@ impl ManagerRuntime {
             "BILLING_PRO_CACHED_INPUT_CNY": billing.and_then(|value| value.pro_cached_input_cny).unwrap_or(0.025).to_string(),
             "BILLING_PRO_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.pro_cache_miss_input_cny).unwrap_or(3.0).to_string(),
             "BILLING_PRO_OUTPUT_CNY": billing.and_then(|value| value.pro_output_cny).unwrap_or(6.0).to_string(),
+            "BILLING_VISION_CACHED_INPUT_CNY": billing.and_then(|value| value.vision_cached_input_cny).unwrap_or(0.05).to_string(),
+            "BILLING_VISION_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.vision_cache_miss_input_cny).unwrap_or(1.5).to_string(),
+            "BILLING_VISION_OUTPUT_CNY": billing.and_then(|value| value.vision_output_cny).unwrap_or(4.5).to_string(),
             "ENABLED_TOOLS": tools.and_then(|value| value.enabled.as_deref()).map(canonical_enabled_tool_ids).map(Value::from).unwrap_or(Value::Null)
         });
         let settings = crate::config_payload::tool_settings_from_user_config(&user_config);
-        if !settings.is_empty() {
-            if let Some(object) = payload.as_object_mut() {
+        if let Some(object) = payload.as_object_mut() {
+            if !settings.is_empty() {
                 let mut tool_config_keys = crate::tools::registry::builtin_tool_config_keys();
                 tool_config_keys.extend(crate::community_tools::community_tool_config_keys(
                     &config.data_dir,
                 ));
                 for key in tool_config_keys {
-                    if key == crate::tools::vision::API_KEY_KEY {
+                    if matches!(
+                        key.as_str(),
+                        crate::tools::vision::API_KEY_KEY
+                            | crate::tools::vision::ANALYZE_API_KEY_KEY
+                            | crate::tools::vision::GENERATE_API_KEY_KEY
+                    ) {
                         continue;
                     }
                     if let Some(value) = settings.get(&key) {
                         object.insert(key, Value::String(value.clone()));
                     }
                 }
-                let legacy_configured = settings
-                    .get(crate::tools::vision::API_KEY_KEY)
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false);
-                object.insert(
-                    "VISION_API_KEY_CONFIGURED".to_owned(),
-                    Value::Bool(
-                        crate::secrets::vision_api_key_configured(&config) || legacy_configured,
-                    ),
-                );
             }
+            object.insert(
+                "VISION_ANALYZE_API_KEY_CONFIGURED".to_owned(),
+                Value::Bool(
+                    crate::secrets::vision_analyze_api_key_configured(&config)
+                        || settings
+                            .get(crate::tools::vision::ANALYZE_API_KEY_KEY)
+                            .is_some_and(|value| !value.trim().is_empty())
+                        || settings
+                            .get(crate::tools::vision::API_KEY_KEY)
+                            .is_some_and(|value| !value.trim().is_empty()),
+                ),
+            );
+            object.insert(
+                "VISION_GENERATE_API_KEY_CONFIGURED".to_owned(),
+                Value::Bool(
+                    crate::secrets::vision_generate_api_key_configured(&config)
+                        || settings
+                            .get(crate::tools::vision::GENERATE_API_KEY_KEY)
+                            .is_some_and(|value| !value.trim().is_empty()),
+                ),
+            );
         }
         payload
     }
@@ -578,6 +609,9 @@ impl ManagerRuntime {
             }
         }
         let mut existing_config = UserConfig::read_from(&config.config_path()).unwrap_or_default();
+        if let Err(error) = migrate_legacy_vision_secret(&config, &mut existing_config) {
+            return status(500, json!({ "ok": false, "error": error.to_string() }));
+        }
         if let Err(error) = apply_secret_payload(&config, &payload, &mut existing_config) {
             return status(500, json!({ "ok": false, "error": error.to_string() }));
         }
@@ -673,7 +707,7 @@ impl ManagerRuntime {
 
     pub fn tools(&self) -> Value {
         let config = self.active_config();
-        let enabled_tools = enabled_tool_ids(&config);
+        let enabled_tools = selected_tool_ids(&config);
         let settings = tool_settings(&config);
         json!({
             "ok": true,
@@ -1086,6 +1120,102 @@ impl ManagerRuntime {
     }
 }
 
+/// Upgrade the pre-0.7 combined Vision capability once. The public capability
+/// id stays `vision_analyze`; only explicit legacy generation evidence enables
+/// the new independent `image_gen` capability.
+pub(crate) fn migrate_image_capability_config(config: &AppConfig) -> anyhow::Result<bool> {
+    let path = config.config_path();
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut user_config = match UserConfig::read_from(&path) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                path = %path.display(),
+                "could not parse configuration for image capability migration"
+            );
+            return Ok(false);
+        }
+    };
+    if user_config
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.capability_schema_version)
+        == Some(codeseex_core::IMAGE_CAPABILITY_SCHEMA_VERSION)
+    {
+        return Ok(false);
+    }
+
+    let old_enabled = user_config
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.enabled.clone());
+    let old_canonical_enabled = old_enabled
+        .as_ref()
+        .map(|ids| canonical_enabled_tool_ids(ids));
+    let old_vision_enabled = old_canonical_enabled
+        .as_ref()
+        .map(|ids| ids.iter().any(|id| id == "vision_analyze"))
+        .unwrap_or(true);
+    let has_legacy_generation = user_config
+        .tools
+        .as_ref()
+        .is_some_and(legacy_generation_evidence);
+
+    // Move legacy sections and secrets before writing the new capability
+    // marker. A failed secure-store operation must leave the config retryable.
+    migrate_legacy_vision_secret(config, &mut user_config).map_err(anyhow::Error::msg)?;
+
+    let tools = user_config
+        .tools
+        .get_or_insert_with(codeseex_core::UserToolsConfig::default);
+    let mut enabled = old_enabled.unwrap_or_else(crate::tools::default_enabled_tool_ids);
+    enabled = canonical_enabled_tool_ids(&enabled);
+    if !enabled.iter().any(|id| id == "vision_analyze") {
+        enabled.push("vision_analyze".to_owned());
+    }
+    if old_vision_enabled && has_legacy_generation && !enabled.iter().any(|id| id == "image_gen") {
+        enabled.push("image_gen".to_owned());
+    }
+    tools.enabled = Some(enabled);
+    tools.capability_schema_version = Some(codeseex_core::IMAGE_CAPABILITY_SCHEMA_VERSION);
+    user_config.write_atomic(&path)?;
+    Ok(true)
+}
+
+fn legacy_generation_evidence(tools: &codeseex_core::UserToolsConfig) -> bool {
+    let config_fields = tools
+        .settings
+        .as_ref()
+        .map(|settings| {
+            settings.iter().any(|(key, value)| {
+                !value.trim().is_empty()
+                    && matches!(
+                        key.as_str(),
+                        crate::tools::vision::GENERATE_URL_KEY
+                            | crate::tools::vision::GENERATE_MODEL_KEY
+                            | crate::tools::vision::GENERATE_API_KEY_KEY
+                    )
+            })
+        })
+        .unwrap_or(false);
+    let analyze_legacy_fields = tools.vision_analyze.as_ref().is_some_and(|vision| {
+        non_empty_option(&vision.generate_url) || non_empty_option(&vision.generate_model)
+    });
+    let generation_fields = tools.vision_generate.as_ref().is_some_and(|generation| {
+        non_empty_option(&generation.generate_url)
+            || non_empty_option(&generation.generate_model)
+            || non_empty_option(&generation.api_key)
+    });
+    config_fields || analyze_legacy_fields || generation_fields
+}
+
+fn non_empty_option(value: &Option<String>) -> bool {
+    value.as_ref().is_some_and(|value| !value.trim().is_empty())
+}
+
 #[derive(Debug, Clone)]
 struct CatalogFileState {
     exists: bool,
@@ -1272,38 +1402,238 @@ fn apply_secret_payload(
     payload: &Value,
     existing_config: &mut UserConfig,
 ) -> Result<(), String> {
-    let clear_requested = payload_bool(payload, "VISION_API_KEY_CLEAR");
-    let new_key = payload
-        .get(crate::tools::vision::API_KEY_KEY)
+    let legacy_key = secret_payload_value(payload, crate::tools::vision::API_KEY_KEY);
+    let analyze_key = secret_payload_value(payload, crate::tools::vision::ANALYZE_API_KEY_KEY)
+        .or_else(|| legacy_key.clone());
+    let generate_key = secret_payload_value(payload, crate::tools::vision::GENERATE_API_KEY_KEY);
+    if payload_bool(payload, "VISION_API_KEY_CLEAR")
+        || payload_bool(payload, "VISION_ANALYZE_API_KEY_CLEAR")
+    {
+        crate::secrets::clear_vision_analyze_api_key(config).map_err(|error| error.to_string())?;
+    }
+    if payload_bool(payload, "VISION_API_KEY_CLEAR")
+        || payload_bool(payload, "VISION_GENERATE_API_KEY_CLEAR")
+    {
+        crate::secrets::clear_vision_generate_api_key(config).map_err(|error| error.to_string())?;
+    }
+    if let Some(key) = analyze_key {
+        crate::secrets::write_vision_analyze_api_key(config, &key)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(key) = generate_key {
+        crate::secrets::write_vision_generate_api_key(config, &key)
+            .map_err(|error| error.to_string())?;
+    }
+    if legacy_key.is_some() || payload_bool(payload, "VISION_API_KEY_CLEAR") {
+        clear_legacy_vision_key(existing_config);
+        let _ = crate::secrets::clear_legacy_vision_api_key(config);
+    }
+    Ok(())
+}
+
+fn secret_payload_value(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-
-    if clear_requested {
-        crate::secrets::clear_vision_api_key(config).map_err(|error| error.to_string())?;
-        clear_legacy_vision_key(existing_config);
-    }
-    if let Some(new_key) = new_key {
-        crate::secrets::write_vision_api_key(config, &new_key)
-            .map_err(|error| error.to_string())?;
-        clear_legacy_vision_key(existing_config);
-    }
-    Ok(())
+        .map(str::to_owned)
 }
 
 fn migrate_legacy_vision_secret(
     config: &AppConfig,
     user_config: &mut UserConfig,
 ) -> Result<(), String> {
-    let Some(legacy_key) = take_legacy_vision_key(user_config) else {
-        return Ok(());
-    };
-    if !crate::secrets::vision_api_key_configured(config) {
-        crate::secrets::write_vision_api_key(config, &legacy_key)
-            .map_err(|error| error.to_string())?;
+    migrate_legacy_vision_config(user_config);
+    let flat_legacy_key = vision_setting_value(user_config, crate::tools::vision::API_KEY_KEY);
+    let flat_analyze_key =
+        vision_setting_value(user_config, crate::tools::vision::ANALYZE_API_KEY_KEY);
+    let flat_generate_key =
+        vision_setting_value(user_config, crate::tools::vision::GENERATE_API_KEY_KEY);
+    remove_vision_secret_settings(user_config);
+    let legacy_shared_key = take_legacy_shared_vision_key(user_config)
+        .or(flat_legacy_key)
+        .or_else(|| crate::secrets::legacy_vision_api_key(config));
+    let analyze_key = take_vision_analyze_key(user_config)
+        .or(flat_analyze_key)
+        .or_else(|| legacy_shared_key.clone());
+    let generation_key = take_vision_generate_key(user_config).or(flat_generate_key);
+    let has_generation = user_config
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.vision_generate.as_ref())
+        .is_some();
+    if let Some(legacy_key) = analyze_key.as_deref() {
+        if !crate::secrets::current_vision_analyze_api_key_configured(config) {
+            crate::secrets::write_vision_analyze_api_key(config, legacy_key)
+                .map_err(|error| error.to_string())?;
+        }
     }
+    let generation_key = generation_key.or_else(|| legacy_shared_key.filter(|_| has_generation));
+    if let Some(generation_key) = generation_key.as_deref() {
+        if has_generation && !crate::secrets::current_vision_generate_api_key_configured(config) {
+            crate::secrets::write_vision_generate_api_key(config, generation_key)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if analyze_key.is_none() && generation_key.is_none() {
+        return Ok(());
+    }
+    crate::secrets::clear_legacy_vision_api_key(config).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn vision_setting_value(user_config: &UserConfig, key: &str) -> Option<String> {
+    user_config
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.settings.as_ref())
+        .and_then(|settings| settings.get(key))
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn remove_vision_secret_settings(user_config: &mut UserConfig) {
+    let Some(tools) = user_config.tools.as_mut() else {
+        return;
+    };
+    let Some(settings) = tools.settings.as_mut() else {
+        return;
+    };
+    for key in [
+        crate::tools::vision::API_KEY_KEY,
+        crate::tools::vision::ANALYZE_API_KEY_KEY,
+        crate::tools::vision::GENERATE_API_KEY_KEY,
+    ] {
+        settings.remove(key);
+    }
+    if settings.is_empty() {
+        tools.settings = None;
+    }
+}
+
+fn migrate_legacy_vision_config(user_config: &mut UserConfig) {
+    let Some(tools) = user_config.tools.as_mut() else {
+        return;
+    };
+    let mut settings = tools.settings.take().unwrap_or_default();
+    let setting = |settings: &mut std::collections::BTreeMap<String, String>, key: &str| {
+        settings
+            .remove(key)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let analyze_backend = setting(&mut settings, crate::tools::vision::ANALYZE_BACKEND_KEY);
+    let image_detail = setting(&mut settings, crate::tools::vision::IMAGE_DETAIL_KEY);
+    let analyze_url = setting(&mut settings, crate::tools::vision::ANALYZE_URL_KEY);
+    let analyze_model = setting(&mut settings, crate::tools::vision::ANALYZE_MODEL_KEY);
+    let generate_url = setting(&mut settings, crate::tools::vision::GENERATE_URL_KEY);
+    let generate_model = setting(&mut settings, crate::tools::vision::GENERATE_MODEL_KEY);
+    let analyze_api_key = setting(&mut settings, crate::tools::vision::ANALYZE_API_KEY_KEY);
+    let generate_api_key = setting(&mut settings, crate::tools::vision::GENERATE_API_KEY_KEY);
+
+    let has_analyze_config = analyze_backend.is_some()
+        || image_detail.is_some()
+        || analyze_url.is_some()
+        || analyze_model.is_some()
+        || analyze_api_key.is_some();
+    if has_analyze_config && tools.vision_analyze.is_none() {
+        tools.vision_analyze = Some(codeseex_core::UserVisionToolConfig::default());
+    }
+    let Some(vision) = tools.vision_analyze.as_mut() else {
+        if generate_url.is_some() || generate_model.is_some() || generate_api_key.is_some() {
+            let generation = tools
+                .vision_generate
+                .get_or_insert_with(codeseex_core::UserVisionGenerateToolConfig::default);
+            if generation.generate_url.is_none() {
+                generation.generate_url = generate_url;
+            }
+            if generation.generate_model.is_none() {
+                generation.generate_model = generate_model;
+            }
+            if generation.api_key.is_none() {
+                generation.api_key = generate_api_key;
+            }
+        }
+        if !settings.is_empty() {
+            tools.settings = Some(settings);
+        }
+        return;
+    };
+    if let Some(value) = analyze_backend {
+        vision.backend = parse_legacy_vision_backend(&value).or(vision.backend);
+    }
+    if let Some(value) = image_detail {
+        vision.image_detail = parse_legacy_vision_detail(&value).or(vision.image_detail);
+    }
+    if vision.analyze_url.is_none() {
+        vision.analyze_url = analyze_url;
+    }
+    if vision.analyze_model.is_none() {
+        vision.analyze_model = analyze_model;
+    }
+    if vision.analyze_api_key.is_none() {
+        vision.analyze_api_key = analyze_api_key;
+    }
+    if vision.backend.is_none() {
+        vision.backend = Some(
+            if vision
+                .analyze_url
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+                || vision
+                    .analyze_model
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            {
+                codeseex_core::VisionAnalyzeBackend::External
+            } else {
+                codeseex_core::VisionAnalyzeBackend::Deepseek
+            },
+        );
+    }
+    if vision.image_detail.is_none() {
+        vision.image_detail = Some(codeseex_core::VisionImageDetail::Auto);
+    }
+    let legacy_generate_url = vision.generate_url.take().or(generate_url);
+    let legacy_generate_model = vision.generate_model.take().or(generate_model);
+    if legacy_generate_url.is_some()
+        || legacy_generate_model.is_some()
+        || generate_api_key.is_some()
+    {
+        let generation = tools
+            .vision_generate
+            .get_or_insert_with(codeseex_core::UserVisionGenerateToolConfig::default);
+        if generation.generate_url.is_none() {
+            generation.generate_url = legacy_generate_url;
+        }
+        if generation.generate_model.is_none() {
+            generation.generate_model = legacy_generate_model;
+        }
+        if generation.api_key.is_none() {
+            generation.api_key = generate_api_key;
+        }
+    }
+    if !settings.is_empty() {
+        tools.settings = Some(settings);
+    }
+}
+
+fn parse_legacy_vision_backend(value: &str) -> Option<codeseex_core::VisionAnalyzeBackend> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "deepseek" => Some(codeseex_core::VisionAnalyzeBackend::Deepseek),
+        "external" | "custom" => Some(codeseex_core::VisionAnalyzeBackend::External),
+        _ => None,
+    }
+}
+
+fn parse_legacy_vision_detail(value: &str) -> Option<codeseex_core::VisionImageDetail> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(codeseex_core::VisionImageDetail::Auto),
+        "low" => Some(codeseex_core::VisionImageDetail::Low),
+        "original" => Some(codeseex_core::VisionImageDetail::Original),
+        _ => None,
+    }
 }
 
 fn payload_bool(payload: &Value, key: &str) -> bool {
@@ -1318,10 +1648,31 @@ fn payload_bool(payload: &Value, key: &str) -> bool {
 }
 
 fn clear_legacy_vision_key(config: &mut UserConfig) {
-    let _ = take_legacy_vision_key(config);
+    let _ = take_vision_analyze_key(config);
+    let _ = take_legacy_shared_vision_key(config);
+    let _ = take_vision_generate_key(config);
 }
 
-fn take_legacy_vision_key(config: &mut UserConfig) -> Option<String> {
+fn take_vision_analyze_key(config: &mut UserConfig) -> Option<String> {
+    let tools = config.tools.as_mut()?;
+    let vision = tools.vision_analyze.as_mut()?;
+    let value = vision
+        .analyze_api_key
+        .take()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if vision.analyze_url.is_none()
+        && vision.analyze_model.is_none()
+        && vision.generate_url.is_none()
+        && vision.generate_model.is_none()
+        && vision.api_key.is_none()
+    {
+        tools.vision_analyze = None;
+    }
+    value
+}
+
+fn take_legacy_shared_vision_key(config: &mut UserConfig) -> Option<String> {
     let tools = config.tools.as_mut()?;
     let vision = tools.vision_analyze.as_mut()?;
     let value = vision
@@ -1333,9 +1684,25 @@ fn take_legacy_vision_key(config: &mut UserConfig) -> Option<String> {
         && vision.analyze_model.is_none()
         && vision.generate_url.is_none()
         && vision.generate_model.is_none()
+        && vision.analyze_api_key.is_none()
         && vision.api_key.is_none()
     {
         tools.vision_analyze = None;
+    }
+    value
+}
+
+fn take_vision_generate_key(config: &mut UserConfig) -> Option<String> {
+    let tools = config.tools.as_mut()?;
+    let vision = tools.vision_generate.as_mut()?;
+    let value = vision
+        .api_key
+        .take()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if vision.generate_url.is_none() && vision.generate_model.is_none() && vision.api_key.is_none()
+    {
+        tools.vision_generate = None;
     }
     value
 }
@@ -1410,8 +1777,8 @@ fn canonical_enabled_tool_ids(ids: &[String]) -> Vec<String> {
     let mut output = Vec::new();
     for id in ids {
         let canonical = match id.as_str() {
-            "vision_generate" | "image_gen" | "imagegen" | "image_generation"
-            | "generate_image" | "image_generate" | "create_image" => "vision_analyze",
+            "vision_generate" | "imagegen" | "image_generation" | "generate_image"
+            | "image_generate" | "create_image" => "image_gen",
             _ => id.as_str(),
         };
         if !output.iter().any(|value| value == canonical) {
@@ -1623,6 +1990,120 @@ mod tests {
                 .join(format!("codeseex-manager-{label}-{}", Uuid::new_v4())),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn image_capability_migration_adds_analyze_without_mapping_the_old_id_to_generation() {
+        let config = temp_config("image-capability-migration");
+        UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                enabled: Some(vec![
+                    "list_directory".to_owned(),
+                    "read_file_range".to_owned(),
+                    "workspace_search".to_owned(),
+                ]),
+                vision_analyze: Some(codeseex_core::UserVisionToolConfig {
+                    generate_url: Some(String::new()),
+                    generate_model: Some(String::new()),
+                    api_key: Some("legacy-shared-key".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .write_atomic(&config.config_path())
+        .expect("write legacy config");
+
+        assert!(migrate_image_capability_config(&config).expect("migrate config"));
+        let migrated = UserConfig::read_from(&config.config_path()).expect("read migrated config");
+        let tools = migrated.tools.as_ref().expect("migrated tools");
+        let enabled = tools.enabled.as_ref().expect("migrated enabled tools");
+        assert_eq!(
+            tools.capability_schema_version,
+            Some(codeseex_core::IMAGE_CAPABILITY_SCHEMA_VERSION)
+        );
+        assert!(enabled.iter().any(|id| id == "vision_analyze"));
+        assert!(!enabled.iter().any(|id| id == "image_gen"));
+
+        let mut user_closed = migrated;
+        user_closed
+            .tools
+            .as_mut()
+            .expect("tools")
+            .enabled
+            .as_mut()
+            .expect("enabled")
+            .retain(|id| id != "vision_analyze");
+        user_closed
+            .write_atomic(&config.config_path())
+            .expect("write user choice");
+        assert!(!migrate_image_capability_config(&config).expect("repeat migration"));
+        let after_user_choice =
+            UserConfig::read_from(&config.config_path()).expect("read after user choice");
+        assert!(!after_user_choice
+            .tools
+            .and_then(|tools| tools.enabled)
+            .unwrap_or_default()
+            .iter()
+            .any(|id| id == "vision_analyze"));
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[test]
+    fn image_capability_migration_enables_generation_only_for_legacy_generation_evidence() {
+        let config = temp_config("image-capability-generation-migration");
+        UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                enabled: Some(vec!["vision_analyze".to_owned()]),
+                vision_analyze: Some(codeseex_core::UserVisionToolConfig {
+                    generate_url: Some("https://images.example/v1/images/generations".to_owned()),
+                    generate_model: Some("legacy-image-model".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .write_atomic(&config.config_path())
+        .expect("write legacy generation config");
+
+        migrate_image_capability_config(&config).expect("migrate generation config");
+        let migrated = UserConfig::read_from(&config.config_path()).expect("read migrated config");
+        let tools = migrated.tools.as_ref().expect("migrated tools");
+        let enabled = tools.enabled.as_ref().expect("enabled tools");
+        assert!(enabled.iter().any(|id| id == "vision_analyze"));
+        assert!(enabled.iter().any(|id| id == "image_gen"));
+        let generation = tools
+            .vision_generate
+            .as_ref()
+            .expect("migrated generation config");
+        assert_eq!(
+            generation.generate_url.as_deref(),
+            Some("https://images.example/v1/images/generations")
+        );
+        assert_eq!(
+            generation.generate_model.as_deref(),
+            Some("legacy-image-model")
+        );
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn manager_open_survives_malformed_config_without_rewriting_it() {
+        let config = temp_config("malformed-image-capability-config");
+        std::fs::create_dir_all(&config.data_dir).expect("create data dir");
+        let original = "[tools\nenabled = [\"vision_analyze\"\n";
+        std::fs::write(config.config_path(), original).expect("write malformed config");
+
+        ManagerRuntime::open(config.clone())
+            .await
+            .expect("manager should start with malformed config");
+        assert_eq!(
+            std::fs::read_to_string(config.config_path()).expect("read malformed config"),
+            original
+        );
+        let _ = std::fs::remove_dir_all(config.data_dir);
     }
 
     #[test]
@@ -1950,11 +2431,98 @@ mod tests {
         assert!(payload.get("VISION_API_KEY").is_none());
         assert_eq!(
             payload
-                .get("VISION_API_KEY_CONFIGURED")
+                .get("VISION_ANALYZE_API_KEY_CONFIGURED")
                 .and_then(Value::as_bool),
             Some(true)
         );
         let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[test]
+    fn legacy_flat_vision_secret_is_read_before_cleanup() {
+        let mut config = UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                settings: Some(std::collections::BTreeMap::from([(
+                    "VISION_API_KEY".to_owned(),
+                    "legacy-flat-key".to_owned(),
+                )])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            vision_setting_value(&config, "VISION_API_KEY").as_deref(),
+            Some("legacy-flat-key")
+        );
+        remove_vision_secret_settings(&mut config);
+        assert!(vision_setting_value(&config, "VISION_API_KEY").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_vision_payload_does_not_write_generation_secret() {
+        let config = temp_config("legacy-vision-secret-isolation");
+        crate::secrets::clear_vision_analyze_api_key(&config).expect("clear analyze secret");
+        crate::secrets::clear_vision_generate_api_key(&config).expect("clear generate secret");
+        crate::secrets::clear_legacy_vision_api_key(&config).expect("clear legacy secret");
+        let mut existing = UserConfig::default();
+
+        apply_secret_payload(
+            &config,
+            &json!({ crate::tools::vision::API_KEY_KEY: "legacy-payload-secret" }),
+            &mut existing,
+        )
+        .expect("apply legacy vision payload");
+
+        assert_eq!(
+            crate::secrets::vision_analyze_api_key(&config).as_deref(),
+            Some("legacy-payload-secret")
+        );
+        assert!(crate::secrets::vision_generate_api_key(&config).is_none());
+
+        crate::secrets::clear_vision_analyze_api_key(&config).expect("clear analyze secret");
+        crate::secrets::clear_vision_generate_api_key(&config).expect("clear generate secret");
+        crate::secrets::clear_legacy_vision_api_key(&config).expect("clear legacy secret");
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[test]
+    fn legacy_flat_vision_settings_move_to_separate_capabilities() {
+        let mut config = UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                settings: Some(std::collections::BTreeMap::from([
+                    (
+                        crate::tools::vision::ANALYZE_URL_KEY.to_owned(),
+                        "https://vision.example/v1/responses".to_owned(),
+                    ),
+                    (
+                        crate::tools::vision::ANALYZE_MODEL_KEY.to_owned(),
+                        "custom-vision".to_owned(),
+                    ),
+                    (
+                        crate::tools::vision::GENERATE_URL_KEY.to_owned(),
+                        "https://image.example/v1/images/generations".to_owned(),
+                    ),
+                    (
+                        crate::tools::vision::GENERATE_MODEL_KEY.to_owned(),
+                        "custom-image".to_owned(),
+                    ),
+                ])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        migrate_legacy_vision_config(&mut config);
+        let tools = config.tools.expect("tools config");
+        let analyze = tools.vision_analyze.expect("analyze config");
+        assert_eq!(
+            analyze.backend,
+            Some(codeseex_core::VisionAnalyzeBackend::External)
+        );
+        assert_eq!(analyze.analyze_model.as_deref(), Some("custom-vision"));
+        let generate = tools.vision_generate.expect("generate config");
+        assert_eq!(generate.generate_model.as_deref(), Some("custom-image"));
+        assert!(tools.settings.is_none());
     }
 
     #[test]

@@ -123,13 +123,23 @@ pub(crate) fn final_chat_turn_message(chat: &Value) -> Option<Value> {
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if text.trim().is_empty() || text_is_thinking_display_markdown(text) {
+    let reasoning_content = chat
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if (text.trim().is_empty() && reasoning_content.trim().is_empty())
+        || text_is_thinking_display_markdown(text)
+    {
         return None;
     }
-    Some(json!({
+    let mut message = json!({
         "role": "assistant",
         "content": text
-    }))
+    });
+    if !reasoning_content.trim().is_empty() {
+        message["reasoning_content"] = Value::String(reasoning_content.to_owned());
+    }
+    Some(message)
 }
 
 pub(crate) fn text_is_thinking_display_markdown(text: &str) -> bool {
@@ -152,5 +162,25 @@ mod tests {
         });
 
         assert!(final_chat_turn_message(&chat).is_none());
+    }
+
+    #[test]
+    fn final_turn_message_preserves_reasoning_content_for_next_chat_turn() {
+        let chat = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer.",
+                    "reasoning_content": "The prior reasoning must be replayed."
+                }
+            }]
+        });
+
+        let message = final_chat_turn_message(&chat).expect("final assistant message");
+        assert_eq!(message["content"], "The answer.");
+        assert_eq!(
+            message["reasoning_content"],
+            "The prior reasoning must be replayed."
+        );
     }
 }

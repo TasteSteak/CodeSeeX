@@ -36,6 +36,7 @@ fn test_config_with_upstream(data_dir: PathBuf, fake_addr: SocketAddr) -> AppCon
         upstream: UpstreamConfig {
             base_url: format!("http://{fake_addr}"),
             official_v1_compat: false,
+            transport: Default::default(),
             api_key: Some("test-key".to_owned()),
             timeout_ms: 30_000,
         },
@@ -106,7 +107,6 @@ fn assert_default_codeseex_tools_present(names: &[&str]) {
         "read_file_range",
         "workspace_search",
         "vision_analyze",
-        "image_gen",
     ] {
         assert!(names.contains(&name), "missing {name}: {names:?}");
     }
@@ -208,6 +208,41 @@ async fn serve_with_shutdown_exits_after_listening() {
         .collect::<Vec<_>>();
     assert!(event_types.contains(&"proxy_started"), "{event_types:?}");
     assert!(event_types.contains(&"proxy_stopped"), "{event_types:?}");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn serve_with_malformed_config_keeps_listening_and_preserves_config() {
+    let data_dir = temp_workspace("serve-malformed-config");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    let original = "[tools\nenabled = [\"vision_analyze\"\n";
+    std::fs::write(data_dir.join("config.toml"), original).expect("write malformed config");
+    let mut config = test_config(data_dir.clone());
+    config.port = 0;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let result = serve_with_shutdown(
+        config,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+        move || {
+            let _ = started_tx.send(());
+            let _ = shutdown_tx.send(());
+        },
+    )
+    .await;
+
+    assert!(started_rx.await.is_ok(), "listening callback should run");
+    assert!(
+        result.is_ok(),
+        "server should start with malformed config: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("config.toml")).expect("read config"),
+        original
+    );
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -866,12 +901,32 @@ async fn web_search_source_probe_survives_lagged_config_events() {
 
     runtime_config.emit_proxy_startup();
 
-    tokio::time::sleep(std::time::Duration::from_millis(160)).await;
+    // The test deliberately starts from a lagged broadcast receiver. Under a
+    // parallel full-suite run, a fixed short sleep can expire before the
+    // subscriber receives the follow-up event even though the implementation
+    // is correct. Wait for the observable contract instead.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let events = loop {
+        let (events, _) = store.recent_events(20, None).await.unwrap();
+        let saw_lagged = events
+            .iter()
+            .any(|event| event.event_type == "web_search_source_probe_lagged");
+        let saw_probe = events
+            .iter()
+            .any(|event| event.event_type == "web_search_source_probe");
+        if calls.load(AtomicOrdering::SeqCst) >= 1 && saw_lagged && saw_probe {
+            break events;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "lagged receiver did not handle the follow-up probe event"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     assert!(
         calls.load(AtomicOrdering::SeqCst) >= 1,
         "lagged receiver should continue handling later probe events"
     );
-    let (events, _) = store.recent_events(20, None).await.unwrap();
     assert!(events
         .iter()
         .any(|event| event.event_type == "web_search_source_probe_lagged"));
@@ -2559,6 +2614,7 @@ fn synthetic_tool_search_bridge_diagnostic_records_decision() {
         &upstream_tools,
         &decision,
         &crate::tools::default_enabled_tool_ids(),
+        true,
         true,
         crate::upstream::payload::CodexServiceRequestKind::None,
     );
@@ -4638,6 +4694,129 @@ async fn codex_service_responses_request_suppresses_previous_history_replay() {
         Some("suppressed_service")
     );
 
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn official_search_chat_compat_omits_automatic_local_web_search() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("official-search-chat-compat-no-local-injection");
+    let mut config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    config.upstream.transport = codeseex_core::config::UpstreamTransport::ChatCompat;
+    config.web_search_backend = codeseex_core::config::WebSearchBackend::Official;
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store);
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_official_search_chat_compat_no_tools",
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Answer without web access." }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned");
+    assert_eq!(requests.len(), 1);
+    let names = upstream_function_tool_names(&requests[0]);
+    assert!(names.contains(&"apply_patch"), "{names:?}");
+    assert!(names.contains(&"workspace_search"), "{names:?}");
+    assert!(
+        !names.contains(&"web_search"),
+        "official mode must not silently inject local web search: {names:?}"
+    );
+
+    drop(requests);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn official_search_chat_compat_rejects_unsolicited_local_web_search_call() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_web_search_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("official-search-chat-compat-unsolicited-call");
+    let mut config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    config.upstream.transport = codeseex_core::config::UpstreamTransport::ChatCompat;
+    config.web_search_backend = codeseex_core::config::WebSearchBackend::Official;
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store);
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_official_search_chat_compat_unsolicited",
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "Answer without web access." }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.json::<Value>().await.unwrap();
+    assert_eq!(body["error"]["code"], "tool_loop_failed");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("web_search")),
+        "{body}"
+    );
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned");
+    assert_eq!(requests.len(), 1, "a local search result was not replayed");
+
+    drop(requests);
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
@@ -8050,7 +8229,7 @@ async fn codex_shaped_client_handoff_avoids_proxy_tool_and_context_pollution() {
                 .and_then(|detail| detail.pointer("/payload/tools_count"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
-                >= 9
+                >= 8
             && event
                 .detail
                 .as_ref()
@@ -8266,4 +8445,97 @@ fn reconstructed_custom_apply_patch_history_uses_patch_argument() {
         .as_str()
         .unwrap()
         .contains("*** Begin Patch"));
+}
+
+#[tokio::test]
+async fn chat_payload_replays_reasoning_content_for_a_followup_turn() {
+    let fake_state = FakeUpstreamState::default();
+    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let fake_addr = fake_listener.local_addr().unwrap();
+    let fake_app = Router::new()
+        .route("/chat/completions", post(fake_final_chat_completions))
+        .with_state(fake_state.clone());
+    tokio::spawn(async move {
+        axum::serve(fake_listener, fake_app).await.unwrap();
+    });
+
+    let data_dir = temp_workspace("reasoning-content-followup");
+    let config = test_config_with_upstream(data_dir.clone(), fake_addr);
+    let store = Store::open(&config.data_dir).await.unwrap();
+    let proxy_state = ProxyState::for_test(config, store);
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_app = Router::new()
+        .route("/v1/responses", post(responses))
+        .with_state(proxy_state);
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{proxy_addr}/v1/responses"))
+        .json(&json!({
+            "id": "resp_reasoning_followup",
+            "model": "deepseek-v4-pro",
+            "stream": false,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "first question" }]
+                },
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{ "type": "summary_text", "text": "reasoning marker" }],
+                    "content": []
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "first answer" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "second question" }]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let requests = fake_state
+        .requests
+        .lock()
+        .expect("fake upstream lock poisoned")
+        .clone();
+    assert_eq!(requests.len(), 1);
+    let messages = requests[0]["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("assistant replay message");
+    assert_eq!(assistant["content"], "first answer");
+    assert_eq!(assistant["reasoning_content"], "reasoning marker");
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn full_context_runtime_storage_keeps_bounded_reasoning_content() {
+    let message = ChatMessage::assistant_with_reasoning(
+        "answer",
+        "reasoning that must remain available for the next replay",
+    );
+    let stored = full_context_current_turn_messages(&[message]);
+
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0]["content"], "answer");
+    assert_eq!(
+        stored[0]["reasoning_content"],
+        "reasoning that must remain available for the next replay"
+    );
 }

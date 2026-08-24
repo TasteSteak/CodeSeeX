@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use codeseex_core::{AppConfig, UserConfig};
+use codeseex_core::{AppConfig, UserConfig, VisionAnalyzeBackend, VisionImageDetail};
 use reqwest::header;
 use serde_json::{json, Map, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::permissions::ToolPermissionError;
@@ -17,9 +18,15 @@ pub(crate) const GENERATE_TOOL_NAME: &str = "vision_generate";
 pub(crate) const GENERATE_ALIAS_TOOL_NAME: &str = "image_gen";
 pub(crate) const ANALYZE_URL_KEY: &str = "VISION_ANALYZE_URL";
 pub(crate) const ANALYZE_MODEL_KEY: &str = "VISION_ANALYZE_MODEL";
+pub(crate) const ANALYZE_BACKEND_KEY: &str = "VISION_ANALYZE_BACKEND";
+pub(crate) const IMAGE_DETAIL_KEY: &str = "VISION_IMAGE_DETAIL";
 pub(crate) const GENERATE_URL_KEY: &str = "VISION_GENERATE_URL";
 pub(crate) const GENERATE_MODEL_KEY: &str = "VISION_GENERATE_MODEL";
+pub(crate) const ANALYZE_API_KEY_KEY: &str = "VISION_ANALYZE_API_KEY";
+pub(crate) const GENERATE_API_KEY_KEY: &str = "VISION_GENERATE_API_KEY";
 pub(crate) const API_KEY_KEY: &str = "VISION_API_KEY";
+const DEEPSEEK_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
+const DEEPSEEK_VISION_ENDPOINT: &str = "https://api.deepseek.com/responses";
 
 const MAX_IMAGE_REFERENCES: usize = 4;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -35,6 +42,8 @@ struct VisionAnalyzeConfig {
     request_url: String,
     model: String,
     api_key: String,
+    backend: VisionAnalyzeBackend,
+    image_detail: VisionImageDetail,
 }
 
 #[derive(Debug, Clone)]
@@ -56,18 +65,89 @@ enum GenerateEndpointKind {
     Responses,
 }
 
-pub(crate) fn config_keys() -> [&'static str; 5] {
+pub(crate) fn config_keys() -> [&'static str; 9] {
     [
+        ANALYZE_BACKEND_KEY,
+        IMAGE_DETAIL_KEY,
         ANALYZE_URL_KEY,
         ANALYZE_MODEL_KEY,
         GENERATE_URL_KEY,
         GENERATE_MODEL_KEY,
+        ANALYZE_API_KEY_KEY,
+        GENERATE_API_KEY_KEY,
         API_KEY_KEY,
     ]
 }
 
-pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec<Value> {
+pub(crate) fn analyze_registry_config_fields(
+    app_config: &AppConfig,
+    settings: &BTreeMap<String, String>,
+) -> Vec<Value> {
     vec![
+        json!({
+            "key": ANALYZE_BACKEND_KEY,
+            "type": "segmented",
+            "labelKey": "visionAnalyzeBackend",
+            "label": "Image understanding backend",
+            "descriptionKey": "visionAnalyzeBackendHint",
+            "description": "Choose DeepSeek Vision or a custom OpenAI-compatible image understanding endpoint.",
+            "options": [
+                { "value": "deepseek", "labelKey": "visionAnalyzeBackend_deepseek", "label": "DeepSeek Vision" },
+                { "value": "external", "labelKey": "visionAnalyzeBackend_external", "label": "Custom model" }
+            ],
+            "defaultValue": "deepseek",
+            "value": settings.get(ANALYZE_BACKEND_KEY).cloned().unwrap_or_else(|| "deepseek".to_owned())
+        }),
+        json!({
+            "key": IMAGE_DETAIL_KEY,
+            "type": "segmented",
+            "labelKey": "visionImageDetail",
+            "label": "Image detail",
+            "descriptionKey": "visionImageDetailHint",
+            "description": "Controls image processing detail. DeepSeek currently treats auto as original.",
+            "options": [
+                { "value": "auto", "labelKey": "visionImageDetail_auto", "label": "Auto" },
+                { "value": "low", "labelKey": "visionImageDetail_low", "label": "Low" },
+                { "value": "original", "labelKey": "visionImageDetail_original", "label": "Original" }
+            ],
+            "defaultValue": "auto",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" },
+            "value": settings.get(IMAGE_DETAIL_KEY).cloned().unwrap_or_else(|| "auto".to_owned())
+        }),
+        json!({
+            "key": "DEEPSEEK_VISION_MODEL_EFFECTIVE",
+            "type": "readonly",
+            "labelKey": "visionDeepSeekModel",
+            "label": "DeepSeek Vision model",
+            "descriptionKey": "visionDeepSeekModelHint",
+            "description": "The official image understanding model is managed by CodeSeeX and is not added to the main Agent model catalog.",
+            "value": DEEPSEEK_VISION_MODEL,
+            "width": "compact",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
+        }),
+        json!({
+            "key": "DEEPSEEK_VISION_ENDPOINT_EFFECTIVE",
+            "type": "readonly",
+            "labelKey": "visionDeepSeekEndpoint",
+            "label": "DeepSeek Vision endpoint",
+            "descriptionKey": "visionDeepSeekEndpointHint",
+            "description": "Image understanding is sent directly to the official Responses API and never loops through the local CodeSeeX endpoint.",
+            "value": DEEPSEEK_VISION_ENDPOINT,
+            "width": "wide",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
+        }),
+        json!({
+            "key": "DEEPSEEK_VISION_CREDENTIAL_STATUS",
+            "type": "readonly",
+            "labelKey": "visionDeepSeekCredential",
+            "label": "DeepSeek credential",
+            "descriptionKey": "visionDeepSeekCredentialHint",
+            "description": "Uses the safe DeepSeek credential source. The key is never shown here.",
+            "valueKey": if deepseek_vision_api_key(app_config).is_some() { "secretConfigured" } else { "secretNotConfigured" },
+            "value": if deepseek_vision_api_key(app_config).is_some() { "Configured" } else { "Not configured" },
+            "width": "compact",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
+        }),
         json!({
             "key": ANALYZE_URL_KEY,
             "type": "text",
@@ -78,6 +158,7 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "placeholderKey": "visionAnalyzeRequestUrlPlaceholder",
             "placeholder": "https://api.example.com/v1/responses",
             "width": "wide",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "external" },
             "value": setting_value(settings, ANALYZE_URL_KEY)
         }),
         json!({
@@ -90,17 +171,40 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "placeholderKey": "visionAnalyzeModelPlaceholder",
             "placeholder": "gpt-4o-mini",
             "width": "compact",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "external" },
             "value": setting_value(settings, ANALYZE_MODEL_KEY)
         }),
+        json!({
+            "key": ANALYZE_API_KEY_KEY,
+            "type": "password",
+            "labelKey": "visionAnalyzeApiKey",
+            "label": "Image understanding API key",
+            "descriptionKey": "visionAnalyzeApiKeyHint",
+            "description": "Bearer token used only by the custom image understanding endpoint.",
+            "placeholderKey": "visionApiKeyPlaceholder",
+            "placeholder": "sk-...",
+            "width": "wide",
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "external" },
+            "value": "",
+            "configured": settings
+                .get(ANALYZE_API_KEY_KEY)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        }),
+    ]
+}
+
+pub(crate) fn generate_registry_config_fields(settings: &BTreeMap<String, String>) -> Vec<Value> {
+    vec![
         json!({
             "key": GENERATE_URL_KEY,
             "type": "text",
             "labelKey": "visionGenerateRequestUrl",
             "label": "Generate request URL",
             "descriptionKey": "visionGenerateRequestUrlHint",
-            "description": "Complete OpenAI-compatible image generation endpoint. Prefer /responses; use /images/generations only for the official image-model API.",
+            "description": "Complete OpenAI-compatible image generation endpoint.",
             "placeholderKey": "visionGenerateRequestUrlPlaceholder",
-            "placeholder": "https://api.example.com/v1/responses",
+            "placeholder": "https://api.example.com/v1/images/generations",
             "width": "wide",
             "value": settings.get(GENERATE_URL_KEY).cloned().unwrap_or_default()
         }),
@@ -110,27 +214,24 @@ pub(crate) fn registry_config_fields(settings: &BTreeMap<String, String>) -> Vec
             "labelKey": "visionGenerateModel",
             "label": "Generate model",
             "descriptionKey": "visionGenerateModelHint",
-            "description": "Model name sent to the Vision image generation endpoint.",
+            "description": "Model name sent to the image generation endpoint.",
             "placeholderKey": "visionGenerateModelPlaceholder",
             "placeholder": "gpt-image-1",
             "width": "compact",
             "value": settings.get(GENERATE_MODEL_KEY).cloned().unwrap_or_default()
         }),
         json!({
-            "key": API_KEY_KEY,
+            "key": GENERATE_API_KEY_KEY,
             "type": "password",
-            "labelKey": "visionApiKey",
-            "label": "API key",
-            "descriptionKey": "visionApiKeyHint",
-            "description": "Bearer token used only by the Vision module.",
+            "labelKey": "visionGenerateApiKey",
+            "label": "Image generation API key",
+            "descriptionKey": "visionGenerateApiKeyHint",
+            "description": "Bearer token used only by image generation.",
             "placeholderKey": "visionApiKeyPlaceholder",
             "placeholder": "sk-...",
             "width": "wide",
             "value": "",
-            "configured": settings
-                .get(API_KEY_KEY)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
+            "configured": settings.get(GENERATE_API_KEY_KEY).is_some_and(|value| !value.trim().is_empty())
         }),
     ]
 }
@@ -147,6 +248,7 @@ pub(crate) async fn execute(
     current_image_refs: &[String],
     arguments: &Value,
 ) -> Value {
+    let started = Instant::now();
     let config = match VisionAnalyzeConfig::load(app_config) {
         Ok(config) => config,
         Err(error) => return error,
@@ -177,11 +279,24 @@ pub(crate) async fn execute(
             "message": "vision_analyze requires image_url/image_urls/url/urls/image/images or workspace path/paths. No image references were found in the current request."
         });
     }
-    let payload = match endpoint_kind {
-        VisualEndpointKind::ChatCompletions => {
+    let payload = match (endpoint_kind, config.backend) {
+        (VisualEndpointKind::ChatCompletions, VisionAnalyzeBackend::Deepseek) => {
+            chat_completions_payload_with_detail(
+                &config.model,
+                &prompt,
+                &images,
+                config.image_detail,
+            )
+        }
+        (VisualEndpointKind::Responses, VisionAnalyzeBackend::Deepseek) => {
+            responses_payload_with_detail(&config.model, &prompt, &images, config.image_detail)
+        }
+        (VisualEndpointKind::ChatCompletions, VisionAnalyzeBackend::External) => {
             chat_completions_payload(&config.model, &prompt, &images)
         }
-        VisualEndpointKind::Responses => responses_payload(&config.model, &prompt, &images),
+        (VisualEndpointKind::Responses, VisionAnalyzeBackend::External) => {
+            responses_payload(&config.model, &prompt, &images)
+        }
     };
     let response = match client
         .post(endpoint.clone())
@@ -200,7 +315,6 @@ pub(crate) async fn execute(
                 "tool": ANALYZE_TOOL_NAME,
                 "error": "request_failed",
                 "message": format!("Vision request failed: {}", request_error_message(&error)),
-                "prompt_sent": prompt,
                 "prompt_source": prompt_source
             });
         }
@@ -216,7 +330,6 @@ pub(crate) async fn execute(
             "error": "upstream_error",
             "status": status.as_u16(),
             "message": message,
-            "prompt_sent": prompt,
             "prompt_source": prompt_source
         });
     }
@@ -229,7 +342,6 @@ pub(crate) async fn execute(
                 "tool": ANALYZE_TOOL_NAME,
                 "error": "invalid_response",
                 "message": format!("Vision endpoint returned invalid JSON: {error}"),
-                "prompt_sent": prompt,
                 "prompt_source": prompt_source
             });
         }
@@ -244,7 +356,6 @@ pub(crate) async fn execute(
             "status": status.as_u16(),
             "model": config.model,
             "image_count": images.len(),
-            "prompt_sent": prompt,
             "prompt_source": prompt_source,
             "response_shape": response_shape_summary(&body)
         });
@@ -253,12 +364,15 @@ pub(crate) async fn execute(
     json!({
         "ok": true,
         "tool": ANALYZE_TOOL_NAME,
+        "provider": analyze_backend_name(config.backend),
+        "backend": analyze_backend_name(config.backend),
         "model": config.model,
         "endpoint_kind": endpoint_kind_name(endpoint_kind),
+        "image_detail": image_detail_name(config.image_detail),
         "image_count": images.len(),
-        "prompt_sent": prompt,
         "prompt_source": prompt_source,
         "text": text,
+        "duration_ms": started.elapsed().as_millis() as u64,
         "usage": body.get("usage").cloned().unwrap_or(Value::Null)
     })
 }
@@ -269,6 +383,7 @@ pub(crate) async fn execute_generate(
     tool_name: &'static str,
     arguments: &Value,
 ) -> Value {
+    let started = Instant::now();
     let config = match VisionGenerateConfig::load(app_config, tool_name) {
         Ok(config) => config,
         Err(error) => return error,
@@ -311,8 +426,7 @@ pub(crate) async fn execute_generate(
                 "ok": false,
                 "tool": tool_name,
                 "error": "request_failed",
-                "message": format!("Vision generation request failed: {}", request_error_message(&error)),
-                "prompt_sent": prompt
+                "message": format!("Vision generation request failed: {}", request_error_message(&error))
             });
         }
     };
@@ -327,8 +441,7 @@ pub(crate) async fn execute_generate(
             "tool": tool_name,
             "error": "upstream_error",
             "status": status.as_u16(),
-            "message": message,
-            "prompt_sent": prompt
+            "message": message
         });
     }
 
@@ -339,8 +452,7 @@ pub(crate) async fn execute_generate(
                 "ok": false,
                 "tool": tool_name,
                 "error": "invalid_response",
-                "message": format!("Vision generation endpoint returned invalid JSON: {error}"),
-                "prompt_sent": prompt
+                "message": format!("Vision generation endpoint returned invalid JSON: {error}")
             });
         }
     };
@@ -356,7 +468,6 @@ pub(crate) async fn execute_generate(
             "message": "Vision generation endpoint returned JSON but no readable image URL or base64 image.",
             "status": status.as_u16(),
             "model": config.model,
-            "prompt_sent": prompt,
             "response_shape": response_shape_summary(&body)
         });
     }
@@ -367,9 +478,9 @@ pub(crate) async fn execute_generate(
         "model": config.model,
         "endpoint_kind": generation_endpoint_kind_name(endpoint_kind),
         "image_count": images.len(),
-        "prompt_sent": prompt,
         "images_markdown": generated_images_markdown(&images),
         "images": images,
+        "duration_ms": started.elapsed().as_millis() as u64,
         "usage": body.get("usage").cloned().unwrap_or(Value::Null)
     })
 }
@@ -377,9 +488,30 @@ pub(crate) async fn execute_generate(
 impl VisionAnalyzeConfig {
     fn load(app_config: &AppConfig) -> Result<Self, Value> {
         let settings = read_tool_settings(app_config);
+        let backend = parse_analyze_backend(&settings);
+        let image_detail = parse_image_detail(settings.get(IMAGE_DETAIL_KEY));
+        if backend == VisionAnalyzeBackend::Deepseek {
+            let api_key = deepseek_vision_api_key(app_config);
+            return api_key
+                .filter(|value| !value.trim().is_empty())
+                .map(|api_key| Self {
+                    request_url: DEEPSEEK_VISION_ENDPOINT.to_owned(),
+                    model: DEEPSEEK_VISION_MODEL.to_owned(),
+                    api_key,
+                    backend,
+                    image_detail,
+                })
+                .ok_or_else(|| unavailable(
+                    ANALYZE_TOOL_NAME,
+                    vec!["DEEPSEEK_API_KEY"],
+                    Some("DeepSeek Vision is unavailable because the DeepSeek API key is not configured.".to_owned()),
+                ));
+        }
         let request_url = setting_value_opt(&settings, ANALYZE_URL_KEY);
         let model = setting_value_opt(&settings, ANALYZE_MODEL_KEY);
-        let api_key = setting_value_opt(&settings, API_KEY_KEY);
+        let api_key = crate::secrets::vision_analyze_api_key(app_config)
+            .or_else(|| setting_value_opt(&settings, ANALYZE_API_KEY_KEY))
+            .or_else(|| setting_value_opt(&settings, API_KEY_KEY));
         let mut missing = Vec::new();
         if request_url.is_none() {
             missing.push(ANALYZE_URL_KEY);
@@ -388,7 +520,7 @@ impl VisionAnalyzeConfig {
             missing.push(ANALYZE_MODEL_KEY);
         }
         if api_key.is_none() {
-            missing.push(API_KEY_KEY);
+            missing.push(ANALYZE_API_KEY_KEY);
         }
         if !missing.is_empty() {
             return Err(unavailable(ANALYZE_TOOL_NAME, missing, None));
@@ -397,8 +529,15 @@ impl VisionAnalyzeConfig {
             request_url: request_url.unwrap_or_default(),
             model: model.unwrap_or_default(),
             api_key: api_key.unwrap_or_default(),
+            backend,
+            image_detail,
         })
     }
+}
+
+fn deepseek_vision_api_key(app_config: &AppConfig) -> Option<String> {
+    let _ = app_config;
+    codeseex_core::codex_auth::read_deepseek_api_key()
 }
 
 impl VisionGenerateConfig {
@@ -412,7 +551,8 @@ impl VisionGenerateConfig {
             .get(GENERATE_MODEL_KEY)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let api_key = setting_value_opt(&settings, API_KEY_KEY);
+        let api_key = crate::secrets::vision_generate_api_key(app_config)
+            .or_else(|| setting_value_opt(&settings, GENERATE_API_KEY_KEY));
         let mut missing = Vec::new();
         if request_url.is_none() {
             missing.push(GENERATE_URL_KEY);
@@ -421,7 +561,7 @@ impl VisionGenerateConfig {
             missing.push(GENERATE_MODEL_KEY);
         }
         if api_key.is_none() {
-            missing.push(API_KEY_KEY);
+            missing.push(GENERATE_API_KEY_KEY);
         }
         if !missing.is_empty() {
             return Err(unavailable(tool_name, missing, None));
@@ -439,10 +579,46 @@ fn read_tool_settings(app_config: &AppConfig) -> BTreeMap<String, String> {
         .ok()
         .map(|config| crate::config_payload::tool_settings_from_user_config(&config))
         .unwrap_or_default();
-    if let Some(api_key) = crate::secrets::vision_api_key(app_config) {
-        settings.insert(API_KEY_KEY.to_owned(), api_key);
+    if let Some(api_key) = crate::secrets::vision_analyze_api_key(app_config) {
+        settings.insert(ANALYZE_API_KEY_KEY.to_owned(), api_key);
+    }
+    if let Some(api_key) = crate::secrets::vision_generate_api_key(app_config) {
+        settings.insert(GENERATE_API_KEY_KEY.to_owned(), api_key);
     }
     settings
+}
+
+fn parse_analyze_backend(settings: &BTreeMap<String, String>) -> VisionAnalyzeBackend {
+    let value = settings
+        .get(ANALYZE_BACKEND_KEY)
+        .map(String::as_str)
+        .or_else(|| {
+            (settings.contains_key(ANALYZE_URL_KEY) || settings.contains_key(ANALYZE_MODEL_KEY))
+                .then_some("external")
+        });
+    match value
+        .unwrap_or("deepseek")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "external" | "custom" => VisionAnalyzeBackend::External,
+        _ => VisionAnalyzeBackend::Deepseek,
+    }
+}
+
+fn parse_image_detail(value: Option<&String>) -> VisionImageDetail {
+    match value
+        .map(String::as_str)
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "low" => VisionImageDetail::Low,
+        "original" => VisionImageDetail::Original,
+        _ => VisionImageDetail::Auto,
+    }
 }
 
 fn setting_value_opt(settings: &BTreeMap<String, String>, key: &'static str) -> Option<String> {
@@ -527,6 +703,26 @@ fn chat_completions_payload(model: &str, prompt: &str, images: &[String]) -> Val
     })
 }
 
+fn chat_completions_payload_with_detail(
+    model: &str,
+    prompt: &str,
+    images: &[String],
+    detail: VisionImageDetail,
+) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": prompt })];
+    content.extend(images.iter().map(|url| {
+        json!({
+            "type": "image_url",
+            "image_url": { "url": url, "detail": image_detail_name(detail) }
+        })
+    }));
+    json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": content }],
+        "stream": false
+    })
+}
+
 fn responses_payload(model: &str, prompt: &str, images: &[String]) -> Value {
     let mut content = vec![json!({ "type": "input_text", "text": prompt })];
     content.extend(images.iter().map(|url| {
@@ -539,6 +735,42 @@ fn responses_payload(model: &str, prompt: &str, images: &[String]) -> Value {
         "model": model,
         "input": [{ "role": "user", "content": content }]
     })
+}
+
+fn responses_payload_with_detail(
+    model: &str,
+    prompt: &str,
+    images: &[String],
+    detail: VisionImageDetail,
+) -> Value {
+    let mut content = vec![json!({ "type": "input_text", "text": prompt })];
+    content.extend(images.iter().map(|url| {
+        json!({
+            "type": "input_image",
+            "image_url": url,
+            "detail": image_detail_name(detail)
+        })
+    }));
+    json!({
+        "model": model,
+        "input": [{ "role": "user", "content": content }],
+        "stream": false
+    })
+}
+
+fn analyze_backend_name(backend: VisionAnalyzeBackend) -> &'static str {
+    match backend {
+        VisionAnalyzeBackend::Deepseek => "deepseek",
+        VisionAnalyzeBackend::External => "external",
+    }
+}
+
+fn image_detail_name(detail: VisionImageDetail) -> &'static str {
+    match detail {
+        VisionImageDetail::Auto => "auto",
+        VisionImageDetail::Low => "low",
+        VisionImageDetail::Original => "original",
+    }
 }
 
 fn endpoint_kind_name(kind: VisualEndpointKind) -> &'static str {
@@ -2133,7 +2365,7 @@ mod tests {
             format!("http://{addr}/v1/images/generations"),
         );
         settings.insert(GENERATE_MODEL_KEY.to_owned(), "gpt-image-1".to_owned());
-        settings.insert(API_KEY_KEY.to_owned(), "test-key".to_owned());
+        settings.insert(GENERATE_API_KEY_KEY.to_owned(), "test-key".to_owned());
         UserConfig {
             tools: Some(codeseex_core::UserToolsConfig {
                 settings: Some(settings),
@@ -2154,10 +2386,7 @@ mod tests {
         .await;
 
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
-        assert_eq!(
-            result.get("prompt_sent").and_then(Value::as_str),
-            Some(prompt)
-        );
+        assert!(result.get("prompt_sent").is_none());
         let serialized = serde_json::to_string(&result).expect("result json");
         assert!(!serialized.contains("model_instruction"));
         assert!(!serialized.contains("iVBOR"));

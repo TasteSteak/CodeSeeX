@@ -25,6 +25,19 @@ impl ChatMessage {
         }
     }
 
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: Some(reasoning_content.into()),
+        }
+    }
+
     pub fn assistant_tool_calls(tool_calls: Vec<Value>, content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_owned(),

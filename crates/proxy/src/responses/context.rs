@@ -211,7 +211,13 @@ async fn response_history_context(
             if !tool_messages.is_empty() {
                 messages.extend(tool_messages);
             } else if let Some(text) = response_output_text(&record.response) {
-                messages.push(ChatMessage::text("assistant", text));
+                let reasoning =
+                    response_output_reasoning_text(&record.response, &config).unwrap_or_default();
+                if reasoning.trim().is_empty() {
+                    messages.push(ChatMessage::text("assistant", text));
+                } else {
+                    messages.push(ChatMessage::assistant_with_reasoning(text, reasoning));
+                }
             }
         }
         previous_tool_call_ids = if record.status == RequestStatus::Completed {

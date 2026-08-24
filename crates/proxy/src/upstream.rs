@@ -1,11 +1,82 @@
 use codeseex_core::codex_auth::read_codex_auth_api_key;
-use codeseex_core::config::UpstreamConfig;
-use codeseex_core::urls::chat_completions_url;
+use codeseex_core::config::{UpstreamConfig, UpstreamTransport};
+use codeseex_core::urls::{chat_completions_url, is_official_deepseek_url, responses_url};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
+use url::Url;
 
 pub(crate) mod deepseek;
 pub(crate) mod payload;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectedUpstreamTransport {
+    NativeResponses,
+    ChatCompat,
+}
+
+/// Official DeepSeek models use the Responses API by default. Chat
+/// compatibility is an explicit experimental recovery path; custom endpoints
+/// stay on Chat compatibility unless a user deliberately forces native mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeResponsesEligibility {
+    Verified,
+    EndpointNotVerified,
+}
+
+impl NativeResponsesEligibility {
+    pub(crate) fn message(self, _model: &str) -> String {
+        match self {
+            Self::Verified => "DeepSeek Responses is selected for this request.".to_owned(),
+            Self::EndpointNotVerified => {
+                "CodeSeeX supports native Responses only for the canonical https://api.deepseek.com endpoint. Use Chat API compatibility for a custom endpoint.".to_owned()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpstreamTransportSelection {
+    Selected(SelectedUpstreamTransport),
+    NativeResponsesUnavailable(NativeResponsesEligibility),
+}
+
+pub(crate) fn native_responses_eligibility(
+    upstream: &UpstreamConfig,
+    model: &str,
+) -> NativeResponsesEligibility {
+    let official_endpoint = Url::parse(&upstream.base_url)
+        .ok()
+        .as_ref()
+        .is_some_and(is_official_deepseek_url);
+    if !official_endpoint {
+        return NativeResponsesEligibility::EndpointNotVerified;
+    }
+    let _ = model;
+    NativeResponsesEligibility::Verified
+}
+
+pub(crate) fn select_transport(
+    upstream: &UpstreamConfig,
+    model: &str,
+) -> UpstreamTransportSelection {
+    match upstream.transport {
+        UpstreamTransport::ChatCompat => {
+            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat)
+        }
+        UpstreamTransport::Auto => match native_responses_eligibility(upstream, model) {
+            NativeResponsesEligibility::Verified => {
+                UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+            }
+            _ => UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat),
+        },
+        UpstreamTransport::NativeResponses => match native_responses_eligibility(upstream, model) {
+            NativeResponsesEligibility::Verified => {
+                UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+            }
+            reason => UpstreamTransportSelection::NativeResponsesUnavailable(reason),
+        },
+    }
+}
 
 pub async fn post_chat_completions(
     client: &reqwest::Client,
@@ -38,6 +109,39 @@ pub async fn post_chat_completions(
         .json(&payload)
         .send()
         .await
+}
+
+pub async fn post_responses(
+    client: &reqwest::Client,
+    upstream: &UpstreamConfig,
+    inbound_auth: Option<&str>,
+    local_access_token: Option<&str>,
+    auth_context_payload: Option<&Value>,
+    payload: Value,
+) -> anyhow::Result<reqwest::Response> {
+    let url = responses_url(&upstream.base_url)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/json, text/event-stream"),
+    );
+
+    let auth_payload = auth_context_payload.unwrap_or(&payload);
+    if let Some(auth) =
+        resolve_authorization_header(upstream, inbound_auth, local_access_token, auth_payload)
+    {
+        if let Ok(value) = HeaderValue::from_str(&auth) {
+            headers.insert(AUTHORIZATION, value);
+        }
+    }
+
+    Ok(client
+        .post(url)
+        .headers(headers)
+        .json(&payload)
+        .send()
+        .await?)
 }
 
 fn resolve_authorization_header(
@@ -174,14 +278,94 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use codeseex_core::models::MODEL_FLASH;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone, Default)]
+    struct NativeRequestCapture {
+        headers: Arc<Mutex<Option<HeaderMap>>>,
+        payload: Arc<Mutex<Option<Value>>>,
+    }
+
+    async fn fake_native_responses(
+        State(capture): State<NativeRequestCapture>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        *capture.headers.lock().expect("headers mutex") = Some(headers);
+        *capture.payload.lock().expect("payload mutex") = Some(payload);
+        Json(serde_json::json!({ "object": "response", "status": "completed" }))
+    }
 
     fn upstream_with_key(api_key: Option<&str>) -> UpstreamConfig {
         UpstreamConfig {
             base_url: "https://api.deepseek.com".to_owned(),
             official_v1_compat: true,
+            transport: UpstreamTransport::Auto,
             api_key: api_key.map(str::to_owned),
             timeout_ms: 120_000,
         }
+    }
+
+    #[tokio::test]
+    async fn native_post_uses_responses_path_auth_and_exact_json_payload() {
+        let capture = NativeRequestCapture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/openai/v1/responses", post(fake_native_responses))
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let upstream = UpstreamConfig {
+            base_url: format!("http://{address}/openai/v1"),
+            transport: UpstreamTransport::NativeResponses,
+            api_key: Some("native-test-key".to_owned()),
+            ..upstream_with_key(None)
+        };
+        let payload = serde_json::json!({
+            "model": MODEL_FLASH,
+            "stream": true,
+            "input": [{ "type": "message", "role": "user", "content": [] }]
+        });
+        let response = post_responses(
+            &reqwest::Client::new(),
+            &upstream,
+            None,
+            None,
+            Some(&payload),
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.status().is_success());
+        let headers = capture
+            .headers
+            .lock()
+            .expect("headers mutex")
+            .clone()
+            .expect("captured headers");
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer native-test-key")
+        );
+        assert!(headers
+            .get(ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/event-stream")));
+        assert_eq!(
+            capture.payload.lock().expect("payload mutex").as_ref(),
+            Some(&payload)
+        );
     }
 
     #[test]
@@ -338,5 +522,61 @@ mod tests {
             .as_deref(),
             None
         );
+    }
+
+    #[test]
+    fn auto_transport_prefers_native_responses_for_every_official_model() {
+        assert_eq!(
+            select_transport(&upstream_with_key(None), "deepseek-v4-flash"),
+            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+        );
+        assert_eq!(
+            select_transport(&upstream_with_key(None), "deepseek-v4-pro"),
+            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+        );
+        assert_eq!(
+            select_transport(
+                &UpstreamConfig {
+                    base_url: "https://deepseek.example.com".to_owned(),
+                    ..upstream_with_key(None)
+                },
+                "deepseek-v4-flash"
+            ),
+            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat)
+        );
+    }
+
+    #[test]
+    fn explicit_chat_compat_is_never_changed_and_unsupported_native_is_reported() {
+        assert_eq!(
+            select_transport(
+                &UpstreamConfig {
+                    transport: UpstreamTransport::ChatCompat,
+                    ..upstream_with_key(None)
+                },
+                "deepseek-v4-flash"
+            ),
+            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat)
+        );
+        assert_eq!(
+            select_transport(
+                &UpstreamConfig {
+                    base_url: "http://127.0.0.1:9000/v1".to_owned(),
+                    transport: UpstreamTransport::NativeResponses,
+                    ..upstream_with_key(None)
+                },
+                MODEL_FLASH
+            ),
+            UpstreamTransportSelection::NativeResponsesUnavailable(
+                NativeResponsesEligibility::EndpointNotVerified
+            )
+        );
+    }
+
+    #[test]
+    fn native_eligibility_error_is_actionable_without_silently_falling_back() {
+        assert!(NativeResponsesEligibility::EndpointNotVerified
+            .message("deepseek-v4-flash")
+            .contains("custom endpoint"));
     }
 }

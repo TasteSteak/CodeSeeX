@@ -6,6 +6,6 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config = AppConfig::load_base();
+    let config = AppConfig::load();
     codeseex_proxy::serve(config).await
 }

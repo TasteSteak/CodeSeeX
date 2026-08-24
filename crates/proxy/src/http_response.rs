@@ -116,16 +116,19 @@ fn capture_sse_frame_usage(frame: &[u8], usage: &mut Value) {
 }
 
 fn find_sse_frame_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
-    buffer
+    let lf = buffer
         .windows(2)
         .enumerate()
-        .find_map(|(index, window)| (window == b"\n\n").then_some((index, 2)))
-        .or_else(|| {
-            buffer
-                .windows(4)
-                .enumerate()
-                .find_map(|(index, window)| (window == b"\r\n\r\n").then_some((index, 4)))
-        })
+        .find_map(|(index, window)| (window == b"\n\n").then_some((index, 2)));
+    let crlf = buffer
+        .windows(4)
+        .enumerate()
+        .find_map(|(index, window)| (window == b"\r\n\r\n").then_some((index, 4)));
+    match (lf, crlf) {
+        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn response_from_bytes(
@@ -202,6 +205,22 @@ mod tests {
             &mut buffer,
             &mut usage,
         );
+        assert_eq!(usage["total_tokens"], 7);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mixed_sse_delimiters_are_consumed_in_wire_order() {
+        let mut buffer = Vec::new();
+        let mut usage = Value::Null;
+        capture_stream_usage(
+            &Bytes::from_static(
+                b"data: {\"usage\":{\"total_tokens\":3}}\r\n\r\ndata: {\"usage\":{\"total_tokens\":7}}\n\n",
+            ),
+            &mut buffer,
+            &mut usage,
+        );
+
         assert_eq!(usage["total_tokens"], 7);
         assert!(buffer.is_empty());
     }

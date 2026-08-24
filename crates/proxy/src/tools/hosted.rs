@@ -14,7 +14,15 @@ pub(crate) fn is_code_tool_executable(
     name: &str,
     enabled_tools: &[String],
     community_tools: &crate::community_tools::CommunityToolSet,
+    local_web_search_enabled: bool,
 ) -> bool {
+    // Tool definitions are only the first ownership boundary. An upstream may
+    // still emit an undeclared tool call, so do not let the system-hosted
+    // allowlist re-enable local search after the user selected the official
+    // provider-owned backend.
+    if crate::tools::ownership::is_web_search_tool(name) && !local_web_search_enabled {
+        return false;
+    }
     crate::tools::is_executable_tool_enabled(name, enabled_tools)
         || community_tools.is_executable_tool(name)
 }
@@ -116,6 +124,26 @@ pub(crate) fn tool_result_event_detail(
                     "source_diagnostics": compact_web_source_diagnostic_array(result.get("source_diagnostics")),
                     "fallback_errors": compact_web_source_diagnostic_array(result.get("fallback_errors")),
                     "browser_fallback": compact_browser_fallback(result.get("browser_fallback"))
+                }),
+            );
+        }
+    }
+    if matches!(
+        call.name.as_str(),
+        "vision_analyze" | "vision_generate" | "image_gen"
+    ) {
+        if let Some(object) = detail.as_object_mut() {
+            object.insert(
+                "vision".to_owned(),
+                json!({
+                    "provider": result.get("provider").cloned().unwrap_or(Value::Null),
+                    "backend": result.get("backend").cloned().unwrap_or(Value::Null),
+                    "model": result.get("model").cloned().unwrap_or(Value::Null),
+                    "transport": result.get("endpoint_kind").cloned().unwrap_or(Value::Null),
+                    "image_count": result.get("image_count").cloned().unwrap_or(Value::Null),
+                    "image_detail": result.get("image_detail").cloned().unwrap_or(Value::Null),
+                    "duration_ms": result.get("duration_ms").cloned().unwrap_or(Value::Null),
+                    "usage": result.get("usage").cloned().unwrap_or(Value::Null)
                 }),
             );
         }
@@ -488,6 +516,30 @@ mod tests {
             name: name.to_owned(),
             arguments: "{}".to_owned(),
         }
+    }
+
+    #[test]
+    fn official_backend_refuses_unsolicited_local_web_search_at_execution_boundary() {
+        let community = crate::community_tools::CommunityToolSet::default();
+        assert!(!is_code_tool_executable(
+            "web_search",
+            &[],
+            &community,
+            false
+        ));
+        assert!(!is_code_tool_executable(
+            "web_search_preview",
+            &[],
+            &community,
+            false
+        ));
+        assert!(is_code_tool_executable("web_search", &[], &community, true));
+        assert!(is_code_tool_executable(
+            "workspace_search",
+            &["workspace_search".to_owned()],
+            &community,
+            false
+        ));
     }
 
     #[test]

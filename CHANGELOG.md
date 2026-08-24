@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.7.0 - 2026-08-25
+
+CodeSeeX 0.7.0 is the DeepSeek Responses API release. Official DeepSeek endpoints now use the native Responses transport by default, while Chat API compatibility remains available as an explicit experimental fallback.
+
+### Highlights
+
+- Added native DeepSeek Responses support for the official endpoint across supported DeepSeek models, including native SSE and Responses tool items.
+- Preserved CodeSeeX's local and DeepSeek official Web Search backends as separate, explicit choices.
+- Fixed DeepSeek thinking-mode context continuity by replaying `reasoning_content` with assistant messages.
+- Kept Codex full replay authoritative and retained atomic client-tool groups across native continuations.
+- Split image understanding and image generation into independent tools, with DeepSeek Vision support and separate credentials.
+
+### Added
+
+- Added an experimental Chat API compatibility option for upstream compatibility and controlled troubleshooting.
+- Added native Responses handling for full replay, response identity mapping, function/custom tool calls, cancellation, terminal status, and final usage.
+- Added explicit Web Search backend selection: CodeSeeX local search or DeepSeek official server-side search.
+- Added bounded reasoning replay coverage for ordinary assistant turns, tool turns, full-context storage, and compatibility budget processing.
+- Added separate image understanding and image generation tools, including DeepSeek Vision support, independent credentials, and dedicated Usage accounting.
+- Added a dedicated image-capabilities guide covering providers, limits, privacy, credentials, usage, and billing.
+- Completed the built-in language-pack key schema; untranslated newer strings explicitly use the English fallback instead of exposing raw keys.
+
+### Changed
+
+- Official `https://api.deepseek.com` requests using `auto` now select `/responses` for all configured DeepSeek models; custom endpoints remain on the conservative Chat compatibility path.
+- Chat compatibility is never selected silently after a native upstream failure. Users can choose it explicitly from Experimental settings.
+- Native Responses preserves provider event order and sequence numbers and does not synthesize Chat-style `[DONE]` frames.
+- DeepSeek thinking `reasoning_content` is retained in non-streaming and streaming assistant turns, including legacy response reconstruction and bounded full-context runtime storage.
+- Web Search backend selection never double-dispatches or silently replaces the user's selected ownership model.
+- Image understanding and image generation no longer share a tool switch or credential; DeepSeek Vision stays outside the main Codex model catalog.
+- Image understanding is enabled by default for new and upgraded configurations through a one-time capability-schema migration; later user changes remain authoritative, while image generation stays independent and disabled by default.
+- Vision usage is recorded as a separate session phase with its own token totals, latency, model, and peak/off-peak cost estimate.
+- Default Vision diagnostics keep provider, model, image count, detail mode, duration, and normalized usage without storing original images, base64, full prompts, or provider responses.
+
+### Fixed
+
+- Fixed the 0.6.0-reported thinking-mode continuity issue where assistant `reasoning_content` was dropped before the next Chat API request.
+- Fixed native tool continuation settlement so failed or incomplete upstream responses leave pending atomic tool groups available for a valid retry.
+- Fixed unknown `previous_response_id` values bypassing a matching pending native tool-group anchor.
+- Fixed bounded unterminated native SSE frames so provider response IDs are still mapped to the local Codex-facing response ID.
+- Fixed legacy Chat history reconstruction and budget processing to retain bounded reasoning content.
+- Fixed legacy Vision URL, model, and `VISION_API_KEY` values being lost when migrating from the old combined configuration.
+- Fixed legacy explicit tool lists leaving the new image-understanding capability disabled after upgrade.
+- Fixed image generation being able to reuse the new image-understanding credential or become implicitly enabled by legacy fields.
+- Fixed secret-field autosave so empty password inputs keep existing secrets while explicit replacement and clear actions still save.
+
+### Compatibility Notes
+
+- Official DeepSeek endpoints default to Responses. Select `Chat API compatibility` in Experimental settings for upstream recovery or when a request requires a CodeSeeX-owned local tool executor.
+- CodeSeeX local Web Search remains available and remains the default backend. DeepSeek official Web Search is provider-owned and may use additional tokens or provider-side search calls.
+- Custom OpenAI-compatible endpoints remain on Chat compatibility under `auto`; forcing native Responses for a custom endpoint is an advanced TOML/environment option and fails closed when unsupported.
+- CodeSeeX does not read or write Codex JSONL transcripts and does not add Codex App-specific injection to the native Responses path.
+- DeepSeek Vision requires an explicit `DEEPSEEK_API_KEY` source. Custom image understanding and image generation use separate secrets; platforms without secure credential storage fail closed instead of writing plaintext TOML.
+
 ## 0.6.0 - 2026-07-11
 
 CodeSeeX 0.6.0 is a context-runtime correctness release. It makes Codex HTTP full replay authoritative, preserves valid tool protocol groups, keeps workspace inspection bounded, and adds an in-app release-notes view with a safe offline fallback.

@@ -1,5 +1,59 @@
 # 更新日志
 
+## 0.7.0 - 2026-08-25
+
+CodeSeeX 0.7.0 是一次面向 DeepSeek Responses API 的正式适配更新。官方 DeepSeek endpoint 默认使用原生 Responses，Chat API 兼容模式保留为用户主动选择的实验性回退。
+
+### 重点更新
+
+- 官方 DeepSeek endpoint 的所有配置模型默认走原生 Responses，包括原生 SSE 和 Responses 工具项。
+- 保留 CodeSeeX 本地 Web Search 与 DeepSeek 官方 Web Search 两种独立后端，并要求用户明确选择。
+- 修复 DeepSeek thinking 模式上下文连续性，assistant 的 `reasoning_content` 会与消息一起回放。
+- 保持 Codex full replay 为权威输入，并保持原生客户端工具组的原子续接。
+- 将图像理解与图像生成拆为两个独立工具，支持 DeepSeek Vision 和独立凭据。
+
+### 新增
+
+- 在实验性设置中新增 Chat API 兼容模式，用于上游兼容和明确排障回退。
+- 新增原生 Responses 的 full replay、response identity 映射、function/custom 工具、取消、终止状态和最终用量处理。
+- 新增 Web Search 后端选择：CodeSeeX 本地搜索或 DeepSeek 官方服务端搜索。
+- 新增 reasoning 回放测试，覆盖普通 assistant turn、工具 turn、full-context 存储和兼容模式预算处理。
+- 新增独立的图像理解与图像生成工具，支持 DeepSeek Vision、独立凭据和独立 Usage 计账。
+- 新增图像能力说明文档，覆盖 provider、限制、隐私、凭据、用量与计费边界。
+- 补齐内置语言包的完整键结构；尚未翻译的新文案显式使用英文 fallback，不再显示原始 key。
+
+### 改进
+
+- `auto` 在官方 `https://api.deepseek.com` endpoint 下对所有配置模型选择 `/responses`；自定义 endpoint 继续保守使用 Chat 兼容路径。
+- Chat API 兼容是实验性显式选项；当请求必须由 CodeSeeX 本地工具执行器处理时，仍使用这条成熟的兼容路径。
+- 原生 Responses 保留 provider 事件顺序和 sequence，不再合成 Chat 风格的 `[DONE]`。
+- thinking 模式的 `reasoning_content` 在非流式、流式、旧 response 重建和有界 full-context 运行时存储中保持可回放。
+- Web Search 不会双发，也不会静默替换用户选择的搜索归属。
+- 识图与生图不再共用工具开关或凭据；DeepSeek Vision 不会加入 Codex 主模型 catalog。
+- 图像理解通过一次性能力配置迁移，在全新安装和旧配置升级后默认开启；迁移完成后继续尊重用户选择，图像生成保持独立且默认关闭。
+- Vision 用量作为独立会话阶段记录，显示自己的 token、耗时、模型和峰谷费用估算。
+- 默认 Vision 诊断只保留 provider、模型、图片数量、细节模式、耗时和归一化 usage，不保存原图、base64、完整 prompt 或 provider response。
+
+### 修复
+
+- 修复 0.6.0 已暴露的 thinking 模式连续性问题：assistant 的 `reasoning_content` 会被错误丢弃，导致下一次 Chat API 请求缺少推理上下文。
+- 修复原生工具续接在上游失败或未完成时过早结算 pending 原子工具组的问题。
+- 修复未知 `previous_response_id` 可以绕过匹配的原生 pending 工具组锚点的问题。
+- 修复无终止空行的有界原生 SSE 帧没有映射 provider response id 的问题。
+- 修复旧 Chat 历史重建和预算处理丢失有界 reasoning 内容的问题。
+- 修复旧版 Vision URL、模型和 `VISION_API_KEY` 在合并配置迁移时可能丢失的问题。
+- 修复旧版显式工具列表导致升级后新的图像理解能力仍处于关闭状态的问题。
+- 修复生图可能复用新的识图凭据，或被旧生图字段隐式启用的问题。
+- 修复密码字段 autosave：空输入保持原 secret，只有明确填写新值或勾选清除时才保存变更。
+
+### 兼容说明
+
+- 官方 DeepSeek endpoint 默认使用 Responses。上游需要回退，或请求必须由 CodeSeeX 本地工具执行器处理时，才建议在实验性设置中选择 Chat API 兼容模式。
+- CodeSeeX 本地 Web Search 继续保留并仍是默认后端；DeepSeek 官方 Web Search 由 provider 执行，可能产生额外 token 或多次服务端搜索调用。
+- 自定义 OpenAI 兼容 endpoint 在 `auto` 下继续使用 Chat 兼容；强制自定义 endpoint 使用原生 Responses 仅支持高级 TOML/环境变量，能力不兼容时会明确失败。
+- CodeSeeX 不读取或写入 Codex JSONL，也不在原生 Responses 路径中增加 Codex App 专用注入。
+- DeepSeek Vision 需要明确的 `DEEPSEEK_API_KEY` 来源；自定义识图与生图使用独立 secret。没有安全凭据库的平台会 fail closed，不会把密钥写回明文 TOML。
+
 ## 0.6.0 - 2026-07-11
 
 CodeSeeX 0.6.0 是一次上下文运行时正确性更新。它将 Codex HTTP full replay 作为权威输入，保持工具协议组完整，限制 workspace 工具输出，并新增带安全离线回退的应用内更新日志。

@@ -5,25 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/panels.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/cards.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/forms.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/lists.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/menus.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/components/toml.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/pages/config.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/pages/about.css?v=0.6.0">
-  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.6.0">
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.7.0">
 </head>
 <body>
   <div class="layout-container">
@@ -309,6 +309,20 @@
                 <div class="setting-divider"></div>
 
                 <div class="setting-item">
+                  <span>
+                    <label data-i18n="webSearchBackend">Web Search backend</label>
+                    <small class="muted" data-i18n="webSearchBackendHint">Local keeps CodeSeeX's bounded search. Official lets DeepSeek search server-side and may use more tokens. CodeSeeX uses only the selected backend.</small>
+                  </span>
+                  <div class="segmented-control compact-segmented-control" id="ctrl-web-search-backend">
+                    <input type="radio" name="WEB_SEARCH_BACKEND" id="web_search_backend_local" value="local" checked>
+                    <label for="web_search_backend_local" data-i18n="webSearchBackend_local">CodeSeeX local</label>
+                    <input type="radio" name="WEB_SEARCH_BACKEND" id="web_search_backend_official" value="official">
+                    <label for="web_search_backend_official" data-i18n="webSearchBackend_official">DeepSeek official</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
                   <span data-i18n="showThinking">Show thinking</span>
                   <label class="toggle-switch">
                     <input type="checkbox" id="SHOW_THINKING">
@@ -504,6 +518,32 @@
                         </div>
                       </div>
                     </div>
+                    <div class="billing-rate-card">
+                      <div class="billing-card-header">
+                        <div class="billing-model-meta">
+                          <strong data-i18n="billingVision">Vision</strong>
+                          <small class="muted" data-i18n="billingVisionHint">DeepSeek image understanding</small>
+                        </div>
+                        <span class="billing-model-badge" data-i18n="billingVisionBadge">Image</span>
+                      </div>
+                      <div class="billing-row">
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
+                          <input type="number" id="BILLING_VISION_CACHED_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
+                          <input type="number" id="BILLING_VISION_CACHE_MISS_INPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                        <div class="billing-field">
+                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
+                          <input type="number" id="BILLING_VISION_OUTPUT_CNY" step="0.001">
+                          <span class="billing-suffix">CNY</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div class="setting-divider"></div>
@@ -516,6 +556,19 @@
 
               <div class="config-tab-panel" data-config-panel="experimental">
                 <h3 class="config-section-title" data-i18n="experimentalFeatures">Experimental features</h3>
+                <div class="setting-item">
+                  <span>
+                    <label data-i18n="deepseekTransport">Chat API compatibility</label>
+                    <small class="muted" data-i18n="deepseekTransportHint">Official DeepSeek uses Responses by default. Select Chat compatibility for upstream recovery or when a request requires a CodeSeeX-owned local tool executor.</small>
+                  </span>
+                  <div class="segmented-control compact-segmented-control" id="ctrl-deepseek-transport">
+                    <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_auto" value="auto" checked>
+                    <label for="transport_auto" data-i18n="deepseekTransport_auto">Official Responses</label>
+                    <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_chat" value="chat_compat">
+                    <label for="transport_chat" data-i18n="deepseekTransport_chat">Chat API compatibility</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
                 <div class="setting-item">
                   <span>
                     <span data-i18n="deepseekOfficialV1Compat">Official DeepSeek request path</span>

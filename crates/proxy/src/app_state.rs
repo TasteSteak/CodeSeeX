@@ -1,4 +1,5 @@
 use crate::manager_service::ReleaseNotesCache;
+use crate::native_coordinator::NativePendingToolGroups;
 use crate::responses::canonical::CanonicalSessionCore;
 use crate::runtime_config::RuntimeConfigService;
 use crate::telemetry::TelemetryHub;
@@ -15,6 +16,9 @@ pub(crate) struct ProxyState {
     pub(crate) telemetry: TelemetryHub,
     pub(crate) canonical_sessions: CanonicalSessionCore,
     pub(crate) release_notes: ReleaseNotesCache,
+    /// RAM-only state used solely to coordinate a complete native tool group.
+    /// It is not a conversation transcript and is discarded on restart.
+    pub(crate) native_pending_tool_groups: NativePendingToolGroups,
     pub(crate) v1_access_token: String,
 }
 
@@ -27,6 +31,7 @@ impl ProxyState {
             telemetry: TelemetryHub::new(),
             canonical_sessions: CanonicalSessionCore::default(),
             release_notes: ReleaseNotesCache::default(),
+            native_pending_tool_groups: NativePendingToolGroups::default(),
             v1_access_token,
         }
     }

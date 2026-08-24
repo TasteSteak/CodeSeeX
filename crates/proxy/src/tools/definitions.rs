@@ -18,11 +18,22 @@ const DEFAULT_CONFIGURABLE_HOSTED_TOOL_IDS: &[&str] = &[
     "vision_analyze",
 ];
 
-pub fn upstream_tool_definitions(enabled_ids: &[String]) -> Vec<Value> {
+/// Builds CodeSeeX-owned tool declarations while keeping local Web Search an
+/// explicit capability. `official` search cannot run on Chat compatibility,
+/// so that route must omit this declaration instead of exposing a local tool
+/// under an official-search setting.
+pub fn upstream_tool_definitions_with_local_web_search(
+    enabled_ids: &[String],
+    include_local_web_search: bool,
+) -> Vec<Value> {
     let enabled = enabled_set(enabled_ids);
     CODEX_NATIVE_TOOL_IDS
         .iter()
-        .chain(CODESEEX_SYSTEM_HOSTED_TOOL_IDS.iter())
+        .chain(
+            CODESEEX_SYSTEM_HOSTED_TOOL_IDS
+                .iter()
+                .filter(|_| include_local_web_search),
+        )
         .chain(
             CODESEEX_CONFIGURABLE_HOSTED_TOOL_IDS
                 .iter()
@@ -36,10 +47,9 @@ pub fn is_executable_tool_enabled(name: &str, enabled_ids: &[String]) -> bool {
     let name = canonical_tool_id(name);
     CODESEEX_SYSTEM_HOSTED_TOOL_IDS.contains(&name)
         || (CODESEEX_CONFIGURABLE_HOSTED_TOOL_IDS.contains(&name)
-            && enabled_ids.iter().any(|id| {
-                let enabled_id = canonical_tool_id(id.as_str());
-                enabled_id == name || (name == "image_gen" && enabled_id == "vision_analyze")
-            }))
+            && enabled_ids
+                .iter()
+                .any(|id| canonical_tool_id(id.as_str()) == name))
 }
 
 pub fn is_known_code_tool(name: &str) -> bool {
@@ -204,7 +214,7 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "vision_analyze",
-                "description": "Use the configured Vision module endpoint to inspect one or more images. Pass the user's image reference directly in image/images when needed: HTTP(S) URL, data:image URL, file:// URL, workspace path, or local absolute path when full file access is active. If the current user message already contains an input_image, the tool can use it without extra file work. Do not convert local files to base64, copy files into the workspace, or use shell as an image transport. The tool reads local files, checks permissions, sends the image to the configured Vision endpoint, and returns prompt_sent plus text. The text field is the visual model's extracted answer; when the user directly asks about the image, answer from that text without inventing details or summarizing away specifics.",
+                "description": "Use the configured image understanding backend to inspect one or more images. Pass the user's image reference directly in image/images when needed: HTTP(S) URL, data:image URL, file:// URL, workspace path, or local absolute path when full file access is active. If the current user message already contains an input_image, the tool can use it without extra file work. Do not convert local files to base64, copy files into the workspace, or use shell as an image transport. The tool reads local files, checks permissions, sends the image to the configured backend, and returns the extracted text.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -220,7 +230,7 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
             "type": "function",
             "function": {
                 "name": "image_gen",
-                "description": "Use the configured Vision module endpoint to generate images directly from text. Use this tool for image generation; do not read image files, skill files, or generated images first. If the Vision generation endpoint, generation model, or API key is not configured correctly, this tool returns a structured unavailable error. Returns prompt_sent exactly as sent, image URLs or local file paths, and images_markdown for direct display to the user. Return images_markdown instead of calling view_image for generated files; generated base64 is saved to disk and never returned inline.",
+                "description": "Use the separately configured image generation backend to generate images directly from text. Use this tool for image generation; do not read image files, skill files, or generated images first. If the generation endpoint, model, or API key is not configured correctly, this tool returns a structured unavailable error. It returns image URLs or local file paths and images_markdown for direct display; generated base64 is saved to disk and never returned inline.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -243,7 +253,7 @@ fn codeseex_configurable_hosted_tool_definition(id: &str) -> Option<Value> {
 }
 
 fn configurable_tool_enabled(id: &str, enabled: &HashSet<&str>) -> bool {
-    enabled.contains(id) || (id == "image_gen" && enabled.contains("vision_analyze"))
+    enabled.contains(id)
 }
 
 fn enabled_set(enabled_ids: &[String]) -> HashSet<&str> {

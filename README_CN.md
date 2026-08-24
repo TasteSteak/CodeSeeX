@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-1f6feb">
+  <img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  非官方项目，和 Codex、OpenAI、DeepSeek 及搜索服务商均无隶属关系。请使用你自己的凭据，并遵守相关服务条款。
+  非官方项目，和 Codex、OpenAI、DeepSeek、图像服务及搜索服务商均无隶属关系。请使用你自己的凭据，并遵守相关服务条款。
 </p>
 
 CodeSeeX 通过本地 `/v1` 适配器把 Codex Desktop 连接到 DeepSeek 兼容上游。它的目标不是简单把一个 HTTP API 转成另一个 HTTP API，而是在 Codex Agent 边界处理请求语义、工具调用、上下文回放、推理展示、网络搜索、本地文件操作、用量统计和桌面管理。
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.6.0`
+当前版本：`0.7.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -73,17 +73,22 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 ## 你会得到什么
 
 - 在 Codex 中使用 DeepSeek V4 模型：`deepseek-v4-pro` 和 `deepseek-v4-flash`。
+- 官方 DeepSeek endpoint 默认使用原生 Responses，Chat API 兼容模式仅作为实验性、用户主动选择的回退。
+- 图像理解与图像生成是两个独立可选工具；DeepSeek Vision 不会加入 Codex 主模型 catalog。
+- Web Search 可使用默认的 CodeSeeX 本地后端，也可以独立选择 DeepSeek 官方后端。
+- 需要 CodeSeeX 本地 workspace、Vision、社区工具或本地 Web Search 执行器的请求，会使用成熟的 Chat 兼容执行路径；这种按工具归属选择的路径会单独记录诊断，不等同于上游失败回退。
 - 自动生成 Codex TOML，包含机器相关的 `model_catalog_json` 和本地 `base_url`。
 - 内置模型目录，用于首次运行或缺少原生 Codex catalog 的环境。
 - Flash 与 Pro 的 1M context 元数据和 95% effective context window。
 - Codex 原生 Apply Patch 处理和客户端工具 handoff 行为。
 - CodeSeeX 托管的 Web Search，包含有界执行、source diagnostics、自动打开证据页和本地/私网目标保护。
 - 只读 workspace 工具，用于文件和仓库检查。
-- 可选 Vision 模块，支持 OpenAI 兼容的图像理解和图像生成 endpoint。
+- 可选图像能力，支持 DeepSeek Vision、自定义图像理解和独立图像生成 endpoint。
 - 上下文编译：以 Codex full replay 为权威输入，保持工具调用/结果原子组、限制工具输出、脱敏 binary/data URL；真实窗口超限时返回可诊断错误，不由代理静默截断 replay。
 - 用量会话：区分普通用户 turn、服务请求、模型迭代、工具阶段、handoff、缓存命中、缓存未命中、输出 token 和估算费用。
 - 桌面管理器：托盘、自动启动、更新检查、日志、用量、余额、设置、工具和 Adapter 配置。
 - Community tool discovery：位于 `~/.codeseex/extension/tools/<tool>/manifest.json`，默认关闭，仅通过显式命令 manifest 执行。
+- Chat 兼容路径会保留 DeepSeek thinking 模式 assistant turn 的 `reasoning_content`，用于后续请求回放。
 
 ## 截图
 
@@ -112,7 +117,7 @@ CodeSeeX 在转发层外增加了本地 Runtime：
   <tr>
     <td width="50%">
       <strong>工具设置</strong><br>
-      内置 workspace 工具、Web Search、Vision endpoint 和工具专用凭据。<br><br>
+      内置 workspace 工具、Web Search、独立图像能力和工具专用凭据。<br><br>
       <img alt="CodeSeeX tool settings for hosted tools and Vision" src="docs/img/release-settings-tools.png" width="100%">
     </td>
     <td width="50%">
@@ -134,7 +139,7 @@ CodeSeeX 在转发层外增加了本地 Runtime：
     </td>
     <td width="50%">
       <strong>Vision 示例</strong><br>
-      在 Codex 中通过 CodeSeeX 工具 runtime 使用可选 Vision 模块。<br><br>
+      在 Codex 中通过 CodeSeeX 工具 runtime 使用独立的识图与生图能力。<br><br>
       <img alt="CodeSeeX Vision example in Codex" src="docs/img/release-codex-vision.png" width="100%">
     </td>
   </tr>
@@ -181,7 +186,7 @@ model = "deepseek-v4-flash"
 - Logs：紧凑运行日志和安全诊断。
 - Settings：上游 URL、模型行为、代理模式、UI 选项、计费单价和工具设置。
 - Adapter：生成 Codex TOML 并展示模型目录状态。
-- Tools：内置工具开关、Web Search、Vision 设置和 community tool discovery。
+- Tools：内置工具开关、Web Search、独立图像设置和 community tool discovery。
 
 Proxy 才是核心服务。服务启动后，Codex 请求不应该依赖桌面 UI 是否打开。
 
@@ -221,30 +226,35 @@ CodeSeeX 通过生成的 catalog 向 Codex 暴露 `deepseek-v4-pro` 和 `deepsee
 
 默认本地 Codex endpoint 是 `http://127.0.0.1:8787/v1`。如果修改监听端口，请重新复制生成的 TOML 并重启 Codex。
 
-## Vision 模块
+## 图像能力
 
-Vision 模块是可选功能，可在桌面 Tools 设置中配置。你可以配置完整请求 URL、模型名和 API key：
+图像理解与图像生成是桌面设置中的两个独立可选工具：
 
-- Analyze endpoint：OpenAI 兼容 `/responses` 或 `/chat/completions`。
-- Generate endpoint：支持图像生成的 OpenAI 兼容 `/responses` 或 `/images/generations`。
+- 图像理解在全新安装时默认开启，旧配置升级时也会一次性补为开启；能力配置完成迁移后，后续会保留用户自己的开关选择。
+- 图像理解可以使用 DeepSeek 官方 Vision Responses endpoint，或自定义 OpenAI 兼容 `/responses`、`/chat/completions` endpoint。
+- DeepSeek Vision 固定使用专用 `deepseek-v4-flash-vision-exp` 模型；它属于工具能力，不会加入 Codex 主模型 catalog。
+- 图像生成使用独立的自定义 `/responses` 或 `/images/generations` endpoint、模型、启用状态和凭据，并保持默认关闭。
+- 自定义识图与生图凭据分别保存在系统凭据库中，配置 API 不会回显。
 - 图像输入：当前 Codex `input_image` 附件、HTTP(S) URL、`data:image` URL、`file://` URL、workspace 路径或允许的本地绝对路径。
 - 图像生成结果会以可展示 Markdown 和本地文件返回；生成的 base64 payload 会保存到磁盘，而不是直接内联回传。
 
-CodeSeeX 不会重写 Vision endpoint URL。你配置的请求 URL 就是实际使用的请求 URL。当本地图像通过远程 endpoint 分析时，图像像素会发送到你配置的服务。
+自定义图像 endpoint URL 会按配置原样使用。DeepSeek 模式下，图像像素直接发送到官方 DeepSeek Vision endpoint；自定义模式下则发送到用户配置的服务。
+
+详细说明请查看[图像能力文档](docs/image-capabilities.md)，其中包含后端选择、凭据边界、限制、用量统计和隐私行为。
 
 ## 安装与更新
 
-Windows 用户建议使用 NSIS `Windows-CodeSeeX.Setup.*.exe` 安装包进行普通桌面安装和更新。安装器支持语言选择、当前用户/所有用户安装模式，并会在安装 Tauri 版本前处理早期 Electron 版本的迁移。
+Windows 用户请从 GitHub Releases 下载 NSIS 安装包进行普通桌面安装和更新。安装器支持语言选择、当前用户/所有用户安装模式，并会在安装 Tauri 版本前处理早期 Electron 版本的迁移。
 
 ## 凭据边界
 
 CodeSeeX manager settings 不应被当作上游凭据存储。余额查询会读取 Codex auth 来源或已缓存的请求 `Authorization: Bearer ...` header。旧版 `DEEPSEEK_API_KEY` 环境变量仍可作为直接上游请求 fallback，但它不是余额凭据来源。
 
-Vision 等工具专用凭据属于你配置的工具 endpoint，应视为本地 secret。除非你信任 community tool 的命令 manifest，否则不要启用它。
+自定义识图与生图凭据属于各自配置的 endpoint，并作为两个独立本地 secret 保存。除非你信任 community tool 的命令 manifest，否则不要启用它。
 
 ## 隐私说明
 
-CodeSeeX 是本地 bridge，但模型请求会转发到你配置的上游服务。Vision 分析会把图像像素发送到配置的 Vision endpoint。Web Search 可能请求搜索结果页或普通网页。相关服务可能有自己的服务条款、留存策略、速率限制和反滥用规则。
+CodeSeeX 是本地 bridge，但模型请求会转发到你配置的上游服务。图像理解和图像生成会把图像数据发送到各自选择的服务。Web Search 可能请求搜索结果页或普通网页。相关服务可能有自己的服务条款、留存策略、速率限制和反滥用规则。
 
 默认日志是紧凑且脱敏的。开发诊断可能暴露更多 request shape 信息，只应在调试时开启。
 

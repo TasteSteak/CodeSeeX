@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "codeseex-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "codeseex-desktop"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "codeseex-core",
  "codeseex-proxy",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "codeseex-proxy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -667,6 +667,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
  "winreg 0.55.0",
@@ -674,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "codeseex-store"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",

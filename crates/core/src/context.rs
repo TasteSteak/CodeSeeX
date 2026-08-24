@@ -254,8 +254,13 @@ fn flush_pending_assistant(messages: &mut Vec<ChatMessage>, pending: &mut Pendin
     }
 
     if pending.tool_calls.is_empty() {
-        if !pending.content.trim().is_empty() {
+        if pending.reasoning.trim().is_empty() {
             messages.push(ChatMessage::text("assistant", pending.content.clone()));
+        } else {
+            messages.push(ChatMessage::assistant_with_reasoning(
+                pending.content.clone(),
+                pending.reasoning.clone(),
+            ));
         }
     } else {
         let tool_calls = pending.tool_calls.clone();
@@ -1002,6 +1007,38 @@ mod tests {
             Some("need to inspect files first")
         );
         assert_eq!(compiled.messages[1].role, "tool");
+    }
+
+    #[test]
+    fn preserves_reasoning_content_for_assistant_without_tool_calls() {
+        let input = json!([
+            {
+                "type": "reasoning",
+                "summary": [
+                    { "type": "summary_text", "text": "reason before the final answer" }
+                ]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "final answer" }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "next question" }]
+            }
+        ]);
+
+        let compiled = compile_responses_input(&input);
+
+        assert_eq!(compiled.messages[0].role, "assistant");
+        assert_eq!(compiled.messages[0].content, "final answer");
+        assert_eq!(
+            compiled.messages[0].reasoning_content.as_deref(),
+            Some("reason before the final answer")
+        );
+        assert_eq!(compiled.messages[1].content, "next question");
     }
 
     #[test]

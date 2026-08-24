@@ -6,7 +6,7 @@
     <meta name="description" content="CodeSeeX security and privacy boundaries for model requests, Vision, Web Search, logs, and community tools.">
     <title>Security · CodeSeeX</title>
     <link rel="icon" href="assets/app.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="assets/site.css?v=0.6.0">
+    <link rel="stylesheet" href="assets/site.css?v=0.7.0">
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -40,13 +40,13 @@
             <div>
               <span class="eyebrow" data-i18n="security.eyebrow">Security and privacy</span>
               <h1 data-i18n="security.title">Local bridge does not mean zero data leaves your machine.</h1>
-              <p class="page-copy" data-i18n="security.copy">CodeSeeX is local software, but model requests, web search, Vision endpoints, and community tools each have distinct trust boundaries.</p>
+              <p class="page-copy" data-i18n="security.copy">CodeSeeX is local software, but model requests, web search, image understanding, image generation, and community tools each have distinct trust boundaries.</p>
             </div>
             <div class="panel">
               <div class="pill-row">
                 <span class="pill">Local /v1</span>
                 <span class="pill">DeepSeek upstream</span>
-                <span class="pill">Vision endpoints</span>
+                <span class="pill">Image capabilities</span>
                 <span class="pill">Web Search</span>
                 <span class="pill">Community tools</span>
               </div>
@@ -62,9 +62,9 @@
               <span data-i18n="security.table1Control">Use your own credentials, review upstream terms, and keep generated config local.</span>
             </div>
             <div class="risk-row">
-              <strong data-i18n="security.table2Title">Vision</strong>
-              <p data-i18n="security.table2Data">Image pixels can be sent to the configured Vision endpoint.</p>
-              <span data-i18n="security.table2Control">Configure only endpoints you trust and treat Vision keys as local secrets.</span>
+              <strong data-i18n="security.table2Title">Image capabilities</strong>
+              <p data-i18n="security.table2Data">Image understanding and image generation send image data to their separately configured providers.</p>
+              <span data-i18n="security.table2Control">DeepSeek Vision and custom image understanding use separate boundaries; image generation has its own endpoint and credential.</span>
             </div>
             <div class="risk-row">
               <strong data-i18n="security.table3Title">Web Search</strong>
@@ -127,12 +127,12 @@
           </div>
         </div>
         <div class="fine-print">
-          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, Vision, and search-provider terms.</span>
+          <span data-i18n="footer.notice">Unofficial and unaffiliated. Use your own credentials and follow the applicable Codex, OpenAI, DeepSeek, image-service, and search-provider terms.</span>
           <span> © <span data-current-year></span> TasteSteak and CodeSeeX contributors. AGPL-3.0-only.</span>
         </div>
       </footer>
     </div>
-    <script src="assets/i18n.js?v=0.6.0"></script>
-    <script src="assets/site.js?v=0.6.0"></script>
+    <script src="assets/i18n.js?v=0.7.0"></script>
+    <script src="assets/site.js?v=0.7.0"></script>
   </body>
 </html>

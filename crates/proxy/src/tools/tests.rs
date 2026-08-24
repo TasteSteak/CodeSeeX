@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn definitions_follow_enabled_ids() {
-    let definitions = upstream_tool_definitions(&["list_directory".to_owned()]);
+    let definitions =
+        upstream_tool_definitions_with_local_web_search(&["list_directory".to_owned()], true);
     let names = definitions
         .iter()
         .filter_map(|definition| definition.pointer("/function/name").and_then(Value::as_str))
@@ -13,8 +14,29 @@ fn definitions_follow_enabled_ids() {
 }
 
 #[test]
+fn fresh_configuration_enables_image_understanding_but_not_generation() {
+    let defaults = default_enabled_tool_ids();
+
+    assert!(defaults.iter().any(|id| id == "vision_analyze"));
+    assert!(!defaults.iter().any(|id| id == "image_gen"));
+}
+
+#[test]
+fn definitions_can_exclude_local_web_search_without_removing_other_tools() {
+    let definitions =
+        upstream_tool_definitions_with_local_web_search(&["list_directory".to_owned()], false);
+    let names = definitions
+        .iter()
+        .filter_map(|definition| definition.pointer("/function/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, vec!["apply_patch", "list_directory"]);
+}
+
+#[test]
 fn vision_analyze_definition_is_enabled_by_tool_id() {
-    let definitions = upstream_tool_definitions(&["vision_analyze".to_owned()]);
+    let definitions =
+        upstream_tool_definitions_with_local_web_search(&["vision_analyze".to_owned()], true);
     let vision = definitions
         .iter()
         .find(|definition| {
@@ -36,7 +58,8 @@ fn vision_analyze_definition_is_enabled_by_tool_id() {
 
 #[test]
 fn vision_module_exposes_native_image_gen_definition() {
-    let definitions = upstream_tool_definitions(&["vision_analyze".to_owned()]);
+    let definitions =
+        upstream_tool_definitions_with_local_web_search(&["image_gen".to_owned()], true);
     assert!(!definitions.iter().any(|definition| {
         definition.pointer("/function/name").and_then(Value::as_str) == Some("vision_generate")
     }));
@@ -73,7 +96,7 @@ fn vision_module_exposes_native_image_gen_definition() {
 
 #[test]
 fn apply_patch_definition_requires_paths_in_operation_headers() {
-    let definitions = upstream_tool_definitions(&[]);
+    let definitions = upstream_tool_definitions_with_local_web_search(&[], true);
     let apply_patch = definitions
         .iter()
         .find(|definition| {
@@ -109,9 +132,13 @@ fn executable_tool_checks_enabled_allowlist() {
     ));
     assert!(is_executable_tool_enabled(
         "vision_generate",
-        &["vision_analyze".to_owned()]
+        &["image_gen".to_owned()]
     ));
     assert!(is_executable_tool_enabled(
+        "image_gen",
+        &["image_gen".to_owned()]
+    ));
+    assert!(!is_executable_tool_enabled(
         "image_gen",
         &["vision_analyze".to_owned()]
     ));
@@ -138,8 +165,24 @@ async fn vision_analyze_missing_config_returns_unavailable() {
     fs::create_dir_all(&data_dir).expect("create data dir");
     let config = codeseex_core::AppConfig {
         data_dir: data_dir.clone(),
+        upstream: codeseex_core::UpstreamConfig {
+            api_key: None,
+            ..Default::default()
+        },
         ..Default::default()
     };
+    codeseex_core::UserConfig {
+        tools: Some(codeseex_core::UserToolsConfig {
+            vision_analyze: Some(codeseex_core::UserVisionToolConfig {
+                backend: Some(codeseex_core::VisionAnalyzeBackend::External),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .write_atomic(&config.config_path())
+    .expect("write external vision config");
     let result = execute_tool_with_client(
         &reqwest::Client::new(),
         &config,
@@ -172,7 +215,7 @@ async fn vision_analyze_missing_config_returns_unavailable() {
         .any(|value| value.as_str() == Some("VISION_ANALYZE_MODEL")));
     assert!(missing
         .iter()
-        .any(|value| value.as_str() == Some("VISION_API_KEY")));
+        .any(|value| value.as_str() == Some("VISION_ANALYZE_API_KEY")));
 
     let _ = fs::remove_dir_all(data_dir);
 }
@@ -183,6 +226,10 @@ async fn vision_generate_missing_config_returns_unavailable() {
     fs::create_dir_all(&data_dir).expect("create data dir");
     let config = codeseex_core::AppConfig {
         data_dir: data_dir.clone(),
+        upstream: codeseex_core::UpstreamConfig {
+            api_key: None,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let result = execute_tool_with_client(
@@ -217,8 +264,61 @@ async fn vision_generate_missing_config_returns_unavailable() {
         .any(|value| value.as_str() == Some("VISION_GENERATE_MODEL")));
     assert!(missing
         .iter()
-        .any(|value| value.as_str() == Some("VISION_API_KEY")));
+        .any(|value| value.as_str() == Some("VISION_GENERATE_API_KEY")));
 
+    let _ = fs::remove_dir_all(data_dir);
+}
+
+#[tokio::test]
+async fn vision_generation_does_not_use_analyze_api_key_as_its_credential() {
+    let data_dir = temp_workspace("vision-generate-analyze-key-isolation");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+    codeseex_core::UserConfig {
+        tools: Some(codeseex_core::UserToolsConfig {
+            vision_analyze: Some(codeseex_core::UserVisionToolConfig {
+                backend: Some(codeseex_core::VisionAnalyzeBackend::External),
+                analyze_api_key: Some("analyze-only".to_owned()),
+                ..Default::default()
+            }),
+            vision_generate: Some(codeseex_core::UserVisionGenerateToolConfig {
+                generate_url: Some("https://example.com/v1/images/generations".to_owned()),
+                generate_model: Some("image-model".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .write_atomic(&data_dir.join("config.toml"))
+    .expect("write vision isolation config");
+    let config = codeseex_core::AppConfig {
+        data_dir: data_dir.clone(),
+        upstream: codeseex_core::UpstreamConfig {
+            api_key: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let result = execute_tool_with_client(
+        &reqwest::Client::new(),
+        &config,
+        &ToolExecutionContext::default(),
+        &[],
+        &[],
+        "image_gen",
+        r#"{"prompt":"A small product photo"}"#,
+    )
+    .await;
+    assert_eq!(
+        result.get("error").and_then(Value::as_str),
+        Some("vision_unavailable")
+    );
+    assert!(result
+        .get("missing_or_invalid")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items
+            .iter()
+            .any(|value| { value.as_str() == Some("VISION_GENERATE_API_KEY") })));
     let _ = fs::remove_dir_all(data_dir);
 }
 

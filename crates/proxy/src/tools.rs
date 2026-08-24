@@ -20,7 +20,7 @@ pub(crate) mod web;
 
 pub use definitions::{
     default_enabled_tool_ids, is_executable_tool_enabled, is_known_code_tool,
-    upstream_tool_definitions,
+    upstream_tool_definitions_with_local_web_search,
 };
 pub(crate) use permissions::ToolPermissionContext as ToolExecutionContext;
 use permissions::{ResolvedToolPath, ToolPermissionError};

@@ -318,9 +318,7 @@ fn compact_message_for_budget(message: &ChatMessage) -> ChatMessage {
         BUDGET_MESSAGE_CONTENT_CHARS
     };
     next.content = truncate_for_budget(&redact_inline_data_urls(&next.content), content_limit);
-    if next.tool_calls.is_none() {
-        next.reasoning_content = None;
-    } else if let Some(reasoning) = &next.reasoning_content {
+    if let Some(reasoning) = &next.reasoning_content {
         next.reasoning_content = Some(truncate_for_budget(reasoning, BUDGET_REASONING_CHARS));
     }
     next
@@ -378,11 +376,54 @@ fn count_changed_messages(left: &[ChatMessage], right: &[ChatMessage]) -> usize 
 pub(crate) fn estimate_tokens_from_messages(messages: &[ChatMessage]) -> u64 {
     messages
         .iter()
-        .map(|message| estimate_tokens_from_text(&message.content))
+        .map(|message| {
+            let serialized = serde_json::to_vec(message).unwrap_or_default();
+            u64::try_from(serialized.len().max(1).div_ceil(4)).unwrap_or(1)
+        })
         .sum()
 }
 
 pub(crate) fn estimate_tokens_from_text(text: &str) -> u64 {
     let chars = text.chars().count();
     u64::try_from(chars.max(1).div_ceil(4)).unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_preserves_reasoning_content_without_tool_calls() {
+        let message = ChatMessage::assistant_with_reasoning(
+            "final answer",
+            "reasoning must be sent on the next DeepSeek turn",
+        );
+        let compacted = compact_message_for_budget(&message);
+
+        assert_eq!(
+            compacted.reasoning_content.as_deref(),
+            message.reasoning_content.as_deref()
+        );
+    }
+
+    #[test]
+    fn token_estimate_includes_reasoning_and_tool_fields() {
+        let plain = ChatMessage::text("assistant", "answer");
+        let enriched = ChatMessage::assistant_tool_calls_with_reasoning(
+            vec![json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "workspace_search",
+                    "arguments": "{\"query\":\"reasoning marker\"}"
+                }
+            })],
+            "answer",
+            "long reasoning marker that must count toward the replay budget",
+        );
+
+        assert!(
+            estimate_tokens_from_messages(&[enriched]) > estimate_tokens_from_messages(&[plain])
+        );
+    }
 }

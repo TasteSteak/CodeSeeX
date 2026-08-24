@@ -2,6 +2,62 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.7.0",
+      "released_at": "2026-08-25",
+      "notes": {
+        "en_us": {
+          "summary": "The DeepSeek Responses API release with native official routing, stable context/tool continuity, dual Web Search backends, and separate image capabilities.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "Official DeepSeek endpoints use the native Responses API by default for configured models.",
+                "CodeSeeX local Web Search and DeepSeek official Web Search remain separate explicit backends.",
+                "DeepSeek thinking reasoning_content is preserved across Chat compatibility follow-up turns.",
+                "Codex full replay and atomic client-tool groups remain authoritative and bounded.",
+                "Image understanding and image generation are separate tools with DeepSeek Vision support, independent credentials, and dedicated Usage phases.",
+                "Image understanding is enabled by default for new and upgraded configurations; image generation remains independent and disabled by default.",
+                "Built-in language packs share a complete key schema and use English only as the explicit fallback for untranslated newer text."
+              ]
+            },
+            {
+              "title": "Fixed",
+              "items": [
+                "Fixed reasoning context being dropped from the 0.6.0 Chat compatibility replay path.",
+                "Fixed native tool-group settlement and bounded unterminated SSE response identity edge cases.",
+                "Fixed legacy Vision migration, default image-understanding enablement, image credential isolation, and secret-field autosave behavior."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "面向 DeepSeek Responses API 的正式适配更新，提供官方原生路由、稳定上下文与工具续接、双 Web Search 后端和独立图像能力。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "官方 DeepSeek endpoint 对配置模型默认使用原生 Responses API。",
+                "CodeSeeX 本地 Web Search 与 DeepSeek 官方 Web Search 继续作为两种独立后端。",
+                "Chat 兼容路径会保留 thinking 模式的 reasoning_content，支持后续请求连续回放。",
+                "Codex full replay 和客户端原子工具组继续保持权威、有界处理。",
+                "图像理解与图像生成拆为独立工具，支持 DeepSeek Vision、独立凭据和独立 Usage 阶段。",
+                "图像理解在全新安装和旧配置升级后默认开启，图像生成保持独立且默认关闭。",
+                "内置语言包使用完整键结构；尚未翻译的新文案统一显式回退英文。"
+              ]
+            },
+            {
+              "title": "修复",
+              "items": [
+                "修复 0.6.0 Chat 兼容回放路径丢失 reasoning 上下文的问题。",
+                "修复原生工具组结算和无终止空行 SSE response identity 的边界问题。",
+                "修复旧 Vision 配置迁移、图像理解默认启用、图像凭据隔离和密码字段 autosave 行为。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "version": "0.6.0",
       "released_at": "2026-07-11",
       "notes": {

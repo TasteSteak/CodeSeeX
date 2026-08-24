@@ -65,7 +65,8 @@ pub(crate) struct RuntimeConfigSnapshot {
 impl RuntimeConfigSnapshot {
     fn from_base(base: &AppConfig) -> Self {
         let mut config = base.clone();
-        if let Ok(user_config) = UserConfig::read_from(&config.config_path()) {
+        let path = config.config_path();
+        if let Ok(user_config) = UserConfig::read_from(&path) {
             config.apply_user_config(user_config);
         }
         Self::from_config(config)
@@ -77,6 +78,7 @@ impl RuntimeConfigSnapshot {
         let upstream_signature = stable_json_signature(&json!({
             "base_url": config.upstream.base_url,
             "official_v1_compat": config.upstream.official_v1_compat,
+            "transport": config.upstream.transport,
             "timeout_ms": config.upstream.timeout_ms
         }));
         let model_signature = stable_json_signature(&json!({
@@ -340,6 +342,7 @@ fn config_signature(config: &AppConfig) -> String {
         "upstream": {
             "base_url": config.upstream.base_url,
             "official_v1_compat": config.upstream.official_v1_compat,
+            "transport": config.upstream.transport,
             "timeout_ms": config.upstream.timeout_ms
         },
         "model_override": config.model_override,
@@ -347,7 +350,10 @@ fn config_signature(config: &AppConfig) -> String {
         "model": user_config_section_signature(&config.config_path(), "model"),
         "network_proxy": config.network_proxy,
         "network_proxy_signature": crate::network::proxy_cache_key(config.network_proxy),
-        "tools": user_config_section_signature(&config.config_path(), "tools"),
+        "tools": {
+            "config": user_config_section_signature(&config.config_path(), "tools"),
+            "web_search_backend": config.web_search_backend
+        },
         "ui": user_config_section_signature(&config.config_path(), "ui"),
         "billing": user_config_section_signature(&config.config_path(), "billing")
     }))
@@ -583,7 +589,10 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codeseex_core::{NetworkProxyMode, UserModelConfig, UserNetworkConfig};
+    use codeseex_core::{
+        NetworkProxyMode, UpstreamTransport, UserModelConfig, UserNetworkConfig, UserToolsConfig,
+        UserUpstreamConfig, UserWebSearchToolConfig, WebSearchBackend,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_config(label: &str) -> AppConfig {
@@ -669,6 +678,63 @@ mod tests {
             .expect("model config change");
 
         assert!(change.has_kind(RuntimeConfigChangeKind::Model));
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[test]
+    fn runtime_config_refresh_reports_transport_change_as_upstream_change() {
+        let config = temp_config("transport");
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let service = RuntimeConfigService::new(config.clone());
+        UserConfig {
+            upstream: Some(UserUpstreamConfig {
+                transport: Some(UpstreamTransport::ChatCompat),
+                ..UserUpstreamConfig::default()
+            }),
+            ..UserConfig::default()
+        }
+        .write_atomic(&config.config_path())
+        .unwrap();
+
+        let change = service
+            .refresh(RuntimeConfigChangeSource::ManagerSave)
+            .expect("transport change");
+
+        assert!(change.has_kind(RuntimeConfigChangeKind::Upstream));
+        assert_eq!(
+            service.active_config().upstream.transport,
+            UpstreamTransport::ChatCompat
+        );
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[test]
+    fn runtime_config_refresh_reports_web_search_backend_as_tools_change() {
+        let config = temp_config("web-search-backend");
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let service = RuntimeConfigService::new(config.clone());
+        UserConfig {
+            tools: Some(UserToolsConfig {
+                web_search: Some(UserWebSearchToolConfig {
+                    backend: Some(WebSearchBackend::Official),
+                    ..UserWebSearchToolConfig::default()
+                }),
+                ..UserToolsConfig::default()
+            }),
+            ..UserConfig::default()
+        }
+        .write_atomic(&config.config_path())
+        .unwrap();
+
+        let change = service
+            .refresh(RuntimeConfigChangeSource::ManagerSave)
+            .expect("web search backend change");
+
+        assert!(change.has_kind(RuntimeConfigChangeKind::Tools));
+        assert_eq!(
+            service.active_config().web_search_backend,
+            WebSearchBackend::Official
+        );
         let _ = std::fs::remove_dir_all(config.data_dir);
     }
 }

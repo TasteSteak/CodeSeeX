@@ -1,35 +1,87 @@
 use anyhow::{Context, Result};
 use codeseex_core::AppConfig;
 
-pub(crate) fn vision_api_key(config: &AppConfig) -> Option<String> {
-    secret_store_read(&vision_secret_target(config))
-        .ok()
-        .flatten()
+pub(crate) fn vision_analyze_api_key(config: &AppConfig) -> Option<String> {
+    read_secret(&vision_analyze_secret_target(config))
+        .or_else(|| read_secret(&legacy_vision_secret_target(config)))
 }
 
-pub(crate) fn vision_api_key_configured(config: &AppConfig) -> bool {
-    vision_api_key(config).is_some()
+pub(crate) fn legacy_vision_api_key(config: &AppConfig) -> Option<String> {
+    read_secret(&legacy_vision_secret_target(config))
 }
 
-pub(crate) fn write_vision_api_key(config: &AppConfig, value: &str) -> Result<()> {
+pub(crate) fn vision_analyze_api_key_configured(config: &AppConfig) -> bool {
+    vision_analyze_api_key(config).is_some()
+}
+
+pub(crate) fn current_vision_analyze_api_key_configured(config: &AppConfig) -> bool {
+    read_secret(&vision_analyze_secret_target(config)).is_some()
+}
+
+pub(crate) fn write_vision_analyze_api_key(config: &AppConfig, value: &str) -> Result<()> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(());
     }
-    secret_store_write(&vision_secret_target(config), value)
+    secret_store_write(&vision_analyze_secret_target(config), value)
 }
 
-pub(crate) fn clear_vision_api_key(config: &AppConfig) -> Result<()> {
-    secret_store_delete(&vision_secret_target(config))
+pub(crate) fn clear_legacy_vision_api_key(config: &AppConfig) -> Result<()> {
+    secret_store_delete(&legacy_vision_secret_target(config))
 }
 
-fn vision_secret_target(config: &AppConfig) -> String {
+pub(crate) fn clear_vision_analyze_api_key(config: &AppConfig) -> Result<()> {
+    secret_store_delete(&vision_analyze_secret_target(config))?;
+    secret_store_delete(&legacy_vision_secret_target(config))
+}
+
+pub(crate) fn vision_generate_api_key(config: &AppConfig) -> Option<String> {
+    read_secret(&vision_generate_secret_target(config))
+}
+
+pub(crate) fn vision_generate_api_key_configured(config: &AppConfig) -> bool {
+    vision_generate_api_key(config).is_some()
+}
+
+pub(crate) fn current_vision_generate_api_key_configured(config: &AppConfig) -> bool {
+    read_secret(&vision_generate_secret_target(config)).is_some()
+}
+
+pub(crate) fn write_vision_generate_api_key(config: &AppConfig, value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    secret_store_write(&vision_generate_secret_target(config), value)
+}
+
+pub(crate) fn clear_vision_generate_api_key(config: &AppConfig) -> Result<()> {
+    secret_store_delete(&vision_generate_secret_target(config))
+}
+
+fn read_secret(target: &str) -> Option<String> {
+    secret_store_read(target).ok().flatten()
+}
+
+fn vision_analyze_secret_target(config: &AppConfig) -> String {
+    secret_target(config, "vision_analyze_api_key")
+}
+
+fn vision_generate_secret_target(config: &AppConfig) -> String {
+    secret_target(config, "vision_generate_api_key")
+}
+
+fn legacy_vision_secret_target(config: &AppConfig) -> String {
+    secret_target(config, "vision_api_key")
+}
+
+fn secret_target(config: &AppConfig, name: &str) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(config.data_dir.to_string_lossy().as_bytes());
     let hash = hasher.finalize();
-    format!("CodeSeeX/vision_api_key/{hash:x}")
+    format!("CodeSeeX/{name}/{hash:x}")
 }
 
 #[cfg(windows)]
@@ -151,15 +203,39 @@ mod tests {
             ..Default::default()
         };
 
-        clear_vision_api_key(&config).expect("clear initial");
-        assert!(!vision_api_key_configured(&config));
+        clear_vision_analyze_api_key(&config).expect("clear initial");
+        clear_vision_generate_api_key(&config).expect("clear generation initial");
+        clear_legacy_vision_api_key(&config).expect("clear legacy initial");
+        assert!(!vision_analyze_api_key_configured(&config));
+        assert!(!vision_generate_api_key_configured(&config));
 
-        write_vision_api_key(&config, "secret-value").expect("write secret");
-        assert_eq!(vision_api_key(&config).as_deref(), Some("secret-value"));
-        assert!(vision_api_key_configured(&config));
+        secret_store_write(
+            &legacy_vision_secret_target(&config),
+            "legacy-shared-secret",
+        )
+        .expect("write legacy secret");
+        assert_eq!(
+            vision_analyze_api_key(&config).as_deref(),
+            Some("legacy-shared-secret")
+        );
+        assert!(vision_generate_api_key(&config).is_none());
+        clear_legacy_vision_api_key(&config).expect("clear legacy secret");
 
-        clear_vision_api_key(&config).expect("clear written");
-        assert!(vision_api_key(&config).is_none());
+        write_vision_analyze_api_key(&config, "analyze-secret").expect("write analyze secret");
+        write_vision_generate_api_key(&config, "generate-secret").expect("write generate secret");
+        assert_eq!(
+            vision_analyze_api_key(&config).as_deref(),
+            Some("analyze-secret")
+        );
+        assert_eq!(
+            vision_generate_api_key(&config).as_deref(),
+            Some("generate-secret")
+        );
+
+        clear_vision_analyze_api_key(&config).expect("clear analyze written");
+        clear_vision_generate_api_key(&config).expect("clear generate written");
+        assert!(vision_analyze_api_key(&config).is_none());
+        assert!(vision_generate_api_key(&config).is_none());
     }
 
     #[cfg(not(windows))]
@@ -172,7 +248,9 @@ mod tests {
             )),
             ..Default::default()
         };
-        assert!(write_vision_api_key(&config, "secret-value").is_err());
-        assert!(vision_api_key(&config).is_none());
+        assert!(write_vision_analyze_api_key(&config, "secret-value").is_err());
+        assert!(write_vision_generate_api_key(&config, "secret-value").is_err());
+        assert!(vision_analyze_api_key(&config).is_none());
+        assert!(vision_generate_api_key(&config).is_none());
     }
 }

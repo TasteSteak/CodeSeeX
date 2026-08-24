@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const API_KEY_FIELDS: &[&str] = &["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "api_key", "apiKey"];
+const DEEPSEEK_API_KEY_FIELDS: &[&str] = &["DEEPSEEK_API_KEY", "deepseek_api_key"];
 
 static CACHED_AUTHORIZATION: OnceLock<Mutex<String>> = OnceLock::new();
 
@@ -29,6 +30,19 @@ pub fn read_codex_auth_api_key(include_cached_authorization: bool) -> Option<Str
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let parsed = serde_json::from_str::<Value>(text).ok()?;
     api_key_from_codex_auth(&parsed)
+}
+
+pub fn read_deepseek_api_key() -> Option<String> {
+    env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let path = resolve_codex_auth_path()?;
+            let text = fs::read_to_string(path).ok()?;
+            let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            let parsed = serde_json::from_str::<Value>(text).ok()?;
+            deepseek_api_key_from_codex_auth(&parsed)
+        })
 }
 
 pub fn resolve_codex_auth_path() -> Option<PathBuf> {
@@ -73,6 +87,18 @@ fn normalize_authorization_header(value: &str) -> Option<String> {
 fn api_key_from_codex_auth(auth: &Value) -> Option<String> {
     let object = auth.as_object()?;
     API_KEY_FIELDS.iter().find_map(|field| {
+        object
+            .get(*field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn deepseek_api_key_from_codex_auth(auth: &Value) -> Option<String> {
+    let object = auth.as_object()?;
+    DEEPSEEK_API_KEY_FIELDS.iter().find_map(|field| {
         object
             .get(*field)
             .and_then(Value::as_str)
@@ -177,6 +203,24 @@ mod tests {
         assert_eq!(
             api_key_from_codex_auth(&serde_json::json!({ "apiKey": "camel-key" })).as_deref(),
             Some("camel-key")
+        );
+    }
+
+    #[test]
+    fn deepseek_provider_key_does_not_reuse_generic_openai_credentials() {
+        assert_eq!(
+            deepseek_api_key_from_codex_auth(&serde_json::json!({
+                "OPENAI_API_KEY": "openai-key",
+                "DEEPSEEK_API_KEY": "deepseek-key"
+            }))
+            .as_deref(),
+            Some("deepseek-key")
+        );
+        assert_eq!(
+            deepseek_api_key_from_codex_auth(&serde_json::json!({
+                "OPENAI_API_KEY": "openai-key"
+            })),
+            None
         );
     }
 

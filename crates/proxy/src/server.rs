@@ -58,6 +58,7 @@ use crate::upstream::payload::{
     CodexServiceRequestKind,
 };
 mod access;
+mod native_runtime;
 mod request_diagnostics;
 mod response_helpers;
 mod response_lifecycle;
@@ -80,6 +81,7 @@ use axum::routing::post;
 use axum::Json;
 #[cfg(test)]
 use axum::Router;
+use codeseex_core::config::WebSearchBackend;
 use codeseex_core::context::request_looks_like_codex_full_context;
 use codeseex_core::models::available_models;
 use codeseex_core::protocol::ChatMessage;
@@ -145,6 +147,13 @@ where
     F: Future<Output = ()> + Send + 'static,
     L: FnOnce() + Send + 'static,
 {
+    if let Err(error) = crate::manager_service::migrate_image_capability_config(&config) {
+        tracing::warn!(
+            error = %error,
+            path = %config.config_path().display(),
+            "image capability migration was not completed; keeping the existing configuration"
+        );
+    }
     let effective_config = {
         let mut effective = config.clone();
         if let Ok(user_config) = UserConfig::read_from(&effective.config_path()) {
@@ -743,6 +752,18 @@ async fn responses(
         .map(str::to_owned);
     let service_kind = codex_service_request_kind(&input);
     let model = response_model_from_input(&config, &input);
+    if let Some(response) = native_runtime::dispatch_if_selected(
+        &state,
+        &headers,
+        &input,
+        &config,
+        &model,
+        requested_model.as_deref(),
+    )
+    .await
+    {
+        return response;
+    }
     if let Err(response) = ensure_new_response_id(&state, &id, previous).await {
         return response;
     }
@@ -856,6 +877,11 @@ async fn responses(
         suppress_tools_for_service,
         &external_tool_context,
     );
+    // `dispatch_if_selected` only falls through here for Chat compatibility.
+    // Do not inject the local implementation when the user explicitly chose
+    // the provider-owned backend: a request without an incoming tools array
+    // would otherwise silently regain and execute local web_search.
+    let inject_local_web_search = config.web_search_backend != WebSearchBackend::Official;
     let enabled_tools = if inject_codeseex_proxy_tools {
         enabled_tool_ids(&config)
     } else {
@@ -883,7 +909,10 @@ async fn responses(
         external_tool_context.ensure_codex_tool_search_bridge();
     }
     let mut tools = if inject_codeseex_proxy_tools {
-        crate::tools::upstream_tool_definitions(&enabled_tools)
+        crate::tools::upstream_tool_definitions_with_local_web_search(
+            &enabled_tools,
+            inject_local_web_search,
+        )
     } else {
         Vec::new()
     };
@@ -907,6 +936,7 @@ async fn responses(
                 &tool_search_bridge_decision,
                 &enabled_tools,
                 inject_codeseex_proxy_tools,
+                inject_local_web_search,
                 service_kind,
             )),
         )
@@ -1603,7 +1633,12 @@ fn full_context_current_turn_messages(messages: &[ChatMessage]) -> Vec<Value> {
 
 fn compact_turn_message_for_runtime(mut message: ChatMessage) -> ChatMessage {
     message.content = truncate_chars(&message.content, STORED_FULL_CONTEXT_TURN_CONTENT_CHARS);
-    message.reasoning_content = None;
+    if let Some(reasoning) = &message.reasoning_content {
+        message.reasoning_content = Some(truncate_chars(
+            reasoning,
+            STORED_FULL_CONTEXT_TURN_CONTENT_CHARS,
+        ));
+    }
     message
 }
 
@@ -2256,13 +2291,16 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
 
                 if tool_calls.is_empty() {
                     stop_if_cancelled!("response cancelled before final response persistence");
-                    if !turn_text.trim().is_empty()
+                    if (!turn_text.trim().is_empty() || !turn_reasoning.trim().is_empty())
                         && !text_is_thinking_display_markdown(&turn_text)
                     {
-                        let message = json!({
+                        let mut message = json!({
                             "role": "assistant",
                             "content": turn_text
                         });
+                        if !turn_reasoning.trim().is_empty() {
+                            message["reasoning_content"] = Value::String(turn_reasoning.clone());
+                        }
                         if let Err(error) = state
                             .store
                             .append_request_turn_messages(&response_id, &[message])
@@ -2442,7 +2480,12 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 }
                 let proxy_executed_calls = proxy_executed_calls_in_order(&all_tool_calls, &partition);
                 if let Some(disabled) = proxy_executed_calls.iter().find(|call| {
-                    !is_code_tool_executable(&call.name, &enabled_tools, &community_tools)
+                    !is_code_tool_executable(
+                        &call.name,
+                        &enabled_tools,
+                        &community_tools,
+                        config.web_search_backend != WebSearchBackend::Official,
+                    )
                 }) {
                         let message = format!(
                             "tool '{}' is not enabled or not executable by CodeSeeX",
