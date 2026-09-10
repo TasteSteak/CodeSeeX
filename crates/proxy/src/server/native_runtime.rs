@@ -197,7 +197,21 @@ async fn try_native_responses(
     };
     let pending = match state.native_pending_tool_groups.continuation_for(input) {
         Ok(pending) => pending,
-        Err(error) => return Some(native_pending_error_response(error)),
+        Err(error) => {
+            if let Some(detail) = error.diagnostic() {
+                let message = error.message();
+                let _ = state
+                    .store
+                    .record_event(
+                        "warn",
+                        "native_pending_continuation_diagnostic",
+                        &message,
+                        Some(&detail),
+                    )
+                    .await;
+            }
+            return Some(native_pending_error_response(error));
+        }
     };
     if let Some(continuation) = pending.as_ref() {
         payload["input"] = Value::Array(continuation.merged_input.clone());

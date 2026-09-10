@@ -9,6 +9,12 @@ use codeseex_core::NetworkProxyMode;
 use super::super::net::{request_error_message, user_agent};
 
 const SEARCH_SOURCE_ON_DEMAND_PROBE_TIMEOUT_SECS: u64 = 3;
+
+/// How long a fresh probe verdict keeps a known-unreachable source out of the
+/// fallback round. Re-attempting sources that just timed out burns a full
+/// per-source request window without new information, so they are retried only
+/// once this window has passed.
+pub(super) const RECENT_UNREACHABLE_SKIP_MS: u64 = 60_000;
 static SEARCH_SOURCE_HEALTH: OnceLock<Mutex<BTreeMap<String, SearchHealthSnapshot>>> =
     OnceLock::new();
 static SEARCH_SOURCE_REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -276,6 +282,24 @@ impl SearchPlan {
             .copied()
             .filter(|source| self.source_reachable(*source) == Some(false))
             .collect()
+    }
+
+    /// Sources worth re-attempting when the primary round yields nothing usable.
+    /// A very recent probe that marked them unreachable is honored, so the
+    /// fallback does not immediately re-hit the same timeouts.
+    pub(super) fn fallback_sources(&self) -> Vec<SearchSource> {
+        if self.checked_at_age_ms < RECENT_UNREACHABLE_SKIP_MS {
+            return Vec::new();
+        }
+        self.deprioritized_sources()
+    }
+
+    pub(super) fn skipped_unreachable_source_names(&self) -> Vec<&'static str> {
+        if self.checked_at_age_ms < RECENT_UNREACHABLE_SKIP_MS {
+            self.deprioritized_source_names()
+        } else {
+            Vec::new()
+        }
     }
 
     pub(super) fn source_order_names(&self) -> Vec<&'static str> {

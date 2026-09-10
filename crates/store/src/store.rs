@@ -3095,6 +3095,11 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                 "fallback",
             ],
         ),
+        "native_pending_continuation_diagnostic" => copy_log_fields(
+            object,
+            &mut output,
+            &["stored_provider_items", "replayed_items"],
+        ),
         _ => copy_log_fields(
             object,
             &mut output,

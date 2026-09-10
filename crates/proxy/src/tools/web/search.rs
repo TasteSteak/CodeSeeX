@@ -14,7 +14,7 @@ use super::safety::normalize_candidate_url;
 mod sources;
 use sources::{
     ranked_sources_from_health, refresh_search_source_health, search_plan,
-    source_health_diagnostic, SearchSource,
+    source_health_diagnostic, RECENT_UNREACHABLE_SKIP_MS, SearchSource,
 };
 #[cfg(test)]
 use sources::{SearchHealthSnapshot, SearchPlan, SearchSourceHealth};
@@ -41,7 +41,7 @@ pub(super) async fn query(
     let mut sources_attempted = Vec::new();
     let mut source_diagnostics = Vec::new();
     let primary_sources = plan.primary_sources();
-    let fallback_sources = plan.deprioritized_sources();
+    let fallback_sources = plan.fallback_sources();
 
     run_search_sources_progressive(
         client,
@@ -97,6 +97,7 @@ pub(super) async fn query(
         "sources_attempted": sources_attempted,
         "source_order": plan.source_order_names(),
         "sources_deprioritized": plan.deprioritized_source_names(),
+        "skipped_unreachable_sources": plan.skipped_unreachable_source_names(),
         "source_health": plan.health_diagnostic(),
         "source_diagnostics": source_diagnostics,
         "results": results.clone(),
@@ -800,6 +801,46 @@ mod tests {
             vec![SearchSource::DuckDuckGoLite]
         );
         assert_eq!(plan.plan_source, "cached_probe");
+    }
+    #[test]
+    fn fresh_unreachable_probe_suppresses_the_fallback_round() {
+        let sources = vec![
+            SearchSourceHealth {
+                source: SearchSource::BingHtml,
+                reachable: true,
+                latency_ms: Some(200),
+                status: Some(200),
+                error: None,
+            },
+            SearchSourceHealth {
+                source: SearchSource::BraveHtml,
+                reachable: false,
+                latency_ms: Some(3000),
+                status: None,
+                error: Some("probe_timeout".to_owned()),
+            },
+        ];
+        let fresh = SearchPlan::from_snapshot(
+            SearchHealthSnapshot {
+                cache_key: "none".to_owned(),
+                checked_at: Instant::now(),
+                sources: sources.clone(),
+            },
+            "cached_probe",
+        );
+        assert!(fresh.fallback_sources().is_empty());
+        assert_eq!(fresh.skipped_unreachable_source_names(), vec!["brave_html"]);
+
+        let stale = SearchPlan::from_snapshot(
+            SearchHealthSnapshot {
+                cache_key: "none".to_owned(),
+                checked_at: Instant::now() - Duration::from_millis(RECENT_UNREACHABLE_SKIP_MS + 1),
+                sources,
+            },
+            "cached_probe",
+        );
+        assert_eq!(stale.fallback_sources(), vec![SearchSource::BraveHtml]);
+        assert!(stale.skipped_unreachable_source_names().is_empty());
     }
 
     #[test]

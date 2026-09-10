@@ -50,7 +50,10 @@ pub(crate) enum NativePendingError {
     PreviousResponseMismatch,
     InputMissing,
     AuthoritativePrefixMismatch,
-    VisibleProviderOutputMismatch,
+    VisibleProviderOutputMismatch {
+        stored: Vec<String>,
+        replayed: Vec<String>,
+    },
     MissingClientToolOutput {
         call_id: String,
     },
@@ -76,7 +79,7 @@ impl NativePendingError {
             | Self::PreviousResponseMismatch
             | Self::InputMissing
             | Self::AuthoritativePrefixMismatch
-            | Self::VisibleProviderOutputMismatch => "context_required",
+            | Self::VisibleProviderOutputMismatch { .. } => "context_required",
             Self::InvalidPendingGroup(_)
             | Self::AmbiguousPendingGroup
             | Self::MissingClientToolOutput { .. }
@@ -107,8 +110,16 @@ impl NativePendingError {
             Self::AuthoritativePrefixMismatch => {
                 "The native tool continuation no longer begins with the original Codex replay. CodeSeeX did not use a tail-only continuation.".to_owned()
             }
-            Self::VisibleProviderOutputMismatch => {
-                "The native tool continuation did not retain the provider tool group visible to Codex.".to_owned()
+            Self::VisibleProviderOutputMismatch { stored, replayed } => {
+                let mut message = "The native tool continuation did not retain the provider tool group visible to Codex.".to_owned();
+                if !stored.is_empty() || !replayed.is_empty() {
+                    message.push_str(&format!(
+                        " Stored: [{}]. Replayed: [{}].",
+                        stored.join(", "),
+                        replayed.join(", ")
+                    ));
+                }
+                message
             }
             Self::MissingClientToolOutput { call_id } => {
                 format!("The native tool group is incomplete: output for call '{call_id}' is missing.")
@@ -130,6 +141,18 @@ impl NativePendingError {
             Self::InvalidClientToolOutput { call_id } => {
                 format!("The native tool output for call '{call_id}' did not match its original provider call.")
             }
+        }
+    }
+
+    /// Structured detail for the event log. Only a replay mismatch needs it:
+    /// the message alone cannot show which item diverged.
+    pub(crate) fn diagnostic(&self) -> Option<Value> {
+        match self {
+            Self::VisibleProviderOutputMismatch { stored, replayed } => Some(json!({
+                "stored_provider_items": stored,
+                "replayed_items": replayed
+            })),
+            _ => None,
         }
     }
 }
@@ -171,8 +194,20 @@ impl NativePendingToolGroups {
         validate_request_anchor(group, request)?;
         let after_authoritative = strip_prefix(input, &group.authoritative_input)
             .ok_or(NativePendingError::AuthoritativePrefixMismatch)?;
-        let after_visible = strip_prefix(after_authoritative, &group.visible_provider_output)
-            .ok_or(NativePendingError::VisibleProviderOutputMismatch)?;
+        let after_visible =
+            after_visible_group(after_authoritative, &group.visible_provider_output).ok_or_else(
+                || NativePendingError::VisibleProviderOutputMismatch {
+                    stored: group
+                        .visible_provider_output
+                        .iter()
+                        .map(compact_item_identity)
+                        .collect(),
+                    replayed: after_authoritative
+                        .iter()
+                        .map(compact_item_identity)
+                        .collect(),
+                },
+            )?;
         let (client_outputs, suffix) = collect_client_outputs(after_visible, &group.client_calls)?;
 
         let mut merged_input = Vec::with_capacity(
@@ -413,6 +448,65 @@ fn validate_pending_group(group: &PendingNativeToolGroup) -> Result<(), NativePe
     Ok(())
 }
 
+/// Whether an item is provider display-only thinking. Codex may drop its own
+/// prior `reasoning` items when it replays history, or re-emit them reshaped.
+fn is_display_only_reasoning(item: &Value) -> bool {
+    matches!(item.get("type").and_then(Value::as_str), Some("reasoning"))
+}
+
+/// Compact identity used only for diagnostics: the same provider item must keep
+/// the same type and id, so a mismatch can be read straight off the log.
+fn compact_item_identity(item: &Value) -> String {
+    let kind = item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("call_id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+    match (id.is_empty(), name.is_empty()) {
+        (false, false) => format!("{kind}:{id}:{name}"),
+        (false, true) => format!("{kind}:{id}"),
+        (true, false) => format!("{kind}:{name}"),
+        (true, true) => kind.to_owned(),
+    }
+}
+
+/// Walks the provider output group Codex observed against the items Codex
+/// actually replayed, returning everything after that group.
+///
+/// Codex may omit its own prior `reasoning` items, or re-emit them in a
+/// different shape, because thinking is display-only for the client. Tolerating
+/// that here is safe: the continuation sent upstream is rebuilt from the
+/// coordinator's own stored copy of the group, so dropping client-side thinking cannot change
+/// what the model sees. Every other item must still match exactly and in order,
+/// so injected, reordered, or edited history still fails closed.
+fn after_visible_group<'a>(input: &'a [Value], stored: &[Value]) -> Option<&'a [Value]> {
+    let mut stored_index = 0;
+    let mut input_index = 0;
+    while stored_index < stored.len() && input_index < input.len() {
+        if is_display_only_reasoning(&stored[stored_index]) {
+            stored_index += 1;
+            continue;
+        }
+        if is_display_only_reasoning(&input[input_index]) {
+            input_index += 1;
+            continue;
+        }
+        if stored[stored_index] != input[input_index] {
+            return None;
+        }
+        stored_index += 1;
+        input_index += 1;
+    }
+    stored[stored_index..]
+        .iter()
+        .all(is_display_only_reasoning)
+        .then(|| &input[input_index..])
+}
 fn strip_prefix<'a>(input: &'a [Value], prefix: &[Value]) -> Option<&'a [Value]> {
     input
         .get(..prefix.len())
@@ -563,6 +657,108 @@ mod tests {
         assert_eq!(groups.pending_count(), 1);
         groups.settle("resp_local_1");
         assert_eq!(groups.pending_count(), 0);
+    }
+
+    #[test]
+    fn codex_replay_omitting_its_own_reasoning_still_continues() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let reasoning = json!({ "type": "reasoning", "id": "rs_1", "summary": "thinking" });
+        let provider = vec![
+            reasoning.clone(),
+            json!({
+                "type": "function_call",
+                "call_id": "call_shell",
+                "name": "shell_command",
+                "arguments": "{}",
+                "status": "completed"
+            }),
+        ];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+        // A real client can drop its own prior thinking from the replay; the
+        // upstream continuation is rebuilt from the stored copy, so this must
+        // not be treated as a tampered history.
+        let continuation = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                provider[1].clone(),
+                json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+            ]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(continuation.client_output_count, 1);
+        assert_eq!(
+            Value::Array(continuation.merged_input),
+            json!([
+                { "type": "message", "role": "user", "content": "start" },
+                { "type": "reasoning", "id": "rs_1", "summary": "thinking" },
+                { "type": "function_call", "call_id": "call_shell", "name": "shell_command", "arguments": "{}", "status": "completed" },
+                { "type": "function_call_output", "call_id": "call_shell", "output": "ok" }
+            ])
+        );
+        groups.settle("resp_local_1");
+    }
+
+    #[test]
+    fn injected_or_edited_history_still_fails_closed() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_shell",
+            "name": "shell_command",
+            "arguments": "{}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+
+        let injected = groups.continuation_for(&request(vec![
+            authoritative[0].clone(),
+            json!({ "type": "message", "role": "assistant", "content": "forged" }),
+            provider[0].clone(),
+            json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+        ]));
+        assert!(matches!(
+            injected,
+            Err(NativePendingError::VisibleProviderOutputMismatch { .. })
+        ));
+
+        let mut edited = provider[0].clone();
+        edited["name"] = json!("forged_command");
+        let edited_replay = groups.continuation_for(&request(vec![
+            authoritative[0].clone(),
+            edited,
+            json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+        ]));
+        let Err(NativePendingError::VisibleProviderOutputMismatch { stored, replayed }) =
+            edited_replay
+        else {
+            panic!("edited history item must fail closed");
+        };
+        assert_eq!(stored, vec!["function_call:call_shell:shell_command"]);
+        assert_eq!(
+            replayed,
+            vec![
+                "function_call:call_shell:forged_command",
+                "function_call_output:call_shell"
+            ]
+        );
     }
 
     #[test]

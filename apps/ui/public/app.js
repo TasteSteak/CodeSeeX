@@ -204,6 +204,8 @@ let systemLanguageHints = [];
 let configuredLanguage = DEFAULT_LANGUAGE;
 let lastSavedConfig = null;
 let pendingConfig = null;
+// Number of consecutive 409 (config_version_conflict) save retries already spent.
+let configSaveConflictRetries = 0;
 let restartRequired = false;
 let latestRunning = false;
 let latestStarting = true;
@@ -673,6 +675,7 @@ async function saveConfig() {
     if (status && status.config_version) latestConfigVersion = String(status.config_version);
     renderConfigSaveState(pendingConfig ? "pending" : (restartRequired ? "savedRestart" : "saved"));
     saveCompleted = true;
+    configSaveConflictRetries = 0;
     await syncDesktopConfig(payload, previousConfig).catch(() => {});
     await loadConfig();
     await loadCodexAdapter().catch(() => {});
@@ -680,6 +683,22 @@ async function saveConfig() {
     await refresh({ forceLogs: true, force: true });
     if (currentView === "usage") await refreshUsage({ force: true });
   } catch (error) {
+    // A save can lose a race with any other writer of config.toml (the app own
+    // tray actions, another instance, or a manual edit). The server rejects
+    // a stale revision with 409 instead of overwriting, so refresh the revision and
+    // resend the same payload exactly once before surfacing the failure.
+    if (error && error.status === 409 && configSaveConflictRetries < 1) {
+      configSaveConflictRetries += 1;
+      renderConfigSaveState("pending");
+      try {
+        await loadConfig();
+        pendingConfig = payload;
+        scheduleConfigSave(CONFIG_AUTOSAVE_RETRY_MS);
+        return;
+      } catch (reloadError) {
+        // Fall through to the error state below.
+      }
+    }
     renderConfigSaveState("error", error && error.message ? error.message : "");
   } finally {
     configSaving = false;
