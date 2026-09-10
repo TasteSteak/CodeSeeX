@@ -82,7 +82,6 @@ pub(crate) fn config_keys() -> [&'static str; 10] {
 }
 
 pub(crate) fn analyze_registry_config_fields(
-    app_config: &AppConfig,
     settings: &BTreeMap<String, String>,
 ) -> Vec<Value> {
     vec![
@@ -2089,7 +2088,7 @@ mod tests {
     #[test]
     fn analyze_registry_replaces_readonly_displays_with_an_editable_model() {
         let config = AppConfig::default();
-        let fields = analyze_registry_config_fields(&config, &BTreeMap::new());
+        let fields = analyze_registry_config_fields(&BTreeMap::new());
         let keys = fields
             .iter()
             .filter_map(|field| field.get("key").and_then(Value::as_str))

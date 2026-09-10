@@ -107,7 +107,7 @@ pub(crate) fn tool_registry(
             "configurable": true,
             "enabled": selected.iter().any(|id| canonical_builtin_tool_id(id) == "vision_analyze"),
             "iconPath": "/assets/icons/vision.svg",
-            "config": crate::tools::vision::analyze_registry_config_fields(config, settings),
+            "config": crate::tools::vision::analyze_registry_config_fields(settings),
             "labels": [{ "id": "built_in", "labelKey": "toolLabelBuiltIn", "label": "Built-in" }]
         },
         {
