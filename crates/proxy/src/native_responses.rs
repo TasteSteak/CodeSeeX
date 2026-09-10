@@ -204,9 +204,14 @@ pub(crate) fn plan_native_tools(
             if web_search_backend == WebSearchBackend::Official {
                 continue;
             }
+            // CodeSeeX-hosted local search has no native executor: keep it on
+            // the compatibility path rather than silently changing ownership.
             requires_local_execution = true;
         } else if is_codeseex_local_tool(name) {
-            requires_local_execution = true;
+            // Workspace tools (list_directory, read_file_range,
+            // workspace_search, vision_analyze) are callable by the Codex
+            // client itself, so a native request keeps them in the provider
+            // tool list instead of falling back to Chat compatibility.
         }
         let native = native_definition_from_chat(definition, name)?;
         if names.insert(tool_identity(&native).to_owned()) {
@@ -791,7 +796,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.requires_local_execution);
+        assert!(!plan.requires_local_execution);
         assert!(plan.uses_official_web_search);
         assert_eq!(
             plan.tools
@@ -832,7 +837,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.requires_local_execution);
+        assert!(!plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
         assert_eq!(plan.tools[0]["name"], "workspace_search");
     }

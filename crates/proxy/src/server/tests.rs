@@ -24,24 +24,28 @@ struct FakeUpstreamState {
 }
 
 fn test_config(data_dir: PathBuf) -> AppConfig {
-    AppConfig {
+    let mut config = AppConfig {
         data_dir,
         ..Default::default()
-    }
+    };
+    config.upstream.transport = codeseex_core::config::UpstreamTransport::ChatCompat;
+    config
 }
 
 fn test_config_with_upstream(data_dir: PathBuf, fake_addr: SocketAddr) -> AppConfig {
-    AppConfig {
+    let mut config = AppConfig {
         data_dir,
         upstream: UpstreamConfig {
             base_url: format!("http://{fake_addr}"),
             official_v1_compat: false,
-            transport: Default::default(),
+            transport: codeseex_core::config::UpstreamTransport::ChatCompat,
+            credential: Default::default(),
             api_key: Some("test-key".to_owned()),
             timeout_ms: 30_000,
         },
         ..Default::default()
-    }
+    };
+    config
 }
 
 fn temp_workspace(label: &str) -> PathBuf {

@@ -59,8 +59,32 @@ pub(crate) fn clear_vision_generate_api_key(config: &AppConfig) -> Result<()> {
     secret_store_delete(&vision_generate_secret_target(config))
 }
 
+pub(crate) fn upstream_api_key(config: &AppConfig) -> Option<String> {
+    read_secret(&upstream_secret_target(config))
+}
+
+pub(crate) fn upstream_api_key_configured(config: &AppConfig) -> bool {
+    upstream_api_key(config).is_some()
+}
+
+pub(crate) fn write_upstream_api_key(config: &AppConfig, value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    secret_store_write(&upstream_secret_target(config), value)
+}
+
+pub(crate) fn clear_upstream_api_key(config: &AppConfig) -> Result<()> {
+    secret_store_delete(&upstream_secret_target(config))
+}
+
 fn read_secret(target: &str) -> Option<String> {
     secret_store_read(target).ok().flatten()
+}
+
+fn upstream_secret_target(config: &AppConfig) -> String {
+    secret_target(config, "upstream_api_key")
 }
 
 fn vision_analyze_secret_target(config: &AppConfig) -> String {

@@ -1,11 +1,11 @@
-//! Official DeepSeek Responses transport.
+//! Native DeepSeek Responses transport.
 //!
 //! This module deliberately owns only the native wire boundary. It neither
 //! rebuilds Codex history nor reads a Codex transcript: the client's `input`
-//! remains authoritative. Requests that require a CodeSeeX-owned local tool
-//! stay on the proven Chat compatibility path because their CodeSeeX-owned
-//! executor is not part of the native provider wire contract. This is a
-//! deterministic ownership route, not a silent fallback after provider error.
+//! remains authoritative. The native transport is the default for every
+//! upstream; Chat API compatibility is selected only when the user enables it.
+//! CodeSeeX-hosted tools that have no native executor (local web search) fail
+//! closed instead of silently changing tool ownership.
 
 use super::*;
 use crate::native_coordinator::{
@@ -16,8 +16,7 @@ use crate::native_responses::{
     rewrite_provider_response_identity, NativeResponseSseRelay, NativeStreamFinalization,
     NativeToolCallGroup,
 };
-use crate::upstream::{SelectedUpstreamTransport, UpstreamTransportSelection};
-use codeseex_core::config::UpstreamTransport;
+use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::WebSearchBackend;
 
 pub(super) async fn dispatch_if_selected(
@@ -28,19 +27,14 @@ pub(super) async fn dispatch_if_selected(
     model: &str,
     requested_model: Option<&str>,
 ) -> Option<axum::response::Response> {
-    match crate::upstream::select_transport(&config.upstream, model) {
-        UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat) => {
+    match crate::upstream::select_transport(&config.upstream) {
+        SelectedUpstreamTransport::ChatCompat => {
             reject_official_web_search_on_chat_compat(state, input, config, model, requested_model)
                 .await
         }
-        UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses) => {
+        SelectedUpstreamTransport::NativeResponses => {
             try_native_responses(state, headers, input, config, model, requested_model).await
         }
-        UpstreamTransportSelection::NativeResponsesUnavailable(reason) => Some(json_error(
-            StatusCode::BAD_REQUEST,
-            "native_responses_unavailable",
-            reason.message(model),
-        )),
     }
 }
 
@@ -128,7 +122,7 @@ async fn try_native_responses(
     let plan = match plan_native_tools(&requested_tools, config.web_search_backend) {
         Ok(plan) => plan,
         Err(message) => {
-            return native_incompatible_or_fallback(
+            return Some(native_incompatible(
                 state,
                 config,
                 &id,
@@ -136,35 +130,40 @@ async fn try_native_responses(
                 model,
                 "tool_definition_incompatible",
                 message,
-                true,
             )
-            .await;
+            .await);
         }
     };
 
-    // Local CodeSeeX tools must not be converted into provider-owned or
-    // client-owned calls by accident. Returning `None` for Auto is an
-    // explicit, diagnosable use of the existing Chat implementation; explicit
-    // native mode instead receives a readable incompatibility error.
+    // CodeSeeX-hosted tools with no native executor (for example local web
+    // search) fail closed on the native transport; the user can select Chat
+    // API compatibility. Base workspace tools are executed by the Codex
+    // client, matching the client-owned tool flow of the native transport.
     if plan.requires_local_execution {
-        // Selecting provider-owned Web Search is an explicit ownership choice.
-        // If the same request also advertises CodeSeeX-owned tools, Chat
-        // compatibility could execute the original local web_search function
-        // and silently defeat that choice. Refuse that mixed request until a
-        // complete native local-tool streaming loop has been verified.
-        let allow_auto_fallback = !(config.web_search_backend == WebSearchBackend::Official
-            && plan.uses_official_web_search);
-        return native_incompatible_or_fallback(
+        let mixed_official_search = config.web_search_backend == WebSearchBackend::Official
+            && plan.uses_official_web_search;
+        let message = if mixed_official_search {
+            "This request combines provider-owned official web search with a CodeSeeX-hosted tool. CodeSeeX did not silently replace either backend. Select Chat API compatibility for this request."
+                .to_owned()
+        } else {
+            "This request requires a CodeSeeX-hosted tool executor that is not available on the native Responses transport (for example local web search). Select Chat API compatibility for this request."
+                .to_owned()
+        };
+        let issue = if mixed_official_search {
+            "mixed_official_web_search_and_hosted_tool"
+        } else {
+            "hosted_tool_requires_chat_compat"
+        };
+        return Some(native_incompatible(
             state,
             config,
             &id,
             requested_model,
             model,
-            "local_tool_execution_requires_chat_compat",
-            "This request combines provider-owned official web search with a CodeSeeX-owned local tool. CodeSeeX did not silently replace either backend. Disable the local tool for this native request, or select the local web-search backend / chat compatibility.",
-            allow_auto_fallback,
+            issue,
+            message,
         )
-        .await;
+        .await);
     }
 
     let previous = input.get("previous_response_id").and_then(Value::as_str);
@@ -275,12 +274,17 @@ async fn try_native_responses(
         codeseex_core::codex_auth::remember_authorization_header(auth);
     }
     let client = state.client();
+    let managed_key = crate::secrets::upstream_api_key(&config);
     let started = std::time::Instant::now();
     let upstream = crate::upstream::post_responses(
         &client,
         &config.upstream,
-        auth.as_deref(),
-        Some(&state.v1_access_token),
+        crate::upstream::UpstreamAuthRequest {
+            inbound: auth.as_deref(),
+            local_access_token: Some(&state.v1_access_token),
+            managed_key: managed_key.as_deref(),
+            passthrough: crate::upstream::UpstreamPassthrough::from_headers(headers),
+        },
         Some(input),
         payload.clone(),
     )
@@ -375,8 +379,7 @@ async fn try_native_responses(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn native_incompatible_or_fallback(
+async fn native_incompatible(
     state: &ProxyState,
     config: &AppConfig,
     id: &str,
@@ -384,8 +387,7 @@ async fn native_incompatible_or_fallback(
     model: &str,
     issue: &str,
     message: impl Into<String>,
-    allow_auto_fallback: bool,
-) -> Option<axum::response::Response> {
+) -> axum::response::Response {
     let message = message.into();
     let detail = json!({
         "id": id,
@@ -394,30 +396,23 @@ async fn native_incompatible_or_fallback(
         "requested_model": requested_model,
         "model": model,
         "selected_web_search_backend": web_search_backend_label(config.web_search_backend),
-        "selection": if allow_auto_fallback && config.upstream.transport == UpstreamTransport::Auto { "compatibility_required_by_request" } else { "explicit_or_failed_closed" },
-        "fallback": if config.upstream.transport == UpstreamTransport::Auto && allow_auto_fallback { "chat_compat" } else { "none" }
+        "selection": "explicit_or_failed_closed",
+        "fallback": "none"
     });
     let _ = state
         .store
         .record_event(
-            if config.upstream.transport == UpstreamTransport::Auto && allow_auto_fallback {
-                "info"
-            } else {
-                "warn"
-            },
+            "warn",
             "native_responses_compatibility_diagnostic",
-            "Native Responses request requires the compatibility path.",
+            "Native Responses request is incompatible with the selected transport.",
             Some(&detail),
         )
         .await;
-    if config.upstream.transport == UpstreamTransport::Auto && allow_auto_fallback {
-        return None;
-    }
-    Some(json_error(
+    json_error(
         StatusCode::BAD_REQUEST,
         "native_responses_incompatible",
         message,
-    ))
+    )
 }
 
 fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, String> {
@@ -1029,6 +1024,7 @@ mod tests {
     use axum::routing::post;
     use axum::{Json, Router};
     use codeseex_core::config::UpstreamConfig;
+    use codeseex_core::config::UpstreamTransport;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
@@ -1053,6 +1049,7 @@ mod tests {
                 base_url: format!("http://{address}"),
                 official_v1_compat: false,
                 transport: UpstreamTransport::NativeResponses,
+                credential: Default::default(),
                 api_key: Some("native-test-key".to_owned()),
                 timeout_ms: 30_000,
             },
@@ -1654,13 +1651,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_search_auto_falls_back_without_contacting_native_upstream() {
+    async fn local_search_fails_closed_on_native_transport() {
         let data_dir = temp_data_dir("local-fallback");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
             ..Default::default()
         };
-        config.upstream.transport = UpstreamTransport::Auto;
+        config.upstream.transport = UpstreamTransport::NativeResponses;
         config.web_search_backend = WebSearchBackend::Local;
         let store = Store::open(&data_dir).await.unwrap();
         let state = ProxyState::for_test(config.clone(), store);
@@ -1672,8 +1669,7 @@ mod tests {
             ]),
         );
 
-        assert!(
-            try_native_responses(
+        let response = try_native_responses(
                 &state,
                 &HeaderMap::new(),
                 &input,
@@ -1682,9 +1678,8 @@ mod tests {
                 Some("deepseek-v4-flash"),
             )
             .await
-            .is_none(),
-            "Auto must retain local web_search through chat_compat"
-        );
+            .expect("hosted local search must fail closed on native");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             state
                 .store
@@ -1697,13 +1692,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn official_backend_without_a_search_tool_allows_local_tool_chat_fallback() {
+    async fn official_backend_without_a_search_tool_stays_on_native() {
         let data_dir = temp_data_dir("official-no-search-local-tool-fallback");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
             ..Default::default()
         };
-        config.upstream.transport = UpstreamTransport::Auto;
+        config.upstream.transport = UpstreamTransport::NativeResponses;
         config.web_search_backend = WebSearchBackend::Official;
         let store = Store::open(&data_dir).await.unwrap();
         let state = ProxyState::for_test(config.clone(), store);
@@ -1713,31 +1708,28 @@ mod tests {
             json!([{ "type": "function", "function": { "name": "workspace_search", "parameters": { "type": "object" } } }]),
         );
 
-        assert!(
-            try_native_responses(
-                &state,
-                &HeaderMap::new(),
-                &input,
-                &config,
-                "deepseek-v4-flash",
-                Some("deepseek-v4-flash"),
-            )
-            .await
-            .is_none(),
-            "official mode must not block unrelated local tools when no search was requested"
-        );
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("native transport must stay selected for workspace tools");
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
-    async fn official_search_never_silently_falls_back_to_local_when_other_local_tools_are_present()
-    {
+    async fn official_search_with_workspace_tools_stays_on_native() {
         let data_dir = temp_data_dir("official-search-mixed-tools");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
             ..Default::default()
         };
-        config.upstream.transport = UpstreamTransport::Auto;
+        config.upstream.transport = UpstreamTransport::NativeResponses;
         config.web_search_backend = WebSearchBackend::Official;
         let store = Store::open(&data_dir).await.unwrap();
         let state = ProxyState::for_test(config.clone(), store);
@@ -1759,15 +1751,15 @@ mod tests {
             Some("deepseek-v4-flash"),
         )
         .await
-        .expect("official/local mixed tools must return a controlled error");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        .expect("provider search with workspace tools must stay on native");
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             state
                 .store
                 .response_status("resp_native_official_search_mixed")
                 .await
                 .unwrap(),
-            None
+            Some(codeseex_store::RequestStatus::Failed)
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -1819,7 +1811,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_search_still_enters_chat_compat_when_native_is_unavailable() {
+    async fn local_search_enters_chat_compat_when_explicitly_configured() {
         let data_dir = temp_data_dir("local-search-chat-compat");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),

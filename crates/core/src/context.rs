@@ -114,6 +114,7 @@ pub fn compile_responses_input_with_tool_outputs(
             let mut seen_tool_call_names = HashMap::new();
             let mut pending_assistant = PendingAssistant::default();
             let mut pending_reasoning = String::new();
+            let mut last_reasoning = String::new();
 
             for item in items {
                 if response_item_is_display_only(item) {
@@ -129,6 +130,7 @@ pub fn compile_responses_input_with_tool_outputs(
                 if let Some(reasoning) = response_item_to_reasoning_text(item) {
                     diagnostic.estimated_chars += reasoning.chars().count() as u64;
                     pending_reasoning = join_nonempty(&pending_reasoning, &reasoning);
+                    last_reasoning = pending_reasoning.clone();
                 } else if let Some(tool_call) =
                     response_item_to_chat_tool_call(item, &resolved_tool_call_ids)
                 {
@@ -145,6 +147,9 @@ pub fn compile_responses_input_with_tool_outputs(
                     pending_assistant.reasoning =
                         join_nonempty(&pending_assistant.reasoning, &pending_reasoning);
                     pending_reasoning.clear();
+                    if pending_assistant.reasoning.trim().is_empty() {
+                        pending_assistant.reasoning = last_reasoning.clone();
+                    }
                     pending_assistant.tool_calls.push(tool_call);
                     diagnostic.message_items += 1;
                 } else if let Some((message, semantic_fact)) = response_item_to_tool_result_message(
@@ -1007,6 +1012,39 @@ mod tests {
             Some("need to inspect files first")
         );
         assert_eq!(compiled.messages[1].role, "tool");
+    }
+
+    #[test]
+    fn reuses_last_reasoning_for_tool_call_without_preceding_reasoning() {
+        let input = json!([
+            {
+                "type": "reasoning",
+                "summary": [
+                    { "type": "summary_text", "text": "inspect files first" }
+                ]
+            },
+            {"type":"function_call","call_id":"call_1","name":"read_file_range","arguments":"{\"path\":\"Cargo.toml\"}"},
+            {"type":"function_call_output","call_id":"call_1","output":"[package]"},
+            {"type":"function_call","call_id":"call_2","name":"read_file_range","arguments":"{\"path\":\"README.md\"}"},
+            {"type":"function_call_output","call_id":"call_2","output":"# CodeSeeX"}
+        ]);
+        let compiled = compile_responses_input(&input);
+
+        assert_eq!(compiled.messages[0].role, "assistant");
+        assert_eq!(
+            compiled.messages[0].reasoning_content.as_deref(),
+            Some("inspect files first")
+        );
+        assert_eq!(compiled.messages[1].role, "tool");
+        assert_eq!(compiled.messages[2].role, "assistant");
+        assert_eq!(
+            compiled.messages[2]
+                .reasoning_content
+                .as_deref()
+                .map(str::trim),
+            Some("inspect files first")
+        );
+        assert_eq!(compiled.messages[3].role, "tool");
     }
 
     #[test]

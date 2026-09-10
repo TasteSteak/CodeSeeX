@@ -3,6 +3,7 @@ pub mod codex_auth;
 pub mod config;
 pub mod context;
 pub mod models;
+pub mod pricing;
 pub mod protocol;
 pub mod urls;
 
@@ -20,3 +21,6 @@ pub use config::{
     VisionAnalyzeBackend, VisionImageDetail, WebSearchBackend, IMAGE_CAPABILITY_SCHEMA_VERSION,
 };
 pub use models::{available_models, ModelInfo, TemperaturePreset, UpstreamModelOverride};
+pub use pricing::{
+    BillingPeriod, CostEstimate, ModelRates, PeakValley, PeakWindow, PricingTable, RateSource,
+};

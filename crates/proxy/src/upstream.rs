@@ -1,7 +1,7 @@
 use codeseex_core::codex_auth::read_codex_auth_api_key;
-use codeseex_core::config::{UpstreamConfig, UpstreamTransport};
+use codeseex_core::config::{UpstreamConfig, UpstreamCredentialSource, UpstreamTransport};
 use codeseex_core::urls::{chat_completions_url, is_official_deepseek_url, responses_url};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use url::Url;
 
@@ -14,93 +14,237 @@ pub(crate) enum SelectedUpstreamTransport {
     ChatCompat,
 }
 
-/// Official DeepSeek models use the Responses API by default. Chat
-/// compatibility is an explicit experimental recovery path; custom endpoints
-/// stay on Chat compatibility unless a user deliberately forces native mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeResponsesEligibility {
-    Verified,
-    EndpointNotVerified,
+/// The native Responses transport is the default for every upstream. Chat
+/// compatibility is selected only when the user explicitly configures it; the
+/// proxy never decides between transports based on endpoint identity.
+pub(crate) fn select_transport(upstream: &UpstreamConfig) -> SelectedUpstreamTransport {
+    match upstream.transport {
+        UpstreamTransport::ChatCompat => SelectedUpstreamTransport::ChatCompat,
+        UpstreamTransport::NativeResponses => SelectedUpstreamTransport::NativeResponses,
+    }
 }
 
-impl NativeResponsesEligibility {
-    pub(crate) fn message(self, _model: &str) -> String {
-        match self {
-            Self::Verified => "DeepSeek Responses is selected for this request.".to_owned(),
-            Self::EndpointNotVerified => {
-                "CodeSeeX supports native Responses only for the canonical https://api.deepseek.com endpoint. Use Chat API compatibility for a custom endpoint.".to_owned()
-            }
+/// Diagnostic marker describing which credential reached the upstream. It is
+/// never a secret: it only says where the Authorization header came from.
+pub(crate) const CREDENTIAL_SOURCE_HEADER: &str = "x-codeseex-credential-source";
+
+/// Client identity headers a Codex relay may use to recognize its own client.
+///
+/// CodeSeeX is a router: it neither invents nor rewrites these values, it only
+/// forwards what the client already sent. Dropping them made relays answer
+/// `401 unauthorized client detected` even though the credential was valid.
+#[derive(Clone, Default)]
+pub(crate) struct UpstreamPassthrough {
+    originator: Option<String>,
+    user_agent: Option<String>,
+    session_id: Option<String>,
+    conversation_id: Option<String>,
+}
+
+impl UpstreamPassthrough {
+    pub(crate) fn from_headers(headers: &HeaderMap) -> Self {
+        let read = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        Self {
+            originator: read("originator"),
+            user_agent: read("user-agent"),
+            session_id: read("session_id"),
+            conversation_id: read("conversation_id"),
+        }
+    }
+
+    fn entries(&self) -> [(&'static str, Option<&str>); 4] {
+        [
+            ("originator", self.originator.as_deref()),
+            ("user-agent", self.user_agent.as_deref()),
+            ("session_id", self.session_id.as_deref()),
+            ("conversation_id", self.conversation_id.as_deref()),
+        ]
+    }
+}
+
+/// Credential inputs available for one upstream request.
+#[derive(Clone, Default)]
+pub(crate) struct UpstreamAuthRequest<'a> {
+    /// Authorization the client sent to the local proxy.
+    pub inbound: Option<&'a str>,
+    /// CodeSeeX's own v1 access token. It is a local-only credential and is
+    /// never forwarded upstream.
+    pub local_access_token: Option<&'a str>,
+    /// Key the user stored for the upstream inside CodeSeeX (OS credential
+    /// store).
+    pub managed_key: Option<&'a str>,
+    /// Client identity headers forwarded verbatim to the upstream.
+    pub passthrough: UpstreamPassthrough,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedUpstreamAuth {
+    pub header: Option<String>,
+    pub source: &'static str,
+}
+
+impl ResolvedUpstreamAuth {
+    fn new(header: Option<String>, source: &'static str) -> Self {
+        match header {
+            Some(header) => Self {
+                header: Some(header),
+                source,
+            },
+            None => Self {
+                header: None,
+                source: "none",
+            },
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UpstreamTransportSelection {
-    Selected(SelectedUpstreamTransport),
-    NativeResponsesUnavailable(NativeResponsesEligibility),
+impl std::fmt::Debug for UpstreamAuthRequest<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpstreamAuthRequest")
+            .field("inbound", &self.inbound.is_some())
+            .field("local_access_token", &self.local_access_token.is_some())
+            .field("managed_key", &self.managed_key.is_some())
+            .finish()
+    }
 }
 
-pub(crate) fn native_responses_eligibility(
-    upstream: &UpstreamConfig,
-    model: &str,
-) -> NativeResponsesEligibility {
-    let official_endpoint = Url::parse(&upstream.base_url)
+pub(crate) fn upstream_is_official(upstream: &UpstreamConfig) -> bool {
+    Url::parse(&upstream.base_url)
         .ok()
         .as_ref()
-        .is_some_and(is_official_deepseek_url);
-    if !official_endpoint {
-        return NativeResponsesEligibility::EndpointNotVerified;
-    }
-    let _ = model;
-    NativeResponsesEligibility::Verified
+        .is_some_and(is_official_deepseek_url)
 }
 
-pub(crate) fn select_transport(
+fn codex_app_isolation_applies(upstream: &UpstreamConfig, payload: &Value) -> bool {
+    upstream_is_official(upstream) && payload_looks_like_codex_app_request(payload)
+}
+
+fn inbound_credential<'a>(
+    request: &UpstreamAuthRequest<'a>,
+) -> Option<String> {
+    request
+        .inbound
+        .filter(|value| !authorization_matches_local_access_token(request.local_access_token, value))
+        .and_then(format_bearer_header)
+}
+
+fn configured_credential(upstream: &UpstreamConfig, request: &UpstreamAuthRequest<'_>) -> Option<String> {
+    upstream
+        .api_key
+        .as_deref()
+        .filter(|value| !local_access_token_matches(request.local_access_token, value))
+        .and_then(format_bearer_header)
+}
+
+fn managed_credential(request: &UpstreamAuthRequest<'_>) -> Option<String> {
+    request
+        .managed_key
+        .filter(|value| !local_access_token_matches(request.local_access_token, value))
+        .and_then(format_bearer_header)
+}
+
+fn codex_auth_credential(
+    request: &UpstreamAuthRequest<'_>,
+    direct_key: &dyn Fn() -> Option<String>,
+) -> Option<String> {
+    direct_key()
+        .filter(|value| !local_access_token_matches(request.local_access_token, value))
+        .and_then(|value| format_bearer_header(&value))
+}
+
+/// Resolves the Authorization header for one upstream request.
+///
+/// `Auto` keeps the historical isolation for the official endpoint (a Codex
+/// App shaped payload never forwards the client's own credential, because the
+/// official endpoint expects the account key). Custom endpoints instead
+/// forward whatever the client sent: on a relay, the key the user typed into
+/// the client is the only credential that can work there, and dropping it was
+/// the root cause of `401 unauthorized client` after switching upstreams.
+pub(crate) fn resolve_upstream_authorization(
     upstream: &UpstreamConfig,
-    model: &str,
-) -> UpstreamTransportSelection {
-    match upstream.transport {
-        UpstreamTransport::ChatCompat => {
-            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat)
+    request: UpstreamAuthRequest<'_>,
+    payload: &Value,
+    direct_key: &dyn Fn() -> Option<String>,
+) -> ResolvedUpstreamAuth {
+    match upstream.credential {
+        UpstreamCredentialSource::Request => {
+            ResolvedUpstreamAuth::new(inbound_credential(&request), "request")
         }
-        UpstreamTransport::Auto => match native_responses_eligibility(upstream, model) {
-            NativeResponsesEligibility::Verified => {
-                UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+        UpstreamCredentialSource::Env => {
+            ResolvedUpstreamAuth::new(configured_credential(upstream, &request), "env")
+        }
+        UpstreamCredentialSource::Secret => {
+            ResolvedUpstreamAuth::new(managed_credential(&request), "secret")
+        }
+        UpstreamCredentialSource::CodexAuth => {
+            ResolvedUpstreamAuth::new(codex_auth_credential(&request, direct_key), "codex_auth")
+        }
+        UpstreamCredentialSource::Auto => {
+            if !codex_app_isolation_applies(upstream, payload) {
+                if let Some(header) = inbound_credential(&request) {
+                    return ResolvedUpstreamAuth::new(Some(header), "request");
+                }
             }
-            _ => UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat),
-        },
-        UpstreamTransport::NativeResponses => match native_responses_eligibility(upstream, model) {
-            NativeResponsesEligibility::Verified => {
-                UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+            if let Some(header) = managed_credential(&request) {
+                return ResolvedUpstreamAuth::new(Some(header), "secret");
             }
-            reason => UpstreamTransportSelection::NativeResponsesUnavailable(reason),
-        },
+            if let Some(header) = configured_credential(upstream, &request) {
+                return ResolvedUpstreamAuth::new(Some(header), "env");
+            }
+            ResolvedUpstreamAuth::new(codex_auth_credential(&request, direct_key), "codex_auth")
+        }
     }
 }
 
-pub async fn post_chat_completions(
+async fn send_upstream_request(
     client: &reqwest::Client,
+    url: &str,
     upstream: &UpstreamConfig,
-    inbound_auth: Option<&str>,
-    local_access_token: Option<&str>,
+    request: UpstreamAuthRequest<'_>,
     auth_context_payload: Option<&Value>,
     payload: Value,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let url = chat_completions_url(&upstream.base_url, upstream.official_v1_compat);
+) -> reqwest::Result<reqwest::Response> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/json, text/event-stream"),
     );
+    // Forward the client's own identity headers before anything else so a
+    // relay sees the same caller it would have seen without CodeSeeX in front.
+    for (name, value) in request.passthrough.entries() {
+        let (Some(value), Ok(name)) = (value, HeaderName::from_bytes(name.as_bytes())) else {
+            continue;
+        };
+        if let Ok(value) = HeaderValue::from_str(value) {
+            headers.insert(name, value);
+        }
+    }
 
     let auth_payload = auth_context_payload.unwrap_or(&payload);
-    if let Some(auth) =
-        resolve_authorization_header(upstream, inbound_auth, local_access_token, auth_payload)
+    let resolved = resolve_upstream_authorization(
+        upstream,
+        request,
+        auth_payload,
+        &|| read_codex_auth_api_key(false),
+    );
+    if let Some(value) = resolved
+        .header
+        .as_deref()
+        .and_then(|auth| HeaderValue::from_str(auth).ok())
     {
-        if let Ok(value) = HeaderValue::from_str(&auth) {
-            headers.insert(AUTHORIZATION, value);
-        }
+        headers.insert(AUTHORIZATION, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(resolved.source) {
+        headers.insert(CREDENTIAL_SOURCE_HEADER, value);
     }
 
     client
@@ -111,85 +255,27 @@ pub async fn post_chat_completions(
         .await
 }
 
+pub async fn post_chat_completions(
+    client: &reqwest::Client,
+    upstream: &UpstreamConfig,
+    auth: UpstreamAuthRequest<'_>,
+    auth_context_payload: Option<&Value>,
+    payload: Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let url = chat_completions_url(&upstream.base_url, upstream.official_v1_compat);
+    send_upstream_request(client, &url, upstream, auth, auth_context_payload, payload).await
+}
+
 pub async fn post_responses(
     client: &reqwest::Client,
     upstream: &UpstreamConfig,
-    inbound_auth: Option<&str>,
-    local_access_token: Option<&str>,
+    auth: UpstreamAuthRequest<'_>,
     auth_context_payload: Option<&Value>,
     payload: Value,
 ) -> anyhow::Result<reqwest::Response> {
     let url = responses_url(&upstream.base_url)?;
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static("application/json, text/event-stream"),
-    );
-
-    let auth_payload = auth_context_payload.unwrap_or(&payload);
-    if let Some(auth) =
-        resolve_authorization_header(upstream, inbound_auth, local_access_token, auth_payload)
-    {
-        if let Ok(value) = HeaderValue::from_str(&auth) {
-            headers.insert(AUTHORIZATION, value);
-        }
-    }
-
-    Ok(client
-        .post(url)
-        .headers(headers)
-        .json(&payload)
-        .send()
-        .await?)
+    Ok(send_upstream_request(client, &url, upstream, auth, auth_context_payload, payload).await?)
 }
-
-fn resolve_authorization_header(
-    upstream: &UpstreamConfig,
-    inbound_auth: Option<&str>,
-    local_access_token: Option<&str>,
-    payload: &Value,
-) -> Option<String> {
-    resolve_authorization_header_with_direct_key(
-        upstream,
-        inbound_auth,
-        local_access_token,
-        payload,
-        || read_codex_auth_api_key(false),
-    )
-}
-
-fn resolve_authorization_header_with_direct_key<F>(
-    upstream: &UpstreamConfig,
-    inbound_auth: Option<&str>,
-    local_access_token: Option<&str>,
-    payload: &Value,
-    direct_key: F,
-) -> Option<String>
-where
-    F: FnOnce() -> Option<String>,
-{
-    let can_use_inbound = !payload_looks_like_codex_app_request(payload);
-    let configured_auth = upstream
-        .api_key
-        .as_deref()
-        .filter(|value| !local_access_token_matches(local_access_token, value))
-        .and_then(format_bearer_header);
-    let inbound_auth = inbound_auth
-        .filter(|value| !authorization_matches_local_access_token(local_access_token, value))
-        .and_then(format_bearer_header);
-    if can_use_inbound {
-        if let Some(auth) = inbound_auth {
-            return Some(auth);
-        }
-    }
-    configured_auth.or_else(|| {
-        direct_key()
-            .filter(|value| !local_access_token_matches(local_access_token, value))
-            .and_then(|value| format_bearer_header(&value))
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CodexRequestMarkers {
     pub client_metadata: bool,
@@ -306,10 +392,167 @@ mod tests {
         UpstreamConfig {
             base_url: "https://api.deepseek.com".to_owned(),
             official_v1_compat: true,
-            transport: UpstreamTransport::Auto,
+            transport: UpstreamTransport::NativeResponses,
+            credential: UpstreamCredentialSource::Auto,
             api_key: api_key.map(str::to_owned),
             timeout_ms: 120_000,
         }
+    }
+
+    fn custom_upstream(api_key: Option<&str>) -> UpstreamConfig {
+        UpstreamConfig {
+            base_url: "https://relay.example.com/v1".to_owned(),
+            ..upstream_with_key(api_key)
+        }
+    }
+
+    fn resolve_for_test(
+        upstream: &UpstreamConfig,
+        inbound: Option<&str>,
+        local_access_token: Option<&str>,
+        payload: &Value,
+        direct_key: impl Fn() -> Option<String>,
+    ) -> Option<String> {
+        resolve_upstream_authorization(
+            upstream,
+            UpstreamAuthRequest {
+                inbound,
+                local_access_token,
+                managed_key: None,
+                passthrough: Default::default(),
+            },
+            payload,
+            &direct_key,
+        )
+        .header
+    }
+
+    fn resolve_with_managed_key(
+        upstream: &UpstreamConfig,
+        inbound: Option<&str>,
+        managed_key: Option<&str>,
+        payload: &Value,
+    ) -> ResolvedUpstreamAuth {
+        resolve_upstream_authorization(
+            upstream,
+            UpstreamAuthRequest {
+                inbound,
+                local_access_token: None,
+                managed_key,
+                passthrough: Default::default(),
+            },
+            payload,
+            &|| None,
+        )
+    }
+
+    #[test]
+    fn custom_endpoint_forwards_client_authorization_for_codex_app_payloads() {
+        let payload = serde_json::json!({
+            "client_metadata": { "x-codex-installation-id": "codex-install" },
+            "prompt_cache_key": "thread"
+        });
+        assert_eq!(
+            resolve_for_test(
+                &custom_upstream(None),
+                Some("Bearer relay-key"),
+                None,
+                &payload,
+                || None
+            )
+            .as_deref(),
+            Some("Bearer relay-key")
+        );
+    }
+
+    #[test]
+    fn explicit_credential_sources_are_pinned() {
+        let payload = serde_json::json!({ "input": "hello" });
+        let request = UpstreamAuthRequest {
+            inbound: Some("Bearer inbound-key"),
+            local_access_token: None,
+            managed_key: Some("managed-key"),
+            passthrough: Default::default(),
+        };
+        let env_upstream = UpstreamConfig {
+            credential: UpstreamCredentialSource::Env,
+            api_key: Some("configured-key".to_owned()),
+            ..custom_upstream(None)
+        };
+        assert_eq!(
+            resolve_upstream_authorization(&env_upstream, request.clone(), &payload, &|| Some(
+                "direct-key".to_owned()
+            ))
+            .source,
+            "env"
+        );
+        let secret_upstream = UpstreamConfig {
+            credential: UpstreamCredentialSource::Secret,
+            api_key: Some("configured-key".to_owned()),
+            ..custom_upstream(None)
+        };
+        let resolved =
+            resolve_upstream_authorization(&secret_upstream, request.clone(), &payload, &|| {
+            Some("direct-key".to_owned())
+        });
+        assert_eq!(resolved.source, "secret");
+        assert_eq!(resolved.header.as_deref(), Some("Bearer managed-key"));
+        let codex_auth_upstream = UpstreamConfig {
+            credential: UpstreamCredentialSource::CodexAuth,
+            api_key: Some("configured-key".to_owned()),
+            ..custom_upstream(None)
+        };
+        let resolved =
+            resolve_upstream_authorization(&codex_auth_upstream, request.clone(), &payload, &|| {
+            Some("direct-key".to_owned())
+        });
+        assert_eq!(resolved.source, "codex_auth");
+        assert_eq!(resolved.header.as_deref(), Some("Bearer direct-key"));
+        let request_only = UpstreamConfig {
+            credential: UpstreamCredentialSource::Request,
+            api_key: Some("configured-key".to_owned()),
+            ..custom_upstream(None)
+        };
+        let resolved =
+            resolve_upstream_authorization(&request_only, request, &payload, &|| None);
+        assert_eq!(resolved.source, "request");
+        assert_eq!(resolved.header.as_deref(), Some("Bearer inbound-key"));
+    }
+
+    #[test]
+    fn managed_secret_credential_wins_before_ambient_sources() {
+        let payload = serde_json::json!({ "input": "hello" });
+        let upstream = UpstreamConfig {
+            api_key: Some("configured-key".to_owned()),
+            ..custom_upstream(None)
+        };
+        let resolved = resolve_with_managed_key(&upstream, None, Some("managed-key"), &payload);
+        assert_eq!(resolved.source, "secret");
+        assert_eq!(resolved.header.as_deref(), Some("Bearer managed-key"));
+    }
+
+    #[test]
+    fn missing_credential_reports_none_source() {
+        let payload = serde_json::json!({ "input": "hello" });
+        let resolved = resolve_with_managed_key(&custom_upstream(None), None, None, &payload);
+        assert_eq!(resolved.source, "none");
+        assert!(resolved.header.is_none());
+    }
+
+    #[test]
+    fn official_endpoint_still_isolates_codex_app_credentials() {
+        let payload = serde_json::json!({ "prompt_cache_key": "thread" });
+        assert_eq!(
+            resolve_for_test(
+                &upstream_with_key(None),
+                Some("Bearer relay-key"),
+                None,
+                &payload,
+                || None
+            ),
+            None
+        );
+        assert!(!upstream_is_official(&custom_upstream(None)));
     }
 
     #[tokio::test]
@@ -337,8 +580,7 @@ mod tests {
         let response = post_responses(
             &reqwest::Client::new(),
             &upstream,
-            None,
-            None,
+            UpstreamAuthRequest::default(),
             Some(&payload),
             payload.clone(),
         )
@@ -369,9 +611,83 @@ mod tests {
     }
 
     #[test]
+    fn passthrough_keeps_only_non_empty_identity_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        headers.insert("user-agent", HeaderValue::from_static("codex_cli_rs/0.7.1"));
+        headers.insert("session_id", HeaderValue::from_static("   "));
+        let passthrough = UpstreamPassthrough::from_headers(&headers);
+        let entries = passthrough.entries();
+        assert_eq!(entries[0], ("originator", Some("codex_cli_rs")));
+        assert_eq!(entries[1], ("user-agent", Some("codex_cli_rs/0.7.1")));
+        assert_eq!(entries[2], ("session_id", None));
+        assert_eq!(entries[3], ("conversation_id", None));
+    }
+
+    #[tokio::test]
+    async fn post_forwards_client_identity_headers_verbatim() {
+        let capture = NativeRequestCapture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/openai/v1/responses", post(fake_native_responses))
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let upstream = UpstreamConfig {
+            base_url: format!("http://{address}/openai/v1"),
+            transport: UpstreamTransport::NativeResponses,
+            api_key: Some("native-test-key".to_owned()),
+            ..upstream_with_key(None)
+        };
+        let mut inbound = HeaderMap::new();
+        inbound.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        inbound.insert("user-agent", HeaderValue::from_static("codex_cli_rs/0.7.1"));
+        inbound.insert("session_id", HeaderValue::from_static("session-123"));
+        let payload = serde_json::json!({
+            "model": MODEL_FLASH,
+            "input": [{ "type": "message", "role": "user", "content": [] }]
+        });
+        let response = post_responses(
+            &reqwest::Client::new(),
+            &upstream,
+            UpstreamAuthRequest {
+                passthrough: UpstreamPassthrough::from_headers(&inbound),
+                ..Default::default()
+            },
+            Some(&payload),
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.status().is_success());
+        let headers = capture
+            .headers
+            .lock()
+            .expect("headers mutex")
+            .clone()
+            .expect("captured headers");
+        assert_eq!(
+            headers.get("originator").and_then(|value| value.to_str().ok()),
+            Some("codex_cli_rs")
+        );
+        assert_eq!(
+            headers.get("user-agent").and_then(|value| value.to_str().ok()),
+            Some("codex_cli_rs/0.7.1")
+        );
+        assert_eq!(
+            headers.get("session_id").and_then(|value| value.to_str().ok()),
+            Some("session-123")
+        );
+        assert!(headers.get("conversation_id").is_none());
+    }
+
+    #[test]
     fn inbound_authorization_is_not_forwarded_for_codex_app_payloads() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
                 None,
@@ -391,7 +707,7 @@ mod tests {
     #[test]
     fn inbound_authorization_can_authenticate_plain_external_clients() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
                 None,
@@ -406,7 +722,7 @@ mod tests {
     #[test]
     fn configured_key_accepts_raw_or_bearer_form() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(Some("configured-key")),
                 None,
                 None,
@@ -417,7 +733,7 @@ mod tests {
             Some("Bearer configured-key")
         );
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(Some("Bearer configured-key")),
                 None,
                 None,
@@ -432,7 +748,7 @@ mod tests {
     #[test]
     fn direct_codex_auth_key_can_authenticate_codex_app_payloads() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(None),
                 Some("Bearer inbound-key"),
                 None,
@@ -451,7 +767,7 @@ mod tests {
     #[test]
     fn configured_key_precedes_direct_codex_auth_for_codex_app_payloads() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(Some("configured-key")),
                 Some("Bearer inbound-key"),
                 None,
@@ -470,7 +786,7 @@ mod tests {
     #[test]
     fn inbound_authorization_precedes_configured_fallback_for_plain_external_clients() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(Some("configured-key")),
                 Some("Bearer inbound-key"),
                 None,
@@ -501,7 +817,7 @@ mod tests {
     #[test]
     fn local_access_token_is_not_forwarded_as_upstream_auth() {
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(None),
                 Some("Bearer csx_local_token"),
                 Some("csx_local_token"),
@@ -512,7 +828,7 @@ mod tests {
             None
         );
         assert_eq!(
-            resolve_authorization_header_with_direct_key(
+            resolve_for_test(
                 &upstream_with_key(Some("Bearer csx_local_token")),
                 None,
                 Some("csx_local_token"),
@@ -525,58 +841,36 @@ mod tests {
     }
 
     #[test]
-    fn auto_transport_prefers_native_responses_for_every_official_model() {
+    fn native_responses_is_the_default_transport_for_any_upstream() {
         assert_eq!(
-            select_transport(&upstream_with_key(None), "deepseek-v4-flash"),
-            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
+            select_transport(&upstream_with_key(None)),
+            SelectedUpstreamTransport::NativeResponses
         );
         assert_eq!(
-            select_transport(&upstream_with_key(None), "deepseek-v4-pro"),
-            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::NativeResponses)
-        );
-        assert_eq!(
-            select_transport(
-                &UpstreamConfig {
-                    base_url: "https://deepseek.example.com".to_owned(),
-                    ..upstream_with_key(None)
-                },
-                "deepseek-v4-flash"
-            ),
-            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat)
+            select_transport(&UpstreamConfig {
+                base_url: "https://relay.example.com/v1".to_owned(),
+                ..upstream_with_key(None)
+            }),
+            SelectedUpstreamTransport::NativeResponses
         );
     }
 
     #[test]
-    fn explicit_chat_compat_is_never_changed_and_unsupported_native_is_reported() {
+    fn chat_compat_is_selected_only_when_explicitly_configured() {
         assert_eq!(
-            select_transport(
-                &UpstreamConfig {
-                    transport: UpstreamTransport::ChatCompat,
-                    ..upstream_with_key(None)
-                },
-                "deepseek-v4-flash"
-            ),
-            UpstreamTransportSelection::Selected(SelectedUpstreamTransport::ChatCompat)
+            select_transport(&UpstreamConfig {
+                transport: UpstreamTransport::ChatCompat,
+                ..upstream_with_key(None)
+            }),
+            SelectedUpstreamTransport::ChatCompat
         );
         assert_eq!(
-            select_transport(
-                &UpstreamConfig {
-                    base_url: "http://127.0.0.1:9000/v1".to_owned(),
-                    transport: UpstreamTransport::NativeResponses,
-                    ..upstream_with_key(None)
-                },
-                MODEL_FLASH
-            ),
-            UpstreamTransportSelection::NativeResponsesUnavailable(
-                NativeResponsesEligibility::EndpointNotVerified
-            )
+            select_transport(&UpstreamConfig {
+                base_url: "http://127.0.0.1:9000/v1".to_owned(),
+                transport: UpstreamTransport::ChatCompat,
+                ..upstream_with_key(None)
+            }),
+            SelectedUpstreamTransport::ChatCompat
         );
-    }
-
-    #[test]
-    fn native_eligibility_error_is_actionable_without_silently_falling_back() {
-        assert!(NativeResponsesEligibility::EndpointNotVerified
-            .message("deepseek-v4-flash")
-            .contains("custom endpoint"));
     }
 }

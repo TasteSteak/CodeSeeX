@@ -62,6 +62,18 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/api/app-info", get(api_app_info))
         .route("/api/update-check", get(api_update_check))
         .route("/api/release-notes", get(api_release_notes))
+        .route("/api/catalog", get(api_catalog))
+        .route(
+            "/api/catalog/refresh",
+            get(api_catalog_refresh).post(api_catalog_refresh),
+        )
+        .route("/api/upstream/probe", get(api_upstream_probe))
+        .route(
+            "/api/upstream/test",
+            get(api_upstream_test).post(api_upstream_test),
+        )
+        .route("/manager/upstream/test", get(api_upstream_test).post(api_upstream_test))
+        .route("/api/upstream/credential", post(api_upstream_credential))
         .route("/api/deepseek/balance", get(api_balance))
         .route("/api/search-sources/health", get(search_sources_health))
         .route("/api/events", get(api_events))
@@ -421,6 +433,50 @@ async fn api_release_notes(State(state): State<ProxyState>) -> impl IntoResponse
     manager_json_response(
         ManagerRuntime::from_proxy_state(&state)
             .handle_json("GET", "/api/release-notes", None, None)
+            .await,
+    )
+}
+
+async fn api_catalog(State(state): State<ProxyState>) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/catalog", None, None)
+            .await,
+    )
+}
+
+async fn api_catalog_refresh(State(state): State<ProxyState>) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("POST", "/api/catalog/refresh", None, None)
+            .await,
+    )
+}
+
+async fn api_upstream_probe(State(state): State<ProxyState>) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/upstream/probe", None, None)
+            .await,
+    )
+}
+
+async fn api_upstream_test(State(state): State<ProxyState>) -> impl IntoResponse {
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("GET", "/api/upstream/test", None, None)
+            .await,
+    )
+}
+
+async fn api_upstream_credential(
+    State(state): State<ProxyState>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    let body = body.map(|Json(value)| value);
+    manager_json_response(
+        ManagerRuntime::from_proxy_state(&state)
+            .handle_json("POST", "/api/upstream/credential", None, body.as_ref())
             .await,
     )
 }

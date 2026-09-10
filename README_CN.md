@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-1f6feb">
+  <img alt="Version 0.7.1" src="https://img.shields.io/badge/version-0.7.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.7.0`
+当前版本：`0.7.1`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -312,6 +312,8 @@ cargo test --workspace
 ```
 
 源码构建需要 model catalog seed。可以设置 `CODESEEX_MODEL_CATALOG_SEED` 指向本地 seed 文件，或将 `model-catalog.seed.json` 放在 `.private/` 下。
+
+模型清单与定价是数据而非常量。CodeSeeX 按层解析：用户覆盖 > 远程清单 `docs/catalog/model-catalog.json`（每 6 小时自动复查）> `<数据目录>/cache/` 本地缓存 > 内置文档。因此新增模型或调价无需发新版本，离线时也始终保有完整保底数据。可用 `CODESEEX_CATALOG_URL` 指向自建镜像清单，设为 `off` 可关闭远程刷新。桌面管理界面通过 `GET /api/catalog`、`POST /api/catalog/refresh`、`GET /api/upstream/probe`、`POST /api/upstream/test` 使用这些能力。
 
 Windows helper scripts 会在可用时加载 MSVC Build Tools、导入 `.env`，并默认将 Cargo cache 放到可配置的本地开发目录：
 

@@ -63,7 +63,7 @@ pub(crate) fn resolve_upstream_model(
     if service_kind.is_service() {
         return MODEL_FLASH.to_owned();
     }
-    config.model_override.upstream_slug(requested)
+    codeseex_core::catalog::resolve_upstream_slug(config, requested)
 }
 
 pub(crate) fn request_is_codex_service(request: &Value) -> bool {

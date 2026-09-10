@@ -1,7 +1,7 @@
 use codeseex_core::catalog::{
-    app_server_model_list_from_catalog, build_codeseex_catalog, AppServerModelListParams,
+    app_server_model_list_from_catalog, build_codeseex_catalog_from_document,
+    AppServerModelListParams,
 };
-use codeseex_core::models::MODEL_PRO;
 use codeseex_core::AppConfig;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -93,7 +93,8 @@ fn debug_port_from_value(value: &Value) -> Option<u16> {
 }
 
 pub(crate) fn codex_model_catalog_value(config: &AppConfig) -> Value {
-    let catalog = build_codeseex_catalog();
+    let document = config.catalog_document();
+    let catalog = build_codeseex_catalog_from_document(&document);
     let app_server = app_server_model_list_from_catalog(
         &catalog,
         AppServerModelListParams {
@@ -115,18 +116,20 @@ pub(crate) fn codex_model_catalog_value(config: &AppConfig) -> Value {
             app_server
                 .data
                 .iter()
-                .find(|model| model.model == MODEL_PRO)
+                .find(|model| model.model == document.default_slug())
         })
         .or_else(|| app_server.data.first())
         .map(|model| model.model.clone())
-        .unwrap_or_else(|| MODEL_PRO.to_owned());
+        .unwrap_or_else(|| document.default_slug().to_owned());
 
     json!({
         "status": if models.is_empty() { "not_configured" } else { "ok" },
         "path": config.catalog_path().to_string_lossy(),
         "model": default_model.clone(),
         "model_provider": "custom",
-        "provider_name": "CodeSeeX",
+        "provider_name": document.provider_name,
+        "catalog_revision": document.revision,
+        "catalog_source": config.catalog_source_label(),
         "default_model": default_model,
         "models": models,
         "sources": [{
@@ -882,8 +885,8 @@ fn append_codex_cli_platform_candidates(candidates: &mut Vec<PathBuf>) {
 pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     const TEMPLATE: &str = r#"
 (async () => {
-  const VERSION = "codeseex-model-catalog-unlock-v2";
   const catalog = __CODESEEX_MODEL_CATALOG_JSON__;
+  const VERSION = "codeseex-model-catalog-unlock-v2:" + String((catalog && catalog.catalog_revision) || "builtin");
   const state = window.__codeseexModelCatalogUnlock = window.__codeseexModelCatalogUnlock || {};
   state.version = VERSION;
   state.catalog = catalog;
@@ -946,8 +949,6 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     const source = sourceForModel(name);
     const explicit = source && (source.shortDisplayName || source.shortName || source.short_display_name || source.compactDisplayName);
     if (explicit && String(explicit).trim()) return String(explicit).trim();
-    if (name === "deepseek-v4-flash") return "Flash";
-    if (name === "deepseek-v4-pro") return "Pro";
     const full = normalizeModelDisplayName(displayName || "");
     if (full.startsWith("DeepSeek V4 ")) return full.slice("DeepSeek V4 ".length).trim() || full;
     return full || name;

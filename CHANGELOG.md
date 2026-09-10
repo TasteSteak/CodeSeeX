@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.7.1 - 2026-09-10
+
+CodeSeeX 0.7.1 turns the model list and pricing into versioned, remotely updatable data with a complete offline fallback, and restores compatibility with upstreams that require a Codex client identity.
+
+### Highlights
+
+- The model catalog is now a versioned data document resolved in layers — user overrides, remote manifest, local cache, and the built-in document — so models, aliases, windows, and prices can change without shipping a new client.
+- The remote manifest is re-checked on startup, every six hours, and on demand from the settings page; any failure keeps the previous layer and never blocks the proxy.
+- Upstream `GET /v1/models` is used only as an availability probe. It never contributes windows, capabilities, or prices, and it never removes a model.
+- Pricing is keyed by exact model slug with an explicit group fallback and an explicit unpriced state; unknown models are never silently billed at another model's price.
+- Peak/off-peak billing has a single implementation with `[from, to)` window boundaries shared by the store and the UI.
+- Some upstream addresses require the client to present a Codex identity. The previously dropped `originator`, `user-agent`, `session_id`, and `conversation_id` are now passed through natively, and the client Authorization is forwarded as-is on non-official endpoints.
+
+### Added
+
+- Added `crates/core/src/pricing.rs`: a data-driven pricing table with currency, unit, per-model rates, explicit rate groups, and peak/valley windows and multipliers.
+- Added catalog documents in `crates/core/src/catalog.rs`: schema, size, duplicate-slug, and minimum-app-version validation, field-level merging, atomic cache writes, and user overrides.
+- Added the built-in catalog `crates/core/assets/catalog.default.json` and the published manifest `docs/catalog/model-catalog.json`.
+- Added remote catalog refresh with ETag revalidation, a fetch throttle, a short timeout, failure recording, and a built-in fallback, mirroring the release-notes fetch pipeline.
+- Added `GET /api/catalog`, `POST /api/catalog/refresh`, `GET /api/upstream/probe`, `POST /api/upstream/test` (also `/manager/upstream/test`), and `POST /api/upstream/credential`.
+- Added an explicit upstream credential source: `auto`, `request`, `env`, `codex_auth`, or `secret`, with `x-codeseex-credential-source` attached to upstream requests for diagnostics.
+
+### Changed
+
+- Model aliases and outbound slug rewrites are data-driven: `aliases`, `alias_patterns`, and `upstream_slug` come from the catalog instead of hardcoded `gpt-5*` handling.
+- The settings page renders one editable price row per catalog model plus timezone, peak windows, and a peak multiplier, instead of three fixed cards.
+- Usage cost estimates read the active pricing document and label unpriced models explicitly.
+- `GET /v1/models` and `/api/models` now advertise the catalog document that is actually active.
+- `model-catalog.json` keeps its on-disk contract; only its generator moved to the merged catalog document.
+- Client identity headers are passed through unchanged: CodeSeeX routes a request, it does not rewrite who sent it.
+
+### Fixed
+
+- Fixed requests to some upstream addresses being rejected for a missing Codex client identity. The client's `originator`, `user-agent`, `session_id`, and `conversation_id` are now passed through natively instead of being dropped, and the client Authorization is no longer discarded for Codex-App-shaped payloads on custom endpoints — only the official endpoint keeps credential isolation.
+- Fixed `GET /v1/models` advertising the built-in catalog instead of the currently active document.
+- Fixed a fetched-but-unchanged remote manifest discarding its ETag, which made every later refresh re-download the full document.
+- Fixed the settings UI silently pricing unknown models at the Pro rate.
+- Fixed the peak/valley window and multiplier being implemented twice in Rust and JavaScript; both now come from the pricing document.
+
+### Compatibility Notes
+
+- `BILLING_*` configuration keys from 0.7.0 remain readable and are migrated onto `[billing]`; new writes use the structured keys only.
+- The default remote manifest points at the repository `main` branch and takes effect once it is published there; until then the cache or the built-in document is used. Set `CODESEEX_CATALOG_URL` for a mirror, or `off` to disable remote refresh.
+- User overrides and the private prompt overlay always win over the remote manifest; a remote document can never rewrite `base_instructions`/`model_messages`.
+- Per-request rate snapshots for historical usage are not part of 0.7.1; billing buckets carry the pricing revision and the resolved rates so estimates stay labelled.
 ## 0.7.0 - 2026-08-25
 
 CodeSeeX 0.7.0 is the DeepSeek Responses API release. Official DeepSeek endpoints now use the native Responses transport by default, while Chat API compatibility remains available as an explicit experimental fallback.

@@ -83,7 +83,7 @@ use axum::Json;
 use axum::Router;
 use codeseex_core::config::WebSearchBackend;
 use codeseex_core::context::request_looks_like_codex_full_context;
-use codeseex_core::models::available_models;
+use codeseex_core::models::available_models_from_document;
 use codeseex_core::protocol::ChatMessage;
 use codeseex_core::{AppConfig, UserConfig};
 use codeseex_store::{RequestStatus, Store};
@@ -255,6 +255,13 @@ where
         shutdown_store.clone(),
     );
     state.runtime_config.emit_proxy_startup();
+    let catalog_refresh =
+        crate::catalog_service::spawn_remote_refresh(state.clone(), shutdown_store.clone());
+    let pricing_sync = crate::catalog_service::spawn_pricing_sync(
+        state.runtime_config.clone(),
+        state.runtime_config.subscribe(),
+        shutdown_store.clone(),
+    );
     on_listening();
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -262,6 +269,8 @@ where
     config_file_watcher.abort();
     system_proxy_watcher.abort();
     search_source_probe.abort();
+    catalog_refresh.abort();
+    pricing_sync.abort();
     let _ = shutdown_store
         .record_event(
             "info",
@@ -283,10 +292,13 @@ fn proxy_base_url_for_listener(config: &AppConfig, local_addr: SocketAddr) -> St
     format!("http://{}:{port}/v1", config.host)
 }
 
-async fn models() -> impl IntoResponse {
+async fn models(State(state): State<ProxyState>) -> impl IntoResponse {
+    // Advertise the catalog document that is actually active (remote > cache >
+    // embedded) so `/v1/models` never disagrees with the model list Codex sees.
+    let document = state.active_config().catalog_document();
     json_response(json!({
         "object": "list",
-        "data": available_models().into_iter().map(|model| json!({
+        "data": available_models_from_document(&document).into_iter().map(|model| json!({
             "id": model.slug,
             "object": "model",
             "created": 0,
@@ -381,11 +393,17 @@ async fn chat_completions(
         codeseex_core::codex_auth::remember_authorization_header(auth);
     }
     let client = state.client();
+    let managed_key = crate::secrets::upstream_api_key(&config);
+    let passthrough = crate::upstream::UpstreamPassthrough::from_headers(&headers);
     match crate::upstream::post_chat_completions(
         &client,
         &config.upstream,
-        auth.as_deref(),
-        Some(&state.v1_access_token),
+        crate::upstream::UpstreamAuthRequest {
+            inbound: auth.as_deref(),
+            local_access_token: Some(&state.v1_access_token),
+            managed_key: managed_key.as_deref(),
+            passthrough,
+        },
         Some(&original_payload),
         payload.clone(),
     )
@@ -1185,12 +1203,18 @@ async fn responses(
         codeseex_core::codex_auth::remember_authorization_header(auth);
     }
     let client = state.client();
+    let managed_key = crate::secrets::upstream_api_key(&config);
+    let passthrough = crate::upstream::UpstreamPassthrough::from_headers(&headers);
     let upstream_started = std::time::Instant::now();
     match crate::upstream::post_chat_completions(
         &client,
         &config.upstream,
-        auth.as_deref(),
-        Some(&state.v1_access_token),
+        crate::upstream::UpstreamAuthRequest {
+            inbound: auth.as_deref(),
+            local_access_token: Some(&state.v1_access_token),
+            managed_key: managed_key.as_deref(),
+            passthrough: passthrough.clone(),
+        },
         Some(&input),
         payload.clone(),
     )
@@ -1296,6 +1320,7 @@ async fn responses(
                     state: state.clone(),
                     config,
                     auth,
+                    passthrough: passthrough.clone(),
                     payload,
                     enabled_tools,
                     tool_execution_context,
@@ -1347,6 +1372,7 @@ async fn responses(
                             config: &config,
                             auth: auth.as_deref(),
                             local_access_token: Some(&state.v1_access_token),
+                            passthrough: passthrough.clone(),
                             request_id: &id,
                             enabled_tools: &enabled_tools,
                             tool_context: &tool_execution_context,
@@ -1662,6 +1688,7 @@ struct StreamingResponseParams {
     state: ProxyState,
     config: AppConfig,
     auth: Option<String>,
+    passthrough: crate::upstream::UpstreamPassthrough,
     payload: Value,
     enabled_tools: Vec<String>,
     tool_execution_context: crate::tools::ToolExecutionContext,
@@ -1684,6 +1711,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
         state,
         config,
         auth,
+        passthrough,
         mut payload,
         enabled_tools,
         tool_execution_context,
@@ -2882,6 +2910,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         &state,
                         &config,
                         auth.as_deref(),
+                        passthrough.clone(),
                         &original_request,
                         requested_model.as_deref(),
                         &model,
@@ -2936,6 +2965,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                             &state,
                             &config,
                             auth.as_deref(),
+                            passthrough.clone(),
                             &original_request,
                             requested_model.as_deref(),
                             &model,
@@ -3155,12 +3185,18 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 stop_if_cancelled!("response cancelled before upstream continuation");
                 current_payload = payload.clone();
                 let client = state.client();
+                let managed_key = crate::secrets::upstream_api_key(&config);
+                let auth_request = crate::upstream::UpstreamAuthRequest {
+                    inbound: auth.as_deref(),
+                    local_access_token: Some(&state.v1_access_token),
+                    managed_key: managed_key.as_deref(),
+                    passthrough: passthrough.clone(),
+                };
                 let next_chat = tokio::select! {
                     result = crate::upstream::post_chat_completions(
                         &client,
                         &config.upstream,
-                        auth.as_deref(),
-                        Some(&state.v1_access_token),
+                        auth_request,
                         Some(&original_request),
                         current_payload.clone(),
                     ) => Some(result),
@@ -3244,6 +3280,7 @@ async fn recover_streaming_tool_loop_with_final_response(
     state: &ProxyState,
     config: &codeseex_core::AppConfig,
     auth: Option<&str>,
+    passthrough: crate::upstream::UpstreamPassthrough,
     original_request: &Value,
     requested_model: Option<&str>,
     model: &str,
@@ -3255,11 +3292,16 @@ async fn recover_streaming_tool_loop_with_final_response(
     prepare_tool_loop_recovery_payload(payload, &stop.message)
         .map_err(|message| message.to_owned())?;
     let client = state.client();
+    let managed_key = crate::secrets::upstream_api_key(config);
     let response = match crate::upstream::post_chat_completions(
         &client,
         &config.upstream,
-        auth,
-        Some(&state.v1_access_token),
+        crate::upstream::UpstreamAuthRequest {
+            inbound: auth,
+            local_access_token: Some(&state.v1_access_token),
+            managed_key: managed_key.as_deref(),
+            passthrough,
+        },
         Some(original_request),
         payload.clone(),
     )

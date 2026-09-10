@@ -34,6 +34,8 @@ pub(crate) struct ToolLoopContext<'a> {
     pub(crate) config: &'a AppConfig,
     pub(crate) auth: Option<&'a str>,
     pub(crate) local_access_token: Option<&'a str>,
+    /// Client identity headers forwarded verbatim to the upstream.
+    pub(crate) passthrough: crate::upstream::UpstreamPassthrough,
     pub(crate) request_id: &'a str,
     pub(crate) enabled_tools: &'a [String],
     pub(crate) tool_context: &'a crate::tools::ToolExecutionContext,
@@ -530,11 +532,16 @@ pub(crate) async fn complete_chat_with_tools(
         }
         completed_tool_iterations += 1;
         let upstream_started = std::time::Instant::now();
+        let managed_key = crate::secrets::upstream_api_key(context.config);
         let response = match crate::upstream::post_chat_completions(
             context.client,
             &context.config.upstream,
-            context.auth,
-            context.local_access_token,
+            crate::upstream::UpstreamAuthRequest {
+                inbound: context.auth,
+                local_access_token: context.local_access_token,
+                managed_key: managed_key.as_deref(),
+                passthrough: context.passthrough.clone(),
+            },
             Some(context.original_request),
             payload.clone(),
         )
@@ -654,11 +661,16 @@ async fn recover_final_response_after_tool_loop_stop(
         .map_err(|message| ToolLoopError::new(message, &cumulative_usage))?;
 
     let upstream_started = std::time::Instant::now();
+    let managed_key = crate::secrets::upstream_api_key(context.config);
     let response = match crate::upstream::post_chat_completions(
         context.client,
         &context.config.upstream,
-        context.auth,
-        context.local_access_token,
+        crate::upstream::UpstreamAuthRequest {
+            inbound: context.auth,
+            local_access_token: context.local_access_token,
+            managed_key: managed_key.as_deref(),
+            passthrough: context.passthrough.clone(),
+        },
         Some(context.original_request),
         payload.clone(),
     )

@@ -1,5 +1,50 @@
 # 更新日志
 
+## 0.7.1 - 2026-09-10
+
+CodeSeeX 0.7.1 把模型清单与定价改为带版本、可远程更新的数据文档，并始终保留完整的离线保底数据；同时恢复与要求 Codex 客户端身份的上游地址的兼容。
+
+### 重点更新
+
+- 模型目录改为带版本的数据文档，按层解析：用户覆盖 > 远程清单 > 本地缓存 > 内置文档。模型、别名、窗口与价格可以在不发新客户端的前提下更新。
+- 远程清单在启动、每 6 小时以及设置页手动触发时复查；任何失败都保留上一层数据，且不会阻塞代理。
+- 上游 `GET /v1/models` 仅作为可用性探测，不提供窗口、能力或定价，也绝不会删除模型。
+- 定价按精确 slug 匹配，并提供显式分组回退与显式「未定价」状态；未知模型不会被静默套用其它模型的价格。
+- 峰谷计费收敛为单一实现（store 与前端共用），窗口边界统一为 `[起, 止)`。
+- 部分上游地址会因缺失 Codex 客户端身份而拒绝请求：此前被丢弃的 `originator`、`user-agent`、`session_id`、`conversation_id` 现已补齐并原生透传，非官方 endpoint 同样原样透传客户端 Authorization。
+
+### 新增
+
+- 新增 `crates/core/src/pricing.rs`：数据化定价表，包含货币、单位、按模型费率、显式费率分组与峰谷窗口/倍数。
+- 新增 `crates/core/src/catalog.rs` 目录文档：schema、体积、重复 slug、最低应用版本校验，字段级合并、原子缓存写入与用户覆盖。
+- 新增内置目录 `crates/core/assets/catalog.default.json` 与公开清单 `docs/catalog/model-catalog.json`。
+- 新增远程目录拉取：ETag 复用、拉取节流、短超时、失败记录与内置回退，与 release notes 的拉取链路同构。
+- 新增 `GET /api/catalog`、`POST /api/catalog/refresh`、`GET /api/upstream/probe`、`POST /api/upstream/test`（同时支持 `/manager/upstream/test`）与 `POST /api/upstream/credential`。
+- 新增显式上游凭据来源：`auto`、`request`、`env`、`codex_auth`、`secret`；上游请求附带 `x-codeseex-credential-source` 便于定位凭据来源。
+
+### 改进
+
+- 模型别名与出站 slug 改写改为数据驱动：`aliases`、`alias_patterns`、`upstream_slug` 全部来自目录，不再硬编码 `gpt-5*`。
+- 设置页按目录为每个模型生成一行可编辑费率，并提供时区、峰时时段与峰时倍数，替代原来的三张固定卡片。
+- 用量成本估算读取当前生效的价目表，未定价模型显式标注。
+- `GET /v1/models` 与 `/api/models` 现在返回当前生效的目录文档，而非内置文档。
+- `model-catalog.json` 磁盘契约保持不变，仅生成来源改为合并后的目录文档。
+- 客户端身份头原样透传：CodeSeeX 只负责路由，不重写「请求是谁发出的」。
+
+### 修复
+
+- 修复部分上游地址因缺失 Codex 客户端身份而被拒绝的问题。客户端的 `originator`/`user-agent`/`session_id`/`conversation_id` 此前被丢弃，现已原生透传；Codex App 形态请求的客户端 Authorization 也不再被丢弃——仅官方 endpoint 保留凭据隔离。
+- 修复 `GET /v1/models` 返回内置目录而非当前生效目录的问题。
+- 修复远程清单「已拉取但未变化」时不保存 ETag、导致后续每次刷新都重新下载整个文档的问题。
+- 修复设置页把未知模型静默按 Pro 费率计价的问题。
+- 修复峰谷窗口与倍数在 Rust 与 JavaScript 中各写一遍的问题，二者现在都来自价目表。
+
+### 兼容说明
+
+- 0.7.0 的 `BILLING_*` 配置键仍可读取，并会迁移到 `[billing]`；新写入只使用结构化键。
+- 默认远程清单指向仓库 `main` 分支，推送到 `main` 后生效；在此之前使用缓存或内置文档。可用 `CODESEEX_CATALOG_URL` 指向镜像，或设为 `off` 关闭远程拉取。
+- 用户覆盖与私有提示词 overlay 永远优先于远程清单；远程文档无法改写 `base_instructions`/`model_messages`。
+- 逐请求费率快照（历史用量的价格复现）不在 0.7.1 范围内；计费桶会携带 pricing revision 与解析后的费率，保证估算有明确标注。
 ## 0.7.0 - 2026-08-25
 
 CodeSeeX 0.7.0 是一次面向 DeepSeek Responses API 的正式适配更新。官方 DeepSeek endpoint 默认使用原生 Responses，Chat API 兼容模式保留为用户主动选择的实验性回退。

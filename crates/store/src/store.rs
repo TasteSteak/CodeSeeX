@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Utc};
 use codeseex_core::context::{content_to_text, request_looks_like_codex_full_context};
+use codeseex_core::pricing::{BillingPeriod, ModelRates, PricingTable};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -51,6 +52,9 @@ pub struct Store {
 
 #[derive(Debug, Default)]
 struct StoreInner {
+    /// Peak/valley rules come from the active catalog pricing document; the
+    /// store never hardcodes a time window or a multiplier.
+    pricing: PricingTable,
     requests: HashMap<String, StoredRequest>,
     request_order: VecDeque<String>,
     events: VecDeque<EventRecord>,
@@ -286,6 +290,13 @@ pub struct UsageBillingBucket {
     pub requested_model: String,
     pub billing_period: String,
     pub billing_multiplier: f64,
+    /// Catalog/pricing revision this bucket was priced with, so the UI can say
+    /// which price list produced the estimate.
+    pub pricing_revision: String,
+    /// Resolved unit rates for the model, or `null` when the model is
+    /// explicitly unpriced (never silently priced as another model).
+    pub rates: Option<ModelRates>,
+    pub rate_source: String,
     pub cached_input_tokens: u64,
     pub cache_miss_input_tokens: u64,
     pub output_tokens: u64,
@@ -450,6 +461,23 @@ impl Store {
 
     pub async fn close(&self) {}
 
+    /// Installs the effective pricing document (built-in, remote, or user
+    /// overridden). The store keeps no price list of its own.
+    pub fn set_pricing_table(&self, pricing: PricingTable) -> Result<()> {
+        let mut inner = self.lock_inner()?;
+        if inner.pricing != pricing {
+            inner.pricing = pricing;
+            inner.usage_cache = None;
+        }
+        Ok(())
+    }
+
+    pub fn pricing_revision(&self) -> Option<String> {
+        self.lock_inner()
+            .ok()
+            .map(|inner| inner.pricing.revision.clone())
+    }
+
     pub async fn run_maintenance(&self, log_retention_days: u16) -> Result<MaintenanceReport> {
         ensure_data_dir_layout(&self.data_dir).await?;
         let log_retention_days = log_retention_days.clamp(1, 365);
@@ -573,6 +601,7 @@ impl Store {
         }
         let summary = cached_usage_summary(&mut inner);
         Ok(usage_page_from_summary(
+            &inner.pricing,
             &summary,
             limit,
             cursor,
@@ -3605,6 +3634,7 @@ fn cached_usage_summary(inner: &mut StoreInner) -> RuntimeSummary {
 }
 
 fn usage_page_from_summary(
+    pricing: &PricingTable,
     summary: &RuntimeSummary,
     limit: u32,
     cursor: Option<&str>,
@@ -3616,7 +3646,7 @@ fn usage_page_from_summary(
         .iter()
         .rev()
         .filter(|session| usage_session_is_before_cursor(session, cursor))
-        .map(usage_session_summary)
+        .map(|session| usage_session_summary(session, pricing))
         .take(limit + 1)
         .collect::<Vec<_>>();
     let has_more = sessions.len() > limit;
@@ -3647,7 +3677,7 @@ fn usage_page_from_summary(
     }
 }
 
-fn usage_session_summary(session: &UsageSession) -> UsageSessionSummary {
+fn usage_session_summary(session: &UsageSession, pricing: &PricingTable) -> UsageSessionSummary {
     UsageSessionSummary {
         id: session.id.clone(),
         title: session.title.clone(),
@@ -3660,7 +3690,7 @@ fn usage_session_summary(session: &UsageSession) -> UsageSessionSummary {
         output_tokens: session.output_tokens,
         total_tokens: session.total_tokens,
         request_ms: session.request_ms,
-        billing_buckets: usage_billing_buckets_from_session(session),
+        billing_buckets: usage_billing_buckets_from_session(session, pricing),
         row_count: session.rows.len(),
         segment_count: session.segments.len(),
         session_revision: stable_hash_hex(
@@ -3688,6 +3718,7 @@ fn usage_session_is_before_cursor(session: &UsageSession, cursor: Option<&str>) 
 
 fn usage_billing_buckets(inner: &StoreInner) -> Vec<UsageBillingBucket> {
     let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
+    let pricing = &inner.pricing;
     for turn in inner
         .request_order
         .iter()
@@ -3695,7 +3726,7 @@ fn usage_billing_buckets(inner: &StoreInner) -> Vec<UsageBillingBucket> {
         .filter(|request| request_is_completed_billable_request(request))
         .filter_map(turn_from_request)
     {
-        add_usage_billing_bucket(&mut buckets, &turn);
+        add_usage_billing_bucket(&mut buckets, &turn, pricing);
     }
     for segment in inner
         .events
@@ -3704,31 +3735,37 @@ fn usage_billing_buckets(inner: &StoreInner) -> Vec<UsageBillingBucket> {
         .filter_map(usage_vision_segment_from_event)
         .filter(vision_segment_is_deepseek_billable)
     {
-        add_usage_billing_bucket(&mut buckets, &segment);
+        add_usage_billing_bucket(&mut buckets, &segment, pricing);
     }
     sorted_usage_billing_buckets(buckets)
 }
 
-fn usage_billing_buckets_from_session(session: &UsageSession) -> Vec<UsageBillingBucket> {
+fn usage_billing_buckets_from_session(
+    session: &UsageSession,
+    pricing: &PricingTable,
+) -> Vec<UsageBillingBucket> {
     let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
     for row in &session.rows {
-        add_usage_billing_bucket(&mut buckets, row);
+        add_usage_billing_bucket(&mut buckets, row, pricing);
     }
     for segment in session
         .segments
         .iter()
         .filter(|segment| vision_segment_is_deepseek_billable(segment))
     {
-        add_usage_billing_bucket(&mut buckets, segment);
+        add_usage_billing_bucket(&mut buckets, segment, pricing);
     }
     sorted_usage_billing_buckets(buckets)
 }
 
 #[cfg(test)]
-fn usage_billing_buckets_from_rows(rows: &[UsageSessionRow]) -> Vec<UsageBillingBucket> {
+fn usage_billing_buckets_from_rows(
+    rows: &[UsageSessionRow],
+    pricing: &PricingTable,
+) -> Vec<UsageBillingBucket> {
     let mut buckets = HashMap::<(String, String, String), UsageBillingBucket>::new();
     for row in rows {
-        add_usage_billing_bucket(&mut buckets, row);
+        add_usage_billing_bucket(&mut buckets, row, pricing);
     }
     sorted_usage_billing_buckets(buckets)
 }
@@ -3830,18 +3867,26 @@ impl UsageBillingSource for UsageSegment {
 fn add_usage_billing_bucket<T: UsageBillingSource>(
     buckets: &mut HashMap<(String, String, String), UsageBillingBucket>,
     item: &T,
+    pricing: &PricingTable,
 ) {
-    let period = usage_billing_period(item.completed_at());
+    let period = usage_billing_period(pricing, item.completed_at());
     let key = (
         item.model().to_owned(),
         item.requested_model().to_owned(),
-        period.name.to_owned(),
+        period.name.clone(),
     );
+    let rates = pricing.rate_for(item.model(), None);
     let bucket = buckets.entry(key).or_insert_with(|| UsageBillingBucket {
         model: item.model().to_owned(),
         requested_model: item.requested_model().to_owned(),
-        billing_period: period.name.to_owned(),
+        billing_period: period.name.clone(),
         billing_multiplier: period.multiplier,
+        pricing_revision: pricing.revision.clone(),
+        rates: rates.as_ref().map(|rate| rate.rates),
+        rate_source: rates
+            .as_ref()
+            .map(|rate| rate.source.label().to_owned())
+            .unwrap_or_else(|| "unpriced".to_owned()),
         cached_input_tokens: 0,
         cache_miss_input_tokens: 0,
         output_tokens: 0,
@@ -3870,31 +3915,8 @@ fn sorted_usage_billing_buckets(
     buckets
 }
 
-#[derive(Debug, Clone, Copy)]
-struct UsageBillingPeriod {
-    name: &'static str,
-    multiplier: f64,
-}
-
-fn usage_billing_period(completed_at: &str) -> UsageBillingPeriod {
-    let is_peak = DateTime::parse_from_rfc3339(completed_at)
-        .map(|value| {
-            let beijing = value.with_timezone(&Utc) + Duration::hours(8);
-            let minutes = beijing.hour() * 60 + beijing.minute();
-            (9 * 60..12 * 60).contains(&minutes) || (14 * 60..18 * 60).contains(&minutes)
-        })
-        .unwrap_or(false);
-    if is_peak {
-        UsageBillingPeriod {
-            name: "peak",
-            multiplier: 2.0,
-        }
-    } else {
-        UsageBillingPeriod {
-            name: "off_peak",
-            multiplier: 1.0,
-        }
-    }
+fn usage_billing_period(pricing: &PricingTable, completed_at: &str) -> BillingPeriod {
+    pricing.period_for(completed_at)
 }
 
 fn usage_sessions_from_inner(
@@ -7352,6 +7374,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The 0.7.x DeepSeek price list, expressed the same way a remote catalog
+    /// would express it: no window or multiplier lives in this test.
+    fn test_pricing_table() -> codeseex_core::pricing::PricingTable {
+        codeseex_core::pricing::PricingTable::from_value(&serde_json::json!({
+            "revision": "test.1",
+            "currency": "CNY",
+            "unit": "per_1m_tokens",
+            "peak_valley": {
+                "enabled": true,
+                "timezone": "Asia/Shanghai",
+                "multiplier": 2.0,
+                "windows": [
+                    { "from": "09:00", "to": "12:00" },
+                    { "from": "14:00", "to": "18:00" }
+                ]
+            },
+            "rates": {
+                "deepseek-v4-pro": { "cached_input": 0.025, "cache_miss_input": 3.0, "output": 6.0 }
+            }
+        }))
+        .expect("test pricing table")
+    }
+
     #[test]
     fn usage_billing_buckets_split_peak_and_off_peak_periods() {
         let rows = vec![
@@ -7393,7 +7438,7 @@ mod tests {
             },
         ];
 
-        let buckets = usage_billing_buckets_from_rows(&rows);
+        let buckets = usage_billing_buckets_from_rows(&rows, &test_pricing_table());
         let peak = buckets
             .iter()
             .find(|bucket| bucket.billing_period == "peak")

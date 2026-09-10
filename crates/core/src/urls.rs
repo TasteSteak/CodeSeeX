@@ -66,6 +66,23 @@ pub fn balance_url(base_url: &str) -> Result<String, url::ParseError> {
     Ok(url.to_string())
 }
 
+/// OpenAI-compatible model listing endpoint for an upstream base URL.
+///
+/// Used only as an availability probe: the response carries ids, never the
+/// context window, capabilities or pricing, so it must not be treated as a
+/// metadata source.
+pub fn models_url(base_url: &str) -> Result<String, url::ParseError> {
+    let normalized = normalize_base_url(base_url);
+    let mut url = Url::parse(&normalized)?;
+    let mut path = url.path().trim_end_matches('/').to_owned();
+    if !path.to_ascii_lowercase().ends_with("/v1") {
+        path = format!("{path}/v1");
+    }
+    url.set_path(&format!("{path}/models"));
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
 pub fn is_official_deepseek_url(url: &Url) -> bool {
     if url.scheme() != "https"
         || url

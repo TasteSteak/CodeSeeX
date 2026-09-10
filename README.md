@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-1f6feb">
+  <img alt="Version 0.7.1" src="https://img.shields.io/badge/version-0.7.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.7.0`
+Current version: `0.7.1`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -312,6 +312,8 @@ cargo test --workspace
 ```
 
 Source builds require a model catalog seed at build time. Set `CODESEEX_MODEL_CATALOG_SEED` to a local seed file, or place `model-catalog.seed.json` under `.private/`.
+
+The model list and pricing are data, not constants. CodeSeeX resolves them in layers — user overrides, the remote manifest `docs/catalog/model-catalog.json` (re-checked every six hours), the local cache under `<data dir>/cache/`, and the built-in document — so models and prices can change without a new build, and an offline machine always keeps a complete fallback. Point `CODESEEX_CATALOG_URL` at a mirror to use your own manifest, or set it to `off` to disable remote refresh. `GET /api/catalog`, `POST /api/catalog/refresh`, `GET /api/upstream/probe`, and `POST /api/upstream/test` expose this to the desktop manager.
 
 On Windows, helper scripts load MSVC Build Tools when available, import `.env`, and keep Cargo caches under a configurable local dev directory by default:
 

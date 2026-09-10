@@ -2,6 +2,62 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.7.1",
+      "released_at": "2026-09-10",
+      "notes": {
+        "en_us": {
+          "summary": "A data-driven model catalog and pricing release with an offline fallback, plus compatibility with upstreams that require a Codex client identity.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "The model list, context windows, aliases, and pricing are now a versioned data document with layered sources: built-in, remote, local cache, and user overrides.",
+                "CodeSeeX can refresh the catalog from a remote manifest without shipping a new client build, re-checking it every six hours, and always keeps a complete offline fallback.",
+                "Upstream GET /models is used only as an availability probe and never as a source of windows, capabilities, or prices.",
+                "Pricing is keyed by exact model slug with an explicit group fallback and an explicit unpriced state; unknown models are never silently billed at another model's price.",
+                "Peak/off-peak billing now has a single implementation shared by the store and the UI, with window boundaries defined as [from, to)."
+              ]
+            },
+            {
+              "title": "Fixed",
+              "items": [
+                "Fixed requests to some upstream addresses being rejected for a missing Codex client identity: the client's originator, user-agent, session_id, and conversation_id are now passed through natively instead of being dropped.",
+                "Also fixed custom endpoints discarding a Codex-App-shaped payload's client Authorization in favour of a local credential. Custom endpoints now forward the client Authorization, while the official endpoint keeps credential isolation.",
+                "Added an explicit upstream credential source (auto, request, env, codex-auth, or a key stored in CodeSeeX) so changing the upstream no longer silently reuses another provider's key.",
+                "Added POST /api/upstream/test (also exposed as /manager/upstream/test), which reports the credential source, the final URL, the upstream status, and a redacted error summary.",
+                "Fixed the settings UI silently pricing unknown models as Pro."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "模型与定价数据化更新，并兼容要求 Codex 客户端身份的上游地址。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "模型清单、上下文窗口、别名与定价改为带版本的数据文档，并支持分层来源：内置、远程、本地缓存与用户覆盖。",
+                "可在不发新版客户端的前提下从远程清单更新模型与价格（每 6 小时自动复查），同时始终保留完整的离线保底数据。",
+                "上游 GET /models 仅作为可用性探测，不再作为窗口、能力或定价的真源。",
+                "定价按精确 slug 匹配，并提供显式分组回退与显式「未定价」状态；未知模型不再被静默套用其它模型的价格。",
+                "峰谷计费收敛为单一实现（store 与前端共用），窗口边界统一为 [起, 止)。"
+              ]
+            },
+            {
+              "title": "修复",
+              "items": [
+                "修复部分上游地址因缺失 Codex 客户端身份而被拒绝的问题：此前上游请求只携带 Content-Type、Accept、Authorization，客户端身份头被丢弃；现在 originator、user-agent、session_id、conversation_id 会原生透传。",
+                "同时修复自定义 endpoint 丢弃 Codex App 形态请求的客户端 Authorization、改用本地凭据的问题；现在自定义 endpoint 透传客户端 Authorization，官方 endpoint 仍保留凭据隔离。",
+                "新增显式的上游凭据来源（auto / request / env / codex-auth / CodeSeeX 内保存的 key），更换上游时不再静默沿用旧供应商标识。",
+                "新增 POST /api/upstream/test（同时支持 /manager/upstream/test），返回凭据来源、最终请求 URL、上游状态码与脱敏后的错误摘要。",
+                "修复设置页把未知模型静默按 Pro 计价的问题。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "version": "0.7.0",
       "released_at": "2026-08-25",
       "notes": {

@@ -1,3 +1,4 @@
+use codeseex_core::catalog::CatalogDocument;
 use codeseex_core::{AppConfig, UserConfig};
 use notify::{RecursiveMode, Watcher};
 use serde_json::{json, Value};
@@ -11,6 +12,7 @@ pub(crate) enum RuntimeConfigChangeSource {
     ManagerSave,
     ConfigFile,
     SystemProxy,
+    CatalogRefresh,
 }
 
 impl RuntimeConfigChangeSource {
@@ -20,6 +22,7 @@ impl RuntimeConfigChangeSource {
             Self::ManagerSave => "manager_save",
             Self::ConfigFile => "config_file",
             Self::SystemProxy => "system_proxy",
+            Self::CatalogRefresh => "catalog_refresh",
         }
     }
 }
@@ -63,15 +66,6 @@ pub(crate) struct RuntimeConfigSnapshot {
 }
 
 impl RuntimeConfigSnapshot {
-    fn from_base(base: &AppConfig) -> Self {
-        let mut config = base.clone();
-        let path = config.config_path();
-        if let Ok(user_config) = UserConfig::read_from(&path) {
-            config.apply_user_config(user_config);
-        }
-        Self::from_config(config)
-    }
-
     fn from_config(config: AppConfig) -> Self {
         let config_signature = config_signature(&config);
         let network_proxy_signature = crate::network::proxy_cache_key(config.network_proxy);
@@ -79,6 +73,7 @@ impl RuntimeConfigSnapshot {
             "base_url": config.upstream.base_url,
             "official_v1_compat": config.upstream.official_v1_compat,
             "transport": config.upstream.transport,
+            "credential": config.upstream.credential,
             "timeout_ms": config.upstream.timeout_ms
         }));
         let model_signature = stable_json_signature(&json!({
@@ -104,6 +99,15 @@ impl RuntimeConfigSnapshot {
             billing_signature,
             proxy_endpoint_signature,
         }
+    }
+
+    /// Cheap placeholder used before the first real snapshot is built. It never
+    /// touches the user's real configuration file.
+    fn placeholder() -> Self {
+        let mut config = AppConfig::default();
+        config.data_dir = std::env::temp_dir().join("codeseex-runtime-placeholder");
+        config.catalog_remote = None;
+        Self::from_config(config)
     }
 
     fn changed_kinds(&self, next: &Self) -> Vec<RuntimeConfigChangeKind> {
@@ -163,33 +167,75 @@ impl RuntimeConfigChange {
 #[derive(Clone)]
 pub(crate) struct RuntimeConfigService {
     base: Arc<AppConfig>,
+    /// Layer 1/2 catalog document fetched at runtime. It lives beside the
+    /// snapshot (and not inside `base`) so a successful remote refresh can be
+    /// applied without restarting the proxy.
+    catalog: Arc<RwLock<Option<Arc<CatalogDocument>>>>,
     snapshot: Arc<RwLock<RuntimeConfigSnapshot>>,
     changes: broadcast::Sender<RuntimeConfigChange>,
 }
 
 impl RuntimeConfigService {
     pub(crate) fn new(base: AppConfig) -> Self {
-        let snapshot = RuntimeConfigSnapshot::from_base(&base);
-        let (changes, _) = broadcast::channel(64);
-        Self {
+        let catalog = Arc::new(RwLock::new(base.catalog_remote.clone()));
+        let service = Self {
             base: Arc::new(base),
-            snapshot: Arc::new(RwLock::new(snapshot)),
-            changes,
+            catalog,
+            snapshot: Arc::new(RwLock::new(RuntimeConfigSnapshot::placeholder())),
+            changes: broadcast::channel(64).0,
+        };
+        let snapshot = service.build_snapshot();
+        if let Ok(mut guard) = service.snapshot.write() {
+            *guard = snapshot;
         }
+        service
+    }
+
+    fn build_snapshot(&self) -> RuntimeConfigSnapshot {
+        let mut config = (*self.base).clone();
+        if let Ok(catalog) = self.catalog.read() {
+            config.catalog_remote = catalog.clone();
+        }
+        let path = config.config_path();
+        if let Ok(user_config) = UserConfig::read_from(&path) {
+            config.apply_user_config(user_config);
+        }
+        RuntimeConfigSnapshot::from_config(config)
+    }
+
+    /// Activates a freshly fetched catalog document and notifies listeners.
+    pub(crate) fn set_catalog_document(&self, document: Option<CatalogDocument>) -> bool {
+        let next = document.map(Arc::new);
+        {
+            let Ok(mut catalog) = self.catalog.write() else {
+                return false;
+            };
+            let unchanged = match (catalog.as_deref(), next.as_deref()) {
+                (Some(current), Some(next)) => current.revision == next.revision,
+                (None, None) => true,
+                _ => false,
+            };
+            if unchanged {
+                return false;
+            }
+            *catalog = next;
+        }
+        self.refresh(RuntimeConfigChangeSource::CatalogRefresh);
+        true
     }
 
     pub(crate) fn active_config(&self) -> AppConfig {
         self.snapshot
             .read()
             .map(|snapshot| snapshot.config.clone())
-            .unwrap_or_else(|_| RuntimeConfigSnapshot::from_base(&self.base).config)
+            .unwrap_or_else(|_| self.build_snapshot().config)
     }
 
     pub(crate) fn snapshot(&self) -> RuntimeConfigSnapshot {
         self.snapshot
             .read()
             .map(|snapshot| snapshot.clone())
-            .unwrap_or_else(|_| RuntimeConfigSnapshot::from_base(&self.base))
+            .unwrap_or_else(|_| self.build_snapshot())
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<RuntimeConfigChange> {
@@ -197,7 +243,7 @@ impl RuntimeConfigService {
     }
 
     pub(crate) fn refresh(&self, source: RuntimeConfigChangeSource) -> Option<RuntimeConfigChange> {
-        let next = RuntimeConfigSnapshot::from_base(&self.base);
+        let next = self.build_snapshot();
         let previous = {
             let mut guard = self.snapshot.write().ok()?;
             if guard.config_signature == next.config_signature
@@ -343,7 +389,15 @@ fn config_signature(config: &AppConfig) -> String {
             "base_url": config.upstream.base_url,
             "official_v1_compat": config.upstream.official_v1_compat,
             "transport": config.upstream.transport,
+            "credential": config.upstream.credential,
             "timeout_ms": config.upstream.timeout_ms
+        },
+        "catalog": {
+            "enabled": config.catalog_remote_enabled,
+            "source_url": config.catalog_source_url,
+            "revision": config.catalog_remote.as_ref().map(|document| document.revision.clone()),
+            "models": user_config_section_signature(&config.config_path(), "models"),
+            "user_catalog": user_config_section_signature(&config.config_path(), "catalog")
         },
         "model_override": config.model_override,
         "temperature": config.temperature,

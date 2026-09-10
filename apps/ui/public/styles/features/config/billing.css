@@ -18,3 +18,11 @@
 @media (max-width: 1024px) {
   .billing-rate-grid { grid-template-columns: 1fr; }
 }
+
+.billing-peak-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; width: 100%; }
+.catalog-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.catalog-status-pre { margin-top: 12px; padding: 10px 12px; max-height: 220px; overflow: auto; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); color: var(--text-secondary); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+
+@media (max-width: 1024px) {
+  .billing-peak-grid { grid-template-columns: 1fr; }
+}

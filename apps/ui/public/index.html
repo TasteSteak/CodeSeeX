@@ -5,25 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/panels.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/cards.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/forms.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/lists.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/menus.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/components/toml.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/pages/config.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/pages/about.css?v=0.7.0">
-  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.7.0">
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.7.1">
 </head>
 <body>
   <div class="layout-container">
@@ -465,86 +465,33 @@
                     <small class="muted" data-i18n="billingUnit">Unit: CNY / 1M tokens</small>
                   </span>
 
-                  <div class="billing-rate-grid mt-12">
-                    <div class="billing-rate-card">
-                      <div class="billing-card-header">
-                        <div class="billing-model-meta">
-                          <strong data-i18n="billingFlash">Flash</strong>
-                          <small class="muted" data-i18n="billingFlashHint">Fast, low-cost requests</small>
-                        </div>
-                        <span class="billing-model-badge" data-i18n="billingFlashBadge">Fast</span>
-                      </div>
-                      <div class="billing-row">
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
-                          <input type="number" id="BILLING_FLASH_CACHED_INPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
-                          <input type="number" id="BILLING_FLASH_CACHE_MISS_INPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
-                          <input type="number" id="BILLING_FLASH_OUTPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                      </div>
+                  <div class="billing-rate-grid mt-12" id="billingRateGrid"></div>
+                  <div class="billing-peak-grid mt-12">
+                    <div class="billing-field">
+                      <span class="billing-prefix" data-i18n="billingPeakMultiplier">Peak multiplier</span>
+                      <input type="number" id="BILLING_PEAK_MULTIPLIER" step="0.1" min="1">
                     </div>
-                    <div class="billing-rate-card">
-                      <div class="billing-card-header">
-                        <div class="billing-model-meta">
-                          <strong data-i18n="billingPro">Pro</strong>
-                          <small class="muted" data-i18n="billingProHint">Agent and complex coding tasks</small>
-                        </div>
-                        <span class="billing-model-badge" data-i18n="billingProBadge">Deep</span>
-                      </div>
-                      <div class="billing-row">
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
-                          <input type="number" id="BILLING_PRO_CACHED_INPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
-                          <input type="number" id="BILLING_PRO_CACHE_MISS_INPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
-                          <input type="number" id="BILLING_PRO_OUTPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                      </div>
+                    <div class="billing-field">
+                      <span class="billing-prefix" data-i18n="billingTimezone">Timezone</span>
+                      <input type="text" id="BILLING_TIMEZONE" placeholder="Asia/Shanghai">
                     </div>
-                    <div class="billing-rate-card">
-                      <div class="billing-card-header">
-                        <div class="billing-model-meta">
-                          <strong data-i18n="billingVision">Vision</strong>
-                          <small class="muted" data-i18n="billingVisionHint">DeepSeek image understanding</small>
-                        </div>
-                        <span class="billing-model-badge" data-i18n="billingVisionBadge">Image</span>
-                      </div>
-                      <div class="billing-row">
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingCachedInput">Cached input</span>
-                          <input type="number" id="BILLING_VISION_CACHED_INPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingCacheMissInput">Cache miss input</span>
-                          <input type="number" id="BILLING_VISION_CACHE_MISS_INPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                        <div class="billing-field">
-                          <span class="billing-prefix" data-i18n="billingOutput">Output</span>
-                          <input type="number" id="BILLING_VISION_OUTPUT_CNY" step="0.001">
-                          <span class="billing-suffix">CNY</span>
-                        </div>
-                      </div>
+                    <div class="billing-field">
+                      <span class="billing-prefix" data-i18n="billingPeakWindows">Peak windows</span>
+                      <input type="text" id="BILLING_PEAK_WINDOWS" placeholder="09:00-12:00, 14:00-18:00">
                     </div>
                   </div>
+                </div>
+                <div class="setting-divider"></div>
+                <div class="setting-item setting-item-block">
+                  <span>
+                    <span data-i18n="catalogSection">Model catalog</span>
+                    <small class="muted" id="catalogStatusText" data-i18n="catalogStatusHint">Source, revision, and remote refresh</small>
+                  </span>
+                  <div class="catalog-toolbar mt-12">
+                    <button type="button" class="secondary-button" id="catalogRefreshButton" data-i18n="catalogRefresh">Update now</button>
+                    <button type="button" class="secondary-button" id="upstreamTestButton" data-i18n="catalogUpstreamTest">Test upstream</button>
+                  </div>
+                  <pre class="catalog-status-pre" id="catalogStatusJson"></pre>
                 </div>
                 <div class="setting-divider"></div>
 
@@ -562,8 +509,8 @@
                     <small class="muted" data-i18n="deepseekTransportHint">Official DeepSeek uses Responses by default. Select Chat compatibility for upstream recovery or when a request requires a CodeSeeX-owned local tool executor.</small>
                   </span>
                   <div class="segmented-control compact-segmented-control" id="ctrl-deepseek-transport">
-                    <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_auto" value="auto" checked>
-                    <label for="transport_auto" data-i18n="deepseekTransport_auto">Official Responses</label>
+                    <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_native" value="native_responses" checked>
+                    <label for="transport_native" data-i18n="deepseekTransport_native">Native Responses</label>
                     <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_chat" value="chat_compat">
                     <label for="transport_chat" data-i18n="deepseekTransport_chat">Chat API compatibility</label>
                   </div>

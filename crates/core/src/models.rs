@@ -72,23 +72,25 @@ impl TemperaturePreset {
     }
 }
 
+/// Models advertised by the currently embedded catalog document.
 pub fn available_models() -> Vec<ModelInfo> {
-    vec![
-        ModelInfo {
-            slug: MODEL_FLASH.to_owned(),
-            display_name: "DeepSeek V4 Flash".to_owned(),
-            description: "DeepSeek V4 Flash served through CodeSeeX.".to_owned(),
-            context_window: DEFAULT_CONTEXT_WINDOW,
-            effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
-        },
-        ModelInfo {
-            slug: MODEL_PRO.to_owned(),
-            display_name: "DeepSeek V4 Pro".to_owned(),
-            description: "DeepSeek V4 Pro served through CodeSeeX.".to_owned(),
-            context_window: DEFAULT_CONTEXT_WINDOW,
-            effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
-        },
-    ]
+    available_models_from_document(&crate::catalog::embedded_catalog_document())
+}
+
+pub fn available_models_from_document(
+    document: &crate::catalog::CatalogDocument,
+) -> Vec<ModelInfo> {
+    document
+        .models
+        .iter()
+        .map(|model| ModelInfo {
+            slug: model.slug.clone(),
+            display_name: model.display_name.clone(),
+            description: model.description.clone(),
+            context_window: model.context_window,
+            effective_context_window_percent: model.effective_context_window_percent,
+        })
+        .collect()
 }
 
 #[cfg(test)]

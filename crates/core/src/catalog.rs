@@ -1,10 +1,13 @@
-use crate::models::{MODEL_FLASH, MODEL_PRO};
+use crate::models::MODEL_PRO;
+use crate::pricing::PricingTable;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 const CODEX_BRIDGED_IDENTITY: &str = "You are Codex, a coding agent based on DeepSeek-V4 and running through the local CodeSeeX proxy inside the Codex environment.";
 const LEGACY_APPLY_PATCH_LINE: &str = "- For local text edits, call apply_patch with a single raw Codex patch string. The patch must start with *** Begin Patch and end with *** End Patch.";
@@ -162,10 +165,14 @@ struct CatalogSeed {
 }
 
 pub fn build_codeseex_catalog() -> Catalog {
-    let mut catalog = catalog_from_seed(include_str!(concat!(
-        env!("OUT_DIR"),
-        "/model-catalog.seed.json"
-    )))
+    build_codeseex_catalog_from_document(&embedded_catalog_document())
+}
+
+pub fn build_codeseex_catalog_from_document(document: &CatalogDocument) -> Catalog {
+    let mut catalog = catalog_from_seed_and_document(
+        include_str!(concat!(env!("OUT_DIR"), "/model-catalog.seed.json")),
+        document,
+    )
     .expect("embedded CodeSeeX model catalog seed must be valid JSON");
     normalize_catalog_prompt_text(&mut catalog);
     catalog
@@ -173,6 +180,14 @@ pub fn build_codeseex_catalog() -> Catalog {
 
 pub fn app_server_model_list(params: AppServerModelListParams) -> AppServerModelListResponse {
     app_server_model_list_from_catalog(&build_codeseex_catalog(), params)
+}
+
+/// Model list for the currently active catalog document.
+pub fn app_server_model_list_for_document(
+    document: &CatalogDocument,
+    params: AppServerModelListParams,
+) -> AppServerModelListResponse {
+    app_server_model_list_from_catalog(&build_codeseex_catalog_from_document(document), params)
 }
 
 pub fn app_server_model_list_from_catalog(
@@ -211,21 +226,54 @@ pub fn app_server_model_list_from_catalog(
     AppServerModelListResponse { data, next_cursor }
 }
 
-fn catalog_from_seed(text: &str) -> serde_json::Result<Catalog> {
-    let mut seed: CatalogSeed = serde_json::from_str(text)?;
-    if !seed.common_model_fields.is_empty() {
-        for model in &mut seed.models {
-            for (key, value) in &seed.common_model_fields {
+/// Combines the private compile-time seed (prompt material) with the public
+/// catalog document. The document is authoritative for the model set and for
+/// every field it declares; the seed only fills gaps so private prompt fields
+/// survive remote catalog updates.
+fn catalog_from_seed_and_document(
+    text: &str,
+    document: &CatalogDocument,
+) -> serde_json::Result<Catalog> {
+    let seed: CatalogSeed = serde_json::from_str(text)?;
+    if document.models.is_empty() {
+        let mut fallback = Catalog { models: seed.models };
+        apply_common_model_fields(&mut fallback, &seed.common_model_fields);
+        return Ok(fallback);
+    }
+    let mut models = Vec::with_capacity(document.models.len());
+    for document_model in &document.models {
+        let mut model = document_model.clone();
+        if let Some(seed_model) = seed
+            .models
+            .iter()
+            .find(|candidate| candidate.slug == model.slug)
+        {
+            for (key, value) in &seed_model.extra {
                 model
                     .extra
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
             }
         }
+        models.push(model);
     }
-    Ok(Catalog {
-        models: seed.models,
-    })
+    let mut catalog = Catalog { models };
+    apply_common_model_fields(&mut catalog, &seed.common_model_fields);
+    Ok(catalog)
+}
+
+fn apply_common_model_fields(catalog: &mut Catalog, fields: &BTreeMap<String, Value>) {
+    if fields.is_empty() {
+        return;
+    }
+    for model in &mut catalog.models {
+        for (key, value) in fields {
+            model
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
 }
 
 fn catalog_model_is_hidden(model: &CatalogModel) -> bool {
@@ -397,13 +445,11 @@ fn app_server_display_name(model: &CatalogModel) -> String {
 fn app_server_short_display_name(model: &CatalogModel) -> Option<String> {
     string_extra(&model.extra, "short_display_name")
         .or_else(|| string_extra(&model.extra, "shortDisplayName"))
-        .or_else(|| match model.slug.as_str() {
-            MODEL_FLASH => Some("Flash".to_owned()),
-            MODEL_PRO => Some("Pro".to_owned()),
-            _ => app_server_display_name(model)
+        .or_else(|| {
+            app_server_display_name(model)
                 .strip_prefix("DeepSeek V4 ")
                 .filter(|value| !value.trim().is_empty())
-                .map(str::to_owned),
+                .map(str::to_owned)
         })
 }
 
@@ -465,9 +511,17 @@ pub fn catalog_file_is_compatible(path: &Path) -> bool {
 }
 
 pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
+    codex_toml_snippet_for_document(&embedded_catalog_document(), catalog_path, base_url)
+}
+
+pub fn codex_toml_snippet_for_document(
+    document: &CatalogDocument,
+    catalog_path: &Path,
+    base_url: &str,
+) -> String {
     [
         "model_provider = \"custom\"".to_owned(),
-        "model = \"deepseek-v4-pro\"".to_owned(),
+        format!("model = {}", toml_string(document.default_slug())),
         "disable_response_storage = true".to_owned(),
         "model_reasoning_effort = \"xhigh\"".to_owned(),
         format!(
@@ -476,7 +530,7 @@ pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
         ),
         "".to_owned(),
         "[model_providers.custom]".to_owned(),
-        "name = \"DeepSeek\"".to_owned(),
+        format!("name = {}", toml_string(&document.provider_name)),
         "wire_api = \"responses\"".to_owned(),
         "requires_openai_auth = true".to_owned(),
         format!("base_url = {}", toml_string(base_url)),
@@ -484,17 +538,18 @@ pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
     .join("\n")
 }
 
+/// The on-disk catalog only has to be structurally usable: any model set that
+/// still carries a default and satisfies the Codex contract is accepted, so a
+/// data-driven catalog is never fought over by the writer.
 fn catalog_value_is_compatible(value: &Value) -> bool {
     let Some(models) = value.get("models").and_then(Value::as_array) else {
         return false;
     };
-    models.len() == 2
-        && [MODEL_FLASH, MODEL_PRO].into_iter().all(|slug| {
-            models
-                .iter()
-                .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
-                .is_some_and(model_is_compatible)
-        })
+    !models.is_empty()
+        && models
+            .iter()
+            .any(|model| model.get("is_default").and_then(Value::as_bool) == Some(true))
+        && models.iter().all(model_is_compatible)
 }
 
 fn model_is_compatible(model: &Value) -> bool {
@@ -503,12 +558,18 @@ fn model_is_compatible(model: &Value) -> bool {
             .get("service_tiers")
             .and_then(Value::as_array)
             .is_some()
-        && model.get("context_window").and_then(Value::as_u64) == Some(1_000_000)
-        && model.get("max_context_window").and_then(Value::as_u64) == Some(1_000_000)
+        && model
+            .get("context_window")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0)
+        && model
+            .get("max_context_window")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0)
         && model
             .get("effective_context_window_percent")
             .and_then(Value::as_u64)
-            == Some(95)
+            .is_some_and(|value| (1..=100).contains(&value))
         && model.get("auto_compact_token_limit").is_none()
         && model.get("apply_patch_tool_type").and_then(Value::as_str) == Some("freeform")
         && model.get("web_search_tool_type").and_then(Value::as_str) == Some("text_and_image")
@@ -596,6 +657,564 @@ fn toml_path_string(value: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Catalog document (data-driven models + pricing)
+// ---------------------------------------------------------------------------
+
+pub const SUPPORTED_CATALOG_SCHEMA_VERSION: u32 = 1;
+/// Remote catalog documents larger than this are rejected outright.
+pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
+const EMBEDDED_CATALOG_JSON: &str = include_str!("../assets/catalog.default.json");
+
+static EMBEDDED_CATALOG: OnceLock<CatalogDocument> = OnceLock::new();
+
+/// A complete, self-describing catalog: the model set plus the pricing table.
+///
+/// Layer 0 (embedded) always exists; remote and cached documents use the same
+/// shape and are merged on top of it.
+#[derive(Debug, Clone)]
+pub struct CatalogDocument {
+    pub schema_version: u32,
+    pub revision: String,
+    pub provider_name: String,
+    pub default_model: String,
+    pub min_app_version: Option<String>,
+    pub models: Vec<CatalogModel>,
+    pub pricing: PricingTable,
+}
+
+impl CatalogDocument {
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        if text.len() > MAX_CATALOG_DOCUMENT_BYTES {
+            return Err(format!(
+                "catalog document exceeds {MAX_CATALOG_DOCUMENT_BYTES} bytes"
+            ));
+        }
+        let value: Value = serde_json::from_str(text)
+            .map_err(|error| format!("catalog document is not valid JSON: {error}"))?;
+        Self::from_value(&value)
+    }
+
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "catalog document must be an object".to_owned())?;
+        let schema_version = object
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "catalog document is missing schema_version".to_owned())?;
+        if schema_version != SUPPORTED_CATALOG_SCHEMA_VERSION as u64 {
+            return Err(format!(
+                "unsupported catalog schema_version {schema_version}; expected {SUPPORTED_CATALOG_SCHEMA_VERSION}"
+            ));
+        }
+        let revision = object
+            .get("revision")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "catalog document needs a non-empty revision".to_owned())?
+            .to_owned();
+        let provider_name = object
+            .get("provider_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("CodeSeeX")
+            .to_owned();
+        let min_app_version = object
+            .get("min_app_version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if let Some(required) = min_app_version.as_deref() {
+            let current = env!("CARGO_PKG_VERSION");
+            if !version_at_least(current, required) {
+                return Err(format!(
+                    "catalog document requires CodeSeeX {required} or newer (current {current})"
+                ));
+            }
+        }
+        let default_model = object
+            .get("default_model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_owned();
+        let model_values = object
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "catalog document is missing a models array".to_owned())?;
+        if model_values.is_empty() {
+            return Err("catalog document must declare at least one model".to_owned());
+        }
+        let mut models = Vec::with_capacity(model_values.len());
+        let mut seen = BTreeSet::new();
+        for model_value in model_values {
+            let model: CatalogModel = serde_json::from_value(model_value.clone())
+                .map_err(|error| format!("catalog model is invalid: {error}"))?;
+            validate_catalog_model(&model)?;
+            if !seen.insert(model.slug.clone()) {
+                return Err(format!("duplicate model slug: {}", model.slug));
+            }
+            models.push(model);
+        }
+        let has_explicit_default = models.iter().any(|model| {
+            model.extra.get("is_default").and_then(Value::as_bool) == Some(true)
+        });
+        if !has_explicit_default
+            && !models.iter().any(|model| model.slug == default_model)
+        {
+            return Err("catalog document must declare a default model".to_owned());
+        }
+        let pricing = match object.get("pricing") {
+            Some(value) => PricingTable::from_value(value)?,
+            None => PricingTable::default(),
+        };
+        Ok(Self {
+            schema_version: SUPPORTED_CATALOG_SCHEMA_VERSION,
+            revision,
+            provider_name,
+            default_model,
+            min_app_version,
+            models,
+            pricing,
+        })
+    }
+
+    pub fn to_value(&self) -> Value {
+        let models = self
+            .models
+            .iter()
+            .map(|model| serde_json::to_value(model).unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+        json!({
+            "schema_version": self.schema_version,
+            "revision": self.revision,
+            "provider_name": self.provider_name,
+            "default_model": self.default_model,
+            "min_app_version": self.min_app_version,
+            "models": models,
+            "pricing": self.pricing.to_value(),
+        })
+    }
+
+    pub fn to_json(&self) -> String {
+        let mut text = serde_json::to_string_pretty(&self.to_value())
+            .unwrap_or_else(|_| "{}".to_owned());
+        text.push('\n');
+        text
+    }
+
+    pub fn model(&self, slug: &str) -> Option<&CatalogModel> {
+        let slug = slug.trim();
+        self.models
+            .iter()
+            .find(|model| model.slug == slug)
+            .or_else(|| {
+                self.models.iter().find(|model| {
+                    model
+                        .extra
+                        .get("aliases")
+                        .and_then(Value::as_array)
+                        .is_some_and(|aliases| {
+                            aliases
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .any(|alias| alias.eq_ignore_ascii_case(slug))
+                        })
+                })
+            })
+    }
+
+    pub fn default_slug(&self) -> &str {
+        if self.default_model.trim().is_empty() {
+            self.models
+                .iter()
+                .find(|model| {
+                    model.extra.get("is_default").and_then(Value::as_bool) == Some(true)
+                })
+                .or_else(|| self.models.first())
+                .map(|model| model.slug.as_str())
+                .unwrap_or(MODEL_PRO)
+        } else {
+            self.default_model.as_str()
+        }
+    }
+
+    /// Resolves an inbound model request (slug, alias or alias pattern).
+    pub fn model_for_request(&self, requested: &str) -> Option<&CatalogModel> {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return None;
+        }
+        if let Some(model) = self
+            .models
+            .iter()
+            .find(|model| model.slug.eq_ignore_ascii_case(requested))
+        {
+            return Some(model);
+        }
+        if let Some(model) = self.models.iter().find(|model| {
+            model
+                .aliases()
+                .any(|alias| alias.eq_ignore_ascii_case(requested))
+        }) {
+            return Some(model);
+        }
+        self.models.iter().find(|model| {
+            model
+                .alias_patterns()
+                .any(|pattern| alias_pattern_matches(pattern, requested))
+        })
+    }
+
+    pub fn pricing_group_for(&self, slug: &str) -> Option<String> {
+        self.model(slug).and_then(|model| {
+            model
+                .extra
+                .get("pricing_group")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+    }
+
+    pub fn upstream_slug_for(&self, requested: &str) -> String {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return self.default_slug().to_owned();
+        }
+        match self.model_for_request(requested) {
+            Some(model) => model.upstream_slug_or_slug(),
+            None => requested.to_owned(),
+        }
+    }
+
+    /// Merges a full catalog document on top of this one. The overlay is
+    /// authoritative for the model set; missing fields fall back to the base
+    /// entry with the same slug.
+    pub fn merge_authoritative(&self, overlay: &CatalogDocument) -> CatalogDocument {
+        let mut models = Vec::with_capacity(overlay.models.len());
+        for overlay_model in &overlay.models {
+            let mut merged = overlay_model.clone();
+            if let Some(base_model) = self.model(&overlay_model.slug) {
+                for (key, value) in &base_model.extra {
+                    merged
+                        .extra
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+            models.push(merged);
+        }
+        let overlay_pricing_is_empty =
+            overlay.pricing.rates.is_empty() && overlay.pricing.groups.is_empty();
+        CatalogDocument {
+            schema_version: overlay.schema_version,
+            revision: overlay.revision.clone(),
+            provider_name: if overlay.provider_name.trim().is_empty() {
+                self.provider_name.clone()
+            } else {
+                overlay.provider_name.clone()
+            },
+            default_model: if overlay.default_model.trim().is_empty() {
+                self.default_model.clone()
+            } else {
+                overlay.default_model.clone()
+            },
+            min_app_version: overlay.min_app_version.clone(),
+            models,
+            pricing: if overlay_pricing_is_empty {
+                self.pricing.clone()
+            } else {
+                overlay.pricing.clone()
+            },
+        }
+    }
+}
+
+impl CatalogModel {
+    pub fn aliases(&self) -> impl Iterator<Item = &str> {
+        self.extra
+            .get("aliases")
+            .and_then(Value::as_array)
+            .map(|aliases| aliases.iter().filter_map(Value::as_str))
+            .into_iter()
+            .flatten()
+    }
+
+    pub fn alias_patterns(&self) -> impl Iterator<Item = &str> {
+        self.extra
+            .get("alias_patterns")
+            .and_then(Value::as_array)
+            .map(|patterns| patterns.iter().filter_map(Value::as_str))
+            .into_iter()
+            .flatten()
+    }
+
+    pub fn upstream_slug_or_slug(&self) -> String {
+        self.extra
+            .get("upstream_slug")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.slug.as_str())
+            .to_owned()
+    }
+
+    pub fn pricing_group(&self) -> Option<String> {
+        self.extra
+            .get("pricing_group")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+}
+
+/// Case-insensitive wildcard match supporting a leading or trailing `*`.
+fn alias_pattern_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.trim().to_ascii_lowercase();
+    let value = value.trim().to_ascii_lowercase();
+    if pattern.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return value.starts_with(prefix);
+    }
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return value.ends_with(suffix);
+    }
+    pattern == value
+}
+
+/// Outbound model slug for a request, resolved against the active catalog.
+///
+/// An explicit user override still wins; otherwise the catalog decides how the
+/// client-facing name maps onto the upstream name, and the historical
+/// `gpt-5*` fallback remains for clients that were never switched over.
+pub fn resolve_upstream_slug(config: &crate::config::AppConfig, requested: &str) -> String {
+    if config.model_override != crate::models::UpstreamModelOverride::Default {
+        return config.model_override.upstream_slug(requested);
+    }
+    let document = config.catalog_document();
+    match document.model_for_request(requested) {
+        Some(model) => model.upstream_slug_or_slug(),
+        None => config.model_override.upstream_slug(requested),
+    }
+}
+
+pub fn embedded_catalog_document() -> CatalogDocument {
+    EMBEDDED_CATALOG
+        .get_or_init(|| {
+            CatalogDocument::from_json(EMBEDDED_CATALOG_JSON)
+                .expect("embedded CodeSeeX catalog document must be valid")
+        })
+        .clone()
+}
+
+fn validate_catalog_model(model: &CatalogModel) -> Result<(), String> {
+    let slug = model.slug.trim();
+    if slug.is_empty() {
+        return Err("catalog model slug must not be empty".to_owned());
+    }
+    if !slug
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(format!("catalog model slug has unsupported characters: {slug}"));
+    }
+    if model.display_name.trim().is_empty() {
+        return Err(format!("catalog model {slug} needs a display_name"));
+    }
+    if model.context_window == 0 {
+        return Err(format!("catalog model {slug} needs a positive context_window"));
+    }
+    if !(1..=100).contains(&model.effective_context_window_percent) {
+        return Err(format!(
+            "catalog model {slug} needs an effective_context_window_percent between 1 and 100"
+        ));
+    }
+    if let Some(max) = model.extra.get("max_context_window").and_then(Value::as_u64) {
+        if max == 0 {
+            return Err(format!("catalog model {slug} needs a positive max_context_window"));
+        }
+    }
+    for key in ["aliases", "alias_patterns"] {
+        if let Some(values) = model.extra.get(key) {
+            let values = values
+                .as_array()
+                .ok_or_else(|| format!("catalog model {slug} {key} must be an array"))?;
+            if values.iter().any(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+            }) {
+                return Err(format!("catalog model {slug} has an empty {key} entry"));
+            }
+        }
+    }
+    if let Some(aliases) = model.extra.get("aliases") {
+        let aliases = aliases
+            .as_array()
+            .ok_or_else(|| format!("catalog model {slug} aliases must be an array"))?;
+        if aliases.iter().any(|alias| {
+            alias
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+        }) {
+            return Err(format!("catalog model {slug} has an empty alias"));
+        }
+    }
+    Ok(())
+}
+
+/// Numeric dotted version comparison; a missing segment counts as zero.
+pub fn version_at_least(current: &str, required: &str) -> bool {
+    fn segments(value: &str) -> Vec<u64> {
+        value
+            .trim()
+            .trim_start_matches('v')
+            .split(['.', '-', '+'])
+            .map(|segment| segment.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let current = segments(current);
+    let required = segments(required);
+    for index in 0..current.len().max(required.len()) {
+        let left = current.get(index).copied().unwrap_or(0);
+        let right = required.get(index).copied().unwrap_or(0);
+        if left != right {
+            return left > right;
+        }
+    }
+    true
+}
+
+pub fn read_cached_catalog_document(path: &Path) -> Option<CatalogDocument> {
+    let text = fs::read_to_string(path).ok()?;
+    CatalogDocument::from_json(&text).ok()
+}
+
+pub fn write_cached_catalog_document(path: &Path, document: &CatalogDocument) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create catalog cache directory {}", parent.display()))?;
+    }
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, document.to_json())
+        .with_context(|| format!("write temp catalog cache {}", temp.display()))?;
+    fs::rename(&temp, path).with_context(|| format!("replace catalog cache {}", path.display()))?;
+    Ok(())
+}
+
+/// Applies user overrides (layer 3). Overrides patch models and pricing; they
+/// never remove a model.
+pub fn apply_catalog_overrides(
+    document: &CatalogDocument,
+    overrides: &crate::config::CatalogOverrides,
+) -> CatalogDocument {
+    if overrides.is_empty() {
+        return document.clone();
+    }
+    let mut next = document.clone();
+    for (slug, model_override) in &overrides.models {
+        match next.models.iter_mut().find(|model| &model.slug == slug) {
+            Some(model) => model_override.apply_to(model),
+            None => {
+                if let Some(model) = model_override.to_catalog_model(slug) {
+                    next.models.push(model);
+                }
+            }
+        }
+    }
+    if let Some(pricing) = overrides.pricing.as_ref() {
+        if let Ok(updated) = next.pricing.with_override_value(pricing) {
+            next.pricing = updated;
+        }
+    }
+    if !next.revision.ends_with("+user") {
+        next.revision = format!("{}+user", next.revision);
+    }
+    next
+}
+
+impl crate::config::CatalogModelOverride {
+    fn apply_to(&self, model: &mut CatalogModel) {
+        if let Some(display_name) = self.display_name.as_deref() {
+            model.display_name = display_name.to_owned();
+        }
+        if let Some(description) = self.description.as_deref() {
+            model.description = description.to_owned();
+        }
+        if let Some(context_window) = self.context_window {
+            model.context_window = context_window;
+        }
+        if let Some(percent) = self.effective_context_window_percent {
+            model.effective_context_window_percent = percent;
+        }
+        if let Some(short) = self.short_display_name.as_deref() {
+            model
+                .extra
+                .insert("short_display_name".to_owned(), json!(short));
+        }
+        if let Some(upstream_slug) = self.upstream_slug.as_deref() {
+            model
+                .extra
+                .insert("upstream_slug".to_owned(), json!(upstream_slug));
+        }
+        if let Some(group) = self.pricing_group.as_deref() {
+            model
+                .extra
+                .insert("pricing_group".to_owned(), json!(group));
+        }
+        if let Some(aliases) = self.aliases.as_ref() {
+            model.extra.insert("aliases".to_owned(), json!(aliases));
+        }
+        if let Some(is_default) = self.is_default {
+            model.extra.insert("is_default".to_owned(), json!(is_default));
+        }
+        if let Some(hidden) = self.hidden {
+            model.extra.insert("hidden".to_owned(), json!(hidden));
+        }
+    }
+
+    fn to_catalog_model(&self, slug: &str) -> Option<CatalogModel> {
+        if self.display_name.is_none() && self.description.is_none() {
+            return None;
+        }
+        let embedded = embedded_catalog_document();
+        let mut model = embedded
+            .models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| CatalogModel {
+                slug: slug.to_owned(),
+                display_name: slug.to_owned(),
+                description: String::new(),
+                context_window: 1_000_000,
+                effective_context_window_percent: 95,
+                priority: 2,
+                extra: BTreeMap::new(),
+            });
+        model.slug = slug.to_owned();
+        model.display_name = self
+            .display_name
+            .clone()
+            .unwrap_or_else(|| slug.to_owned());
+        model.description = self.description.clone().unwrap_or_default();
+        self.apply_to(&mut model);
+        Some(model)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,9 +1231,74 @@ mod tests {
         assert!(slugs.contains(&"deepseek-v4-pro"));
     }
 
+    /// The published remote manifest (`docs/catalog/model-catalog.json`) is the
+    /// document every client fetches first; it must always parse with the same
+    /// parser and validation rules as any other catalog document.
+    #[test]
+    fn published_remote_catalog_document_is_valid() {
+        let document = CatalogDocument::from_json(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/catalog/model-catalog.json"
+        )))
+        .expect("published catalog document must parse");
+
+        assert_eq!(document.schema_version, SUPPORTED_CATALOG_SCHEMA_VERSION);
+        assert!(!document.revision.trim().is_empty());
+        assert!(!document.models.is_empty());
+        assert!(document.model(&document.default_model).is_some());
+        assert!(document
+            .pricing
+            .rate_for(&document.default_model, None)
+            .is_some());
+    }
+
+    /// Every remote/cached document goes through the same gate, so the
+    /// rejections below are what keeps a hostile or stale manifest from
+    /// replacing a working catalog.
+    #[test]
+    fn remote_catalog_documents_are_validated() {
+        fn document(models: &str) -> String {
+            format!(
+                r#"{{"schema_version":1,"revision":"r1","provider_name":"DeepSeek","default_model":"m1","models":[{models}]}}"#
+            )
+        }
+        fn model(slug: &str) -> String {
+            format!(
+                r#"{{"slug":"{slug}","display_name":"{slug}","description":"d","context_window":1000,"effective_context_window_percent":95,"priority":1}}"#
+            )
+        }
+        fn windowless_model(slug: &str) -> String {
+            format!(
+                r#"{{"slug":"{slug}","display_name":"{slug}","description":"d","context_window":0,"effective_context_window_percent":95,"priority":1}}"#
+            )
+        }
+
+        let valid = document(&model("m1"));
+        assert!(CatalogDocument::from_json(&valid).is_ok());
+
+        let rejected = [
+            valid.replace("\"schema_version\":1", "\"schema_version\":2"),
+            valid.replace(
+                "\"default_model\":\"m1\"",
+                "\"min_app_version\":\"99.0.0\",\"default_model\":\"m1\"",
+            ),
+            document(""),
+            document(&format!("{},{}", model("m1"), model("m1"))),
+            valid.replace("\"default_model\":\"m1\"", "\"default_model\":\"missing\""),
+            document(&windowless_model("m1")),
+            "not json at all".to_owned(),
+        ];
+        for text in rejected {
+            assert!(
+                CatalogDocument::from_json(&text).is_err(),
+                "expected the document to be rejected: {text}"
+            );
+        }
+    }
+
     #[test]
     fn compact_seed_expands_common_model_fields() {
-        let catalog = catalog_from_seed(
+        let catalog = catalog_from_seed_and_document(
             r#"{
               "common_model_fields": {
                 "base_instructions": "shared prompt",
@@ -639,6 +1323,7 @@ mod tests {
                 }
               ]
             }"#,
+            &embedded_catalog_document(),
         )
         .expect("compact seed");
 
@@ -789,7 +1474,7 @@ mod tests {
         let flash = response
             .data
             .iter()
-            .find(|model| model.id == MODEL_FLASH)
+            .find(|model| model.id == "deepseek-v4-flash")
             .expect("flash model");
         assert_eq!(flash.display_name, "DeepSeek V4 Flash");
         assert_eq!(flash.short_display_name.as_deref(), Some("Flash"));

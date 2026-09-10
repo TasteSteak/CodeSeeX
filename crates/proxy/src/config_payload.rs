@@ -1,3 +1,4 @@
+use codeseex_core::config::{UpstreamCredentialSource, UserCatalogModelConfig};
 use codeseex_core::models::{TemperaturePreset, UpstreamModelOverride};
 use codeseex_core::{
     parse_network_proxy_mode, AppConfig, NetworkProxyMode, UpstreamTransport, UserBillingConfig,
@@ -134,6 +135,42 @@ pub(crate) fn user_config_from_payload(
         }
     }
 
+    if payload.get("DEEPSEEK_CREDENTIAL_SOURCE").is_some() {
+        let upstream = config
+            .upstream
+            .get_or_insert_with(UserUpstreamConfig::default);
+        upstream.credential = payload
+            .get("DEEPSEEK_CREDENTIAL_SOURCE")
+            .and_then(Value::as_str)
+            .and_then(UpstreamCredentialSource::parse);
+    }
+
+    if payload.get("CODESEEX_CATALOG_URL").is_some()
+        || payload.get("CODESEEX_CATALOG_REMOTE").is_some()
+    {
+        let catalog = config
+            .catalog
+            .get_or_insert_with(codeseex_core::UserCatalogConfig::default);
+        if payload.get("CODESEEX_CATALOG_URL").is_some() {
+            catalog.source_url = value_string(payload, "CODESEEX_CATALOG_URL");
+        }
+        if payload.get("CODESEEX_CATALOG_REMOTE").is_some() {
+            catalog.remote_enabled = value_bool(payload, "CODESEEX_CATALOG_REMOTE");
+        }
+    }
+
+    if let Some(value) = payload.get("CATALOG_PRICING").and_then(Value::as_object) {
+        let billing = config
+            .billing
+            .get_or_insert_with(UserBillingConfig::default);
+        apply_catalog_pricing_payload(billing, value);
+    }
+
+    if let Some(value) = payload.get("CATALOG_MODELS").and_then(Value::as_object) {
+        let models = config.models.get_or_insert_with(BTreeMap::new);
+        apply_catalog_models_payload(models, value);
+    }
+
     if payload.get("NETWORK_PROXY_MODE").is_some() || payload.get("WEB_SEARCH_PROXY_MODE").is_some()
     {
         let network = config
@@ -187,6 +224,153 @@ pub(crate) fn user_config_from_payload(
     }
 
     config
+}
+
+/// User pricing edits from the settings UI. Every field is optional so the UI
+/// can stay sparse and only send what the user actually changed.
+fn apply_catalog_pricing_payload(
+    billing: &mut UserBillingConfig,
+    value: &serde_json::Map<String, Value>,
+) {
+    if let Some(enabled) = value.get("peak_valley_enabled").and_then(Value::as_bool) {
+        billing.peak_valley_enabled = Some(enabled);
+    }
+    if let Some(multiplier) = value.get("peak_multiplier").and_then(Value::as_f64) {
+        billing.peak_multiplier = Some(multiplier);
+    }
+    if let Some(timezone) = value.get("timezone").and_then(Value::as_str) {
+        let timezone = timezone.trim();
+        billing.timezone = (!timezone.is_empty()).then(|| timezone.to_owned());
+    }
+    if let Some(currency) = value.get("currency").and_then(Value::as_str) {
+        let currency = currency.trim();
+        billing.currency = (!currency.is_empty()).then(|| currency.to_owned());
+    }
+    if let Some(unit) = value.get("unit").and_then(Value::as_str) {
+        let unit = unit.trim();
+        billing.unit = (!unit.is_empty()).then(|| unit.to_owned());
+    }
+    if let Some(windows) = value.get("peak_windows").and_then(Value::as_array) {
+        billing.peak_windows = Some(
+            windows
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|window| !window.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        );
+    }
+    if let Some(rates) = value.get("rates").and_then(Value::as_object) {
+        let mut resolved = billing.rates.take().unwrap_or_default();
+        for (slug, rate) in rates {
+            let slug = slug.trim();
+            if slug.is_empty() {
+                continue;
+            }
+            match rate {
+                Value::Null => {
+                    resolved.remove(slug);
+                }
+                Value::Object(rate) => {
+                    let entry = resolved
+                        .entry(slug.to_owned())
+                        .or_insert_with(Default::default);
+                    entry.cached_input = rate
+                        .get("cached_input")
+                        .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .or(entry.cached_input);
+                    entry.cache_miss_input = rate
+                        .get("cache_miss_input")
+                        .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .or(entry.cache_miss_input);
+                    entry.output = rate
+                        .get("output")
+                        .and_then(Value::as_f64)
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .or(entry.output);
+                }
+                _ => {}
+            }
+        }
+        resolved.retain(|_, rate| {
+            rate.cached_input.is_some() || rate.cache_miss_input.is_some() || rate.output.is_some()
+        });
+        billing.rates = (!resolved.is_empty()).then_some(resolved);
+    }
+}
+
+/// User model overrides from the settings UI (`[models."<slug>"]`).
+fn apply_catalog_models_payload(
+    models: &mut BTreeMap<String, UserCatalogModelConfig>,
+    value: &serde_json::Map<String, Value>,
+) {
+    for (slug, model) in value {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            continue;
+        }
+        let Value::Object(model) = model else {
+            continue;
+        };
+        let mut entry = models.remove(slug).unwrap_or_default();
+        let set_string = |slot: &mut Option<String>, keys: &[&str]| {
+            for key in keys {
+                if let Some(value) = model.get(*key).and_then(Value::as_str) {
+                    let value = value.trim();
+                    *slot = (!value.is_empty()).then(|| value.to_owned());
+                    return;
+                }
+                if let Some(Value::Null) = model.get(*key) {
+                    *slot = None;
+                    return;
+                }
+            }
+        };
+        set_string(&mut entry.display_name, &["display_name"]);
+        set_string(&mut entry.short_display_name, &["short_display_name"]);
+        set_string(&mut entry.description, &["description"]);
+        set_string(&mut entry.upstream_slug, &["upstream_slug"]);
+        set_string(&mut entry.pricing_group, &["pricing_group"]);
+        if let Some(value) = model.get("context_window") {
+            entry.context_window = value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .or_else(|| value.is_null().then_some(0).filter(|_| false))
+                .or(entry.context_window);
+        }
+        if let Some(value) = model
+            .get("effective_context_window_percent")
+            .and_then(Value::as_u64)
+        {
+            entry.effective_context_window_percent =
+                u8::try_from(value).ok().filter(|value| (1..=100).contains(value));
+        }
+        if let Some(value) = model.get("aliases") {
+            if value.is_null() {
+                entry.aliases = None;
+            } else if let Some(aliases) = value.as_array() {
+                entry.aliases = Some(
+                    aliases
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|alias| !alias.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                );
+            }
+        }
+        if let Some(value) = model.get("is_default").and_then(Value::as_bool) {
+            entry.is_default = Some(value);
+        }
+        if let Some(value) = model.get("hidden").and_then(Value::as_bool) {
+            entry.hidden = Some(value);
+        }
+        models.insert(slug.to_owned(), entry);
+    }
 }
 
 pub(crate) fn tool_settings_from_user_config(config: &UserConfig) -> BTreeMap<String, String> {
@@ -579,7 +763,6 @@ pub(crate) fn temperature_to_ui(value: TemperaturePreset) -> &'static str {
 
 pub(crate) fn upstream_transport_to_ui(value: UpstreamTransport) -> &'static str {
     match value {
-        UpstreamTransport::Auto => "auto",
         UpstreamTransport::NativeResponses => "native_responses",
         UpstreamTransport::ChatCompat => "chat_compat",
     }
@@ -593,12 +776,8 @@ pub(crate) fn web_search_backend_to_ui(value: WebSearchBackend) -> &'static str 
 }
 
 fn value_upstream_transport(payload: &Value, key: &str) -> Option<UpstreamTransport> {
-    match value_string(payload, key)?.to_ascii_lowercase().as_str() {
-        "auto" => Some(UpstreamTransport::Auto),
-        "native" | "native_responses" | "responses" => Some(UpstreamTransport::NativeResponses),
-        "chat" | "chat_compat" | "compat" => Some(UpstreamTransport::ChatCompat),
-        _ => None,
-    }
+    let value = value_string(payload, key)?;
+    codeseex_core::config::parse_upstream_transport(&value)
 }
 
 fn value_web_search_backend(payload: &Value, key: &str) -> Option<WebSearchBackend> {

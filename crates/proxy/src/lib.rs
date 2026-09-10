@@ -1,4 +1,5 @@
 mod app_state;
+mod catalog_service;
 mod codex_app;
 mod community_tools;
 mod config_payload;

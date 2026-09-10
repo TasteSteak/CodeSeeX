@@ -29,16 +29,42 @@ const RUNTIME_STATUS_STARTING = "starting";
 const RUNTIME_STATUS_STOPPING = "stopping";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
 const DEFAULT_TEMPERATURE_PRESET = "default";
-const DEFAULT_BILLING_RATES_CNY = Object.freeze({
-  flash: Object.freeze({ cached: 0.02, cacheMiss: 1, output: 2 }),
-  pro: Object.freeze({ cached: 0.025, cacheMiss: 3, output: 6 }),
-  vision: Object.freeze({ cached: 0.05, cacheMiss: 1.5, output: 4.5 }),
+// Last resort only: the settings UI is normally populated from the catalog
+// document downloaded from the backend, so no model or price is hardcoded.
+const FALLBACK_BILLING_RATES = Object.freeze({ cached: 0, cacheMiss: 0, output: 0 });
+const FALLBACK_PEAK_VALLEY = Object.freeze({
+  enabled: true,
+  timezone: "Asia/Shanghai",
+  utcOffsetMinutes: 480,
+  multiplier: 2,
+  windows: Object.freeze([
+    Object.freeze({ from: 9 * 60, to: 12 * 60 }),
+    Object.freeze({ from: 14 * 60, to: 18 * 60 }),
+  ]),
 });
-const BILLING_PEAK_MULTIPLIER = 2;
 const RESTART_REQUIRED_KEYS = new Set([
   "NETWORK_PROXY_MODE",
   "PROXY_PORT",
 ]);
+// Populated by the backend, never sent back: these describe the resolved
+// catalog and pricing rather than a user setting.
+const READ_ONLY_CONFIG_KEYS = new Set([
+  "CATALOG",
+  "CATALOG_MODELS",
+  "CATALOG_STATUS",
+]);
+const catalogState = {
+  revision: "",
+  source: "builtin",
+  providerName: "",
+  defaultModel: "",
+  currency: "CNY",
+  unit: "per_1m_tokens",
+  models: [],
+  pricing: null,
+  status: {},
+};
+let currentBillingRatesSignature = "";
 const SYSTEM_LANGUAGE = "system";
 const FALLBACK_LANGUAGE = "en_us";
 const DEFAULT_LANGUAGE = SYSTEM_LANGUAGE;
@@ -58,16 +84,15 @@ const els = {
   balanceStatus: byId("balanceStatus"),
   balanceToppedUp: byId("balanceToppedUp"),
   balanceTotal: byId("balanceTotal"),
-  billingFlashCachedInput: byId("BILLING_FLASH_CACHED_INPUT_CNY"),
-  billingFlashCacheMissInput: byId("BILLING_FLASH_CACHE_MISS_INPUT_CNY"),
-  billingFlashOutput: byId("BILLING_FLASH_OUTPUT_CNY"),
+  billingPeakMultiplier: byId("BILLING_PEAK_MULTIPLIER"),
   billingPeakValleyEnabled: byId("BILLING_PEAK_VALLEY_ENABLED"),
-  billingProCachedInput: byId("BILLING_PRO_CACHED_INPUT_CNY"),
-  billingProCacheMissInput: byId("BILLING_PRO_CACHE_MISS_INPUT_CNY"),
-  billingProOutput: byId("BILLING_PRO_OUTPUT_CNY"),
-  billingVisionCachedInput: byId("BILLING_VISION_CACHED_INPUT_CNY"),
-  billingVisionCacheMissInput: byId("BILLING_VISION_CACHE_MISS_INPUT_CNY"),
-  billingVisionOutput: byId("BILLING_VISION_OUTPUT_CNY"),
+  billingPeakWindows: byId("BILLING_PEAK_WINDOWS"),
+  billingRateGrid: byId("billingRateGrid"),
+  billingTimezone: byId("BILLING_TIMEZONE"),
+  catalogRefreshButton: byId("catalogRefreshButton"),
+  catalogStatusJson: byId("catalogStatusJson"),
+  catalogStatusText: byId("catalogStatusText"),
+  upstreamTestButton: byId("upstreamTestButton"),
   completedTurns: byId("completedTurns"),
   autoStart: byId("AUTO_START"),
   catalogNotice: byId("catalogNotice"),
@@ -321,6 +346,8 @@ function bind() {
   els.startButton.addEventListener("click", () => actionPost("/api/start", t("startingTitle"), t("startingDetail")));
   els.restartButton.addEventListener("click", () => actionPost("/api/restart", t("restartingTitle"), t("restartingDetail")));
   els.stopButton.addEventListener("click", () => actionPost("/api/stop", t("stoppingTitle"), t("stoppingDetail")));
+  if (els.catalogRefreshButton) els.catalogRefreshButton.addEventListener("click", refreshCatalogDocument);
+  if (els.upstreamTestButton) els.upstreamTestButton.addEventListener("click", testUpstreamCredential);
   if (els.refreshBalanceButton) els.refreshBalanceButton.addEventListener("click", refreshBalance);
   if (els.rechargeBalanceButton) els.rechargeBalanceButton.addEventListener("click", openRechargePage);
   if (els.copyTomlButton) els.copyTomlButton.addEventListener("click", copyConfigToml);
@@ -555,6 +582,45 @@ function getRadioValue(name) {
 function setRadioValue(name, value) {
   const el = document.querySelector(`input[name="${name}"][value="${value}"]`);
   if (el) el.checked = true;
+}
+
+async function refreshCatalogDocument() {
+  if (!els.catalogRefreshButton) return;
+  els.catalogRefreshButton.disabled = true;
+  try {
+    const response = await apiFetch("/api/catalog/refresh", { method: "POST", cache: "no-store" });
+    const data = await response.json();
+    applyCatalogPayload(data.document || {}, data);
+    if (els.catalogStatusJson) {
+      els.catalogStatusJson.textContent = JSON.stringify(data, null, 2);
+    }
+    currentBillingRatesSignature = "";
+    renderBillingRateGrid();
+  } catch (error) {
+    if (els.catalogStatusJson) {
+      els.catalogStatusJson.textContent = String(error && error.message ? error.message : error);
+    }
+  } finally {
+    els.catalogRefreshButton.disabled = false;
+  }
+}
+
+async function testUpstreamCredential() {
+  if (!els.upstreamTestButton) return;
+  els.upstreamTestButton.disabled = true;
+  try {
+    const response = await apiFetch("/api/upstream/test", { method: "POST", cache: "no-store" });
+    const data = await response.json();
+    if (els.catalogStatusJson) {
+      els.catalogStatusJson.textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (error) {
+    if (els.catalogStatusJson) {
+      els.catalogStatusJson.textContent = String(error && error.message ? error.message : error);
+    }
+  } finally {
+    els.upstreamTestButton.disabled = false;
+  }
 }
 
 async function actionPost(url, title, detail) {
@@ -1380,6 +1446,7 @@ function renderConfig(config) {
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
   const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
   if (document.activeElement !== els.uiLanguage) els.uiLanguage.value = nextLanguage;
+  applyCatalogPayload(config.CATALOG, config.CATALOG_STATUS);
   setBillingInputValues(config);
   currentAdapterSignature = "";
   applyTheme(nextTheme);
@@ -2758,14 +2825,14 @@ function renderUsage(runtime) {
   const totalMiss = runtime.total_cache_miss_input_tokens || 0;
   const cacheHitRate = usageCacheHitRate(totalCached, totalMiss);
   const totalCostVal = Array.isArray(runtime.billing_buckets) && runtime.billing_buckets.length
-    ? runtime.billing_buckets.reduce((sum, bucket) => sum + costForTokens(bucket), 0)
-    : billable.reduce((sum, turn) => sum + costForTokens(turn), 0);
+    ? sumCosts(runtime.billing_buckets)
+    : sumCosts(billable);
 
   els.usageTotalTurns.textContent = formatNumber(totalTurnsCount);
   els.usageCacheHitRate.textContent = cacheHitRate;
   els.usageCacheHitRate.className = ["usage-metric-value", "selectable", usageCacheToneClass(totalCached, totalMiss)].filter(Boolean).join(" ");
   els.usageAverageMs.textContent = formatDuration(avgMs);
-  els.usageTotalCost.textContent = formatCost(totalCostVal);
+  els.usageTotalCost.textContent = formatCostOrUnpriced(totalCostVal);
   els.usageTotalCost.className = ["usage-metric-value", "selectable", "usage-cost-value", usageCostToneClass({
     billing_buckets: runtime.billing_buckets,
     rows: billable,
@@ -2880,7 +2947,7 @@ function updateUsageRecord(details, session) {
 }
 
 function renderUsageRecordSummary(summary, session) {
-  const totalCost = formatCost(costForSession(session));
+  const totalCost = formatCostOrUnpriced(costForSession(session));
   const costTone = usageCostToneClass(session);
   const cachedTokens = Number(session.cached_input_tokens || 0);
   const missTokens = Number(session.cache_miss_input_tokens || 0);
@@ -3177,7 +3244,7 @@ function usageSegmentDisplay(segment) {
     miss: hasTokens ? formatNumber(segment.cache_miss_input_tokens) : "-",
     output: hasTokens ? formatNumber(segment.output_tokens) : "-",
     cacheHitRate: hasTokens ? usageCacheHitRate(segment.cached_input_tokens, segment.cache_miss_input_tokens) : "-",
-    cost: hasRows || hasTokens ? formatCost(costForTokens(segment)) : "-",
+    cost: hasRows || hasTokens ? formatCostOrUnpriced(costForTokens(segment)) : "-",
   };
 }
 
@@ -3224,10 +3291,10 @@ function usageTraceCell(value, numeric, innerClass, title) {
 
 function costForSession(session) {
   if (Array.isArray(session && session.billing_buckets) && session.billing_buckets.length) {
-    return session.billing_buckets.reduce((sum, bucket) => sum + costForTokens(bucket), 0);
+    return sumCosts(session.billing_buckets);
   }
   const rows = Array.isArray(session && session.rows) ? session.rows : [];
-  if (rows.length) return rows.reduce((sum, row) => sum + costForTokens(row), 0);
+  if (rows.length) return sumCosts(rows);
   return costForTokens(session || {});
 }
 
@@ -4300,16 +4367,7 @@ function buildConfigPayload() {
     DEEPSEEK_BASE_URL: normalizeDeepSeekBaseUrl(els.deepseekBaseUrl ? els.deepseekBaseUrl.value : ""),
     PROXY_PORT: normalizePort(els.proxyPort ? els.proxyPort.value : "", 8787),
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
-    BILLING_PEAK_VALLEY_ENABLED: els.billingPeakValleyEnabled && els.billingPeakValleyEnabled.checked ? "true" : "false",
-    BILLING_FLASH_CACHED_INPUT_CNY: normalizeRateInput(els.billingFlashCachedInput ? els.billingFlashCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cached),
-    BILLING_FLASH_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingFlashCacheMissInput ? els.billingFlashCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cacheMiss),
-    BILLING_FLASH_OUTPUT_CNY: normalizeRateInput(els.billingFlashOutput ? els.billingFlashOutput.value : "", DEFAULT_BILLING_RATES_CNY.flash.output),
-    BILLING_PRO_CACHED_INPUT_CNY: normalizeRateInput(els.billingProCachedInput ? els.billingProCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cached),
-    BILLING_PRO_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingProCacheMissInput ? els.billingProCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cacheMiss),
-    BILLING_PRO_OUTPUT_CNY: normalizeRateInput(els.billingProOutput ? els.billingProOutput.value : "", DEFAULT_BILLING_RATES_CNY.pro.output),
-    BILLING_VISION_CACHED_INPUT_CNY: normalizeRateInput(els.billingVisionCachedInput ? els.billingVisionCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cached),
-    BILLING_VISION_CACHE_MISS_INPUT_CNY: normalizeRateInput(els.billingVisionCacheMissInput ? els.billingVisionCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cacheMiss),
-    BILLING_VISION_OUTPUT_CNY: normalizeRateInput(els.billingVisionOutput ? els.billingVisionOutput.value : "", DEFAULT_BILLING_RATES_CNY.vision.output),
+    CATALOG_PRICING: catalogPeakPricingPayload(),
   };
 }
 
@@ -4317,6 +4375,7 @@ function normalizeConfigPayload(payload) {
   const output = {};
   for (const [key, value] of Object.entries(payload || {})) {
     if (key === "CONFIG_VERSION" || key === "config_version") continue;
+    if (READ_ONLY_CONFIG_KEYS.has(key)) continue;
     if (isSecretConfigKey(key)) continue;
     if (Array.isArray(value)) {
       output[key] = key === ENABLED_TOOLS_KEY
@@ -4589,29 +4648,30 @@ function t(key) {
 
 function billingInputs() {
   return [
-    els.billingFlashCachedInput,
-    els.billingFlashCacheMissInput,
-    els.billingFlashOutput,
-    els.billingProCachedInput,
-    els.billingProCacheMissInput,
-    els.billingProOutput,
-    els.billingVisionCachedInput,
-    els.billingVisionCacheMissInput,
-    els.billingVisionOutput,
+    els.billingPeakMultiplier,
+    els.billingPeakWindows,
+    els.billingTimezone,
+    ...billingRateInputs(),
   ];
+}
+
+function billingRateInputs() {
+  if (!els.billingRateGrid) return [];
+  return Array.from(els.billingRateGrid.querySelectorAll("input"));
 }
 
 function setBillingInputValues(config = {}) {
   if (els.billingPeakValleyEnabled) els.billingPeakValleyEnabled.checked = config.BILLING_PEAK_VALLEY_ENABLED !== "false";
-  setInputValue(els.billingFlashCachedInput, config.BILLING_FLASH_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.cached);
-  setInputValue(els.billingFlashCacheMissInput, config.BILLING_FLASH_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.cacheMiss);
-  setInputValue(els.billingFlashOutput, config.BILLING_FLASH_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.flash.output);
-  setInputValue(els.billingProCachedInput, config.BILLING_PRO_CACHED_INPUT_CNY || config.BILLING_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.cached);
-  setInputValue(els.billingProCacheMissInput, config.BILLING_PRO_CACHE_MISS_INPUT_CNY || config.BILLING_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.cacheMiss);
-  setInputValue(els.billingProOutput, config.BILLING_PRO_OUTPUT_CNY || config.BILLING_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.pro.output);
-  setInputValue(els.billingVisionCachedInput, config.BILLING_VISION_CACHED_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.vision.cached);
-  setInputValue(els.billingVisionCacheMissInput, config.BILLING_VISION_CACHE_MISS_INPUT_CNY, DEFAULT_BILLING_RATES_CNY.vision.cacheMiss);
-  setInputValue(els.billingVisionOutput, config.BILLING_VISION_OUTPUT_CNY, DEFAULT_BILLING_RATES_CNY.vision.output);
+  const peak = catalogPeakValley();
+  setTextInputValue(els.billingPeakMultiplier, String(peak.multiplier));
+  setTextInputValue(els.billingTimezone, peak.timezone);
+  setTextInputValue(els.billingPeakWindows, peak.windows.map((window) => `${minuteToHhmm(window.from)}-${minuteToHhmm(window.to)}`).join(", "));
+  renderBillingRateGrid();
+}
+
+function setTextInputValue(input, value) {
+  if (!input || document.activeElement === input) return;
+  input.value = String(value);
 }
 
 function setInputValue(input, value, fallback) {
@@ -4619,39 +4679,228 @@ function setInputValue(input, value, fallback) {
   input.value = String(normalizeRateInput(value, fallback));
 }
 
+/// Renders one editable rate row per catalog model. Unknown models are shown as
+/// unpriced instead of silently inheriting another model's price.
+function renderBillingRateGrid() {
+  const grid = els.billingRateGrid;
+  if (!grid) return;
+  const active = document.activeElement;
+  const models = catalogModels();
+  const signature = stableStringify({
+    models: models.map((model) => model.slug),
+    revision: catalogState.revision,
+    currency: catalogState.currency,
+  });
+  if (signature === currentBillingRatesSignature && grid.childElementCount) return;
+  currentBillingRatesSignature = signature;
+  grid.textContent = "";
+  for (const model of models) {
+    const rate = catalogRateFor(model.slug);
+    const card = document.createElement("div");
+    card.className = "billing-rate-card";
+    card.dataset.model = model.slug;
+    const header = document.createElement("div");
+    header.className = "billing-card-header";
+    const meta = document.createElement("div");
+    meta.className = "billing-model-meta";
+    const title = document.createElement("strong");
+    title.textContent = model.short_display_name || model.display_name || model.slug;
+    const hint = document.createElement("small");
+    hint.className = "muted";
+    hint.textContent = model.slug;
+    meta.append(title, hint);
+    const badge = document.createElement("span");
+    badge.className = "billing-model-badge";
+    badge.textContent = rate ? (rate.source === "group" ? t("billingGroupPriced") : "") : t("billingUnpriced");
+    header.append(meta, badge);
+    card.append(header);
+    const row = document.createElement("div");
+    row.className = "billing-row";
+    for (const [key, labelKey] of [["cached_input", "billingCachedInput"], ["cache_miss_input", "billingCacheMissInput"], ["output", "billingOutput"]]) {
+      const field = document.createElement("div");
+      field.className = "billing-field";
+      const label = document.createElement("span");
+      label.className = "billing-prefix";
+      label.setAttribute("data-i18n", labelKey);
+      label.textContent = t(labelKey);
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "0.001";
+      input.min = "0";
+      input.dataset.model = model.slug;
+      input.dataset.rate = key;
+      input.value = rate ? String(rate[key]) : "";
+      input.placeholder = t("billingUnpriced");
+      if (active && active.dataset && active.dataset.model === model.slug && active.dataset.rate === key) {
+        input.value = active.value;
+      }
+      const suffix = document.createElement("span");
+      suffix.className = "billing-suffix";
+      suffix.textContent = catalogState.currency || "CNY";
+      input.addEventListener("input", handleConfigInput);
+      input.addEventListener("change", handleConfigInput);
+      input.addEventListener("focusout", handleConfigInput);
+      field.append(label, input, suffix);
+      row.append(field);
+    }
+    card.append(row);
+    grid.append(card);
+  }
+}
+
+function catalogRateOverrides() {
+  const rates = {};
+  for (const input of billingRateInputs()) {
+    const slug = input.dataset ? input.dataset.model : "";
+    const key = input.dataset ? input.dataset.rate : "";
+    if (!slug || !key) continue;
+    const parsed = Number(input.value);
+    if (!Number.isFinite(parsed) || parsed < 0) continue;
+    const base = catalogRateFor(slug) || {};
+    rates[slug] = rates[slug] || {
+      cached_input: Number(base.cached_input || 0),
+      cache_miss_input: Number(base.cache_miss_input || 0),
+      output: Number(base.output || 0),
+    };
+    rates[slug][key] = parsed;
+  }
+  return rates;
+}
+
+function catalogPeakPricingPayload() {
+  const payload = {};
+  if (els.billingPeakValleyEnabled) payload.peak_valley_enabled = els.billingPeakValleyEnabled.checked !== false;
+  const multiplier = Number(els.billingPeakMultiplier ? els.billingPeakMultiplier.value : "");
+  if (Number.isFinite(multiplier) && multiplier >= 1) payload.peak_multiplier = multiplier;
+  const timezone = String(els.billingTimezone ? els.billingTimezone.value : "").trim();
+  if (timezone) payload.timezone = timezone;
+  const windows = parsePeakWindowList(els.billingPeakWindows ? els.billingPeakWindows.value : "");
+  if (windows) payload.peak_windows = windows;
+  const rates = catalogRateOverrides();
+  if (Object.keys(rates).length) payload.rates = rates;
+  payload.currency = catalogState.currency || "CNY";
+  payload.unit = catalogState.unit || "per_1m_tokens";
+  return payload;
+}
+
+function parsePeakWindowList(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const windows = [];
+  for (const part of text.split(",")) {
+    const [from, to] = String(part).trim().split("-");
+    if (!isHhmm(from) || !isHhmm(to)) return null;
+    if (to <= from) return null;
+    windows.push(`${from}-${to}`);
+  }
+  return windows.length ? windows : null;
+}
+
+function isHhmm(value) {
+  return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(String(value || "").trim());
+}
+
+function minuteToHhmm(minute) {
+  const value = Math.max(0, Math.min(24 * 60, Math.floor(Number(minute) || 0)));
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+}
+
 function currentBillingSignature() {
   return stableStringify({
-    peakValleyEnabled: currentPeakValleyBillingEnabled(),
-    flash: currentBillingRates("deepseek-v4-flash"),
-    pro: currentBillingRates("deepseek-v4-pro"),
-    vision: currentBillingRates("deepseek-v4-flash-vision-exp"),
+    peakValley: catalogPeakValley(),
+    rates: catalogRateOverrides(),
+    revision: catalogState.revision,
   });
 }
 
 function currentPeakValleyBillingEnabled() {
-  return !els.billingPeakValleyEnabled || els.billingPeakValleyEnabled.checked !== false;
+  if (els.billingPeakValleyEnabled) return els.billingPeakValleyEnabled.checked !== false;
+  return catalogPeakValley().enabled;
 }
 
 function currentBillingRates(model) {
-  const normalized = String(model || "").toLowerCase();
-  const group = normalized.includes("vision") ? "vision" : (normalized.includes("flash") ? "flash" : "pro");
-  if (group === "vision") return {
-    cached: normalizeRateInput(els.billingVisionCachedInput ? els.billingVisionCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cached),
-    cacheMiss: normalizeRateInput(els.billingVisionCacheMissInput ? els.billingVisionCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.vision.cacheMiss),
-    output: normalizeRateInput(els.billingVisionOutput ? els.billingVisionOutput.value : "", DEFAULT_BILLING_RATES_CNY.vision.output),
-  };
-  if (group === "flash") {
-    return {
-      cached: normalizeRateInput(els.billingFlashCachedInput ? els.billingFlashCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cached),
-      cacheMiss: normalizeRateInput(els.billingFlashCacheMissInput ? els.billingFlashCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.flash.cacheMiss),
-      output: normalizeRateInput(els.billingFlashOutput ? els.billingFlashOutput.value : "", DEFAULT_BILLING_RATES_CNY.flash.output),
-    };
+  return catalogRateFor(model);
+}
+
+/// Parses the catalog document injected by the backend. Everything the
+/// settings and usage views price with comes from here.
+function applyCatalogPayload(catalog, status = {}) {
+  catalogState.revision = String((catalog && catalog.revision) || status.revision || "");
+  catalogState.source = String(status.source_label || status.source || "builtin");
+  catalogState.providerName = String((catalog && catalog.provider_name) || "");
+  catalogState.defaultModel = String((catalog && catalog.default_model) || "");
+  catalogState.models = Array.isArray(catalog && catalog.models) ? catalog.models : [];
+  catalogState.pricing = (catalog && catalog.pricing) || null;
+  catalogState.currency = String((catalog && catalog.pricing && catalog.pricing.currency) || "CNY");
+  catalogState.unit = String((catalog && catalog.pricing && catalog.pricing.unit) || "per_1m_tokens");
+  catalogState.status = status || {};
+  renderCatalogStatus();
+}
+
+function renderCatalogStatus() {
+  if (els.catalogStatusText) {
+    const parts = [t("catalogSourceLabel"), catalogState.source || "builtin"];
+    if (catalogState.revision) parts.push(`${t("catalogRevisionLabel")} ${catalogState.revision}`);
+    els.catalogStatusText.textContent = parts.join(" · ");
   }
+  if (els.catalogStatusJson) {
+    els.catalogStatusJson.textContent = JSON.stringify({
+      revision: catalogState.revision,
+      source: catalogState.source,
+      credential_source: catalogState.status && catalogState.status.credential_source,
+      upstream_key_configured: catalogState.status && catalogState.status.upstream_key_configured,
+      models: catalogModels().map((model) => ({ slug: model.slug, upstream_status: model.upstream_status })),
+    }, null, 2);
+  }
+}
+
+function catalogModels() {
+  return Array.isArray(catalogState.models) ? catalogState.models : [];
+}
+
+function catalogRateFor(model) {
+  const slug = String(model || "").trim();
+  const pricing = catalogState.pricing;
+  if (!slug) return null;
+  const rates = (pricing && pricing.rates && pricing.rates[slug]) || null;
+  if (rates) return { ...normalizeRates(rates), source: "model" };
+  const entry = catalogModels().find((item) => item.slug === slug);
+  const group = entry && entry.pricing_group;
+  const grouped = group && pricing && pricing.groups ? pricing.groups[group] : null;
+  if (grouped) return { ...normalizeRates(grouped), source: "group", group };
+  return null;
+}
+
+function normalizeRates(rates) {
   return {
-    cached: normalizeRateInput(els.billingProCachedInput ? els.billingProCachedInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cached),
-    cacheMiss: normalizeRateInput(els.billingProCacheMissInput ? els.billingProCacheMissInput.value : "", DEFAULT_BILLING_RATES_CNY.pro.cacheMiss),
-    output: normalizeRateInput(els.billingProOutput ? els.billingProOutput.value : "", DEFAULT_BILLING_RATES_CNY.pro.output),
+    cached_input: normalizeRateInput(rates && rates.cached_input, 0),
+    cache_miss_input: normalizeRateInput(rates && rates.cache_miss_input, 0),
+    output: normalizeRateInput(rates && rates.output, 0),
   };
+}
+
+function catalogPeakValley() {
+  const peak = catalogState.pricing && catalogState.pricing.peak_valley;
+  if (!peak) return FALLBACK_PEAK_VALLEY;
+  const windows = Array.isArray(peak.windows)
+    ? peak.windows.map((window) => {
+        const from = hhmmToMinute(window && window.from);
+        const to = hhmmToMinute(window && window.to);
+        return from === null || to === null || from >= to ? null : { from, to };
+      }).filter(Boolean)
+    : [];
+  const multiplier = Number(peak.multiplier);
+  return {
+    enabled: peak.enabled !== false,
+    timezone: String(peak.timezone || FALLBACK_PEAK_VALLEY.timezone),
+    multiplier: Number.isFinite(multiplier) && multiplier >= 1 ? multiplier : FALLBACK_PEAK_VALLEY.multiplier,
+    windows: windows.length ? windows : FALLBACK_PEAK_VALLEY.windows,
+  };
+}
+
+function hhmmToMinute(value) {
+  const match = /^([01][0-9]|2[0-3]):([0-5][0-9])$/.exec(String(value || "").trim());
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
 }
 
 function normalizeRateInput(value, fallback) {
@@ -4682,10 +4931,19 @@ function normalizeRetentionDays(value) {
   return raw === "1" || raw === "3" || raw === "7" || raw === "30" ? raw : "7";
 }
 
+/// The override dropdown is catalog driven; legacy `flash`/`pro` labels are
+/// still accepted so a 0.7.0 configuration keeps working.
 function normalizeUpstreamModelOverride(value) {
-  const normalized = String(value || "default").trim().toLowerCase();
-  if (normalized === "flash" || normalized === "deepseek-v4-flash") return "deepseek-v4-flash";
-  if (normalized === "pro" || normalized === "deepseek-v4-pro") return "deepseek-v4-pro";
+  const normalized = String(value || "default").trim();
+  if (!normalized) return "default";
+  const lower = normalized.toLowerCase();
+  const slug = catalogModels().find((model) =>
+    model.slug === normalized
+    || String(model.slug).toLowerCase() === lower
+    || (Array.isArray(model.aliases) && model.aliases.some((alias) => String(alias).toLowerCase() === lower)));
+  if (slug) return slug.slug;
+  if (lower === "flash") return "flash";
+  if (lower === "pro") return "pro";
   return "default";
 }
 
@@ -4699,23 +4957,15 @@ function normalizeTemperaturePreset(value) {
 }
 
 function normalizeUpstreamTransport(value) {
-  const normalized = String(value || "auto").trim().toLowerCase();
+  const normalized = String(value || "native_responses").trim().toLowerCase();
   if (normalized === "chat" || normalized === "chat_compat" || normalized === "compat") {
     return "chat_compat";
   }
-  return "auto";
+  return "native_responses";
 }
 
 function selectedUpstreamTransportForSave() {
-  const selected = normalizeUpstreamTransport(getRadioValue("DEEPSEEK_TRANSPORT"));
-  // `native_responses` remains an advanced TOML/environment option for a
-  // custom endpoint. The two-choice UI intentionally presents it as the
-  // default Responses option, so editing an unrelated setting must not
-  // silently replace that explicit configuration with `auto`.
-  if (selected === "auto" && lastSavedConfig && lastSavedConfig.DEEPSEEK_TRANSPORT === "native_responses") {
-    return "native_responses";
-  }
-  return selected;
+  return normalizeUpstreamTransport(getRadioValue("DEEPSEEK_TRANSPORT"));
 }
 
 function normalizeWebSearchBackend(value) {
@@ -4732,19 +4982,45 @@ function normalizeCloseBehavior(value) {
   return String(value || "exit") === "tray" ? "tray" : "exit";
 }
 
+/// `null` means the model is unpriced: the caller must render "unpriced"
+/// rather than inventing a number.
 function costForTokens(tokens) {
-  const rates = currentBillingRates(tokens && (tokens.model || tokens.requested_model));
+  const rates = ratesForTokens(tokens);
+  if (!rates) return null;
   const cached = Number(tokens.cached_input_tokens || tokens.cachedInputTokens || 0);
   const cacheMiss = Number(tokens.cache_miss_input_tokens || tokens.cacheMissInputTokens || 0);
   const output = Number(tokens.output_tokens || tokens.outputTokens || 0);
   const multiplier = currentPeakValleyBillingEnabled() ? billingMultiplierForTokens(tokens) : 1;
-  return ((cached * rates.cached + cacheMiss * rates.cacheMiss + output * rates.output) / 1000000) * multiplier;
+  return ((cached * rates.cached_input + cacheMiss * rates.cache_miss_input + output * rates.output) / 1000000) * multiplier;
+}
+
+function ratesForTokens(tokens) {
+  if (!tokens) return null;
+  const model = tokens.model || tokens.requested_model || tokens.requestedModel;
+  return catalogRateFor(model);
+}
+
+function formatCostOrUnpriced(value) {
+  return value === null || value === undefined ? t("billingUnpriced") : formatCost(value);
+}
+
+function sumCosts(items) {
+  let total = 0;
+  let unpriced = false;
+  for (const item of Array.isArray(items) ? items : []) {
+    const cost = costForTokens(item);
+    if (cost === null) unpriced = true;
+    else total += cost;
+  }
+  return unpriced ? null : total;
 }
 
 function billingMultiplierForTokens(tokens) {
   const explicit = Number(tokens && (tokens.billing_multiplier || tokens.billingMultiplier));
   if (Number.isFinite(explicit) && explicit > 0) return explicit;
-  return isDeepSeekBillingPeakTime(tokens && (tokens.completed_at || tokens.completedAt)) ? BILLING_PEAK_MULTIPLIER : 1;
+  const peak = catalogPeakValley();
+  if (!peak.enabled) return 1;
+  return isPeakBillingTime(tokens && (tokens.completed_at || tokens.completedAt), peak) ? peak.multiplier : 1;
 }
 
 function usageCostToneClass(source) {
@@ -4772,16 +5048,20 @@ function usageHasPeakBilling(source) {
   const multiplier = Number(source.billing_multiplier || source.billingMultiplier || 0);
   if ((period === "peak" || multiplier > 1) && usageHasTokens(source)) return true;
 
-  return usageHasTokens(source) && isDeepSeekBillingPeakTime(source.completed_at || source.completedAt);
+  return usageHasTokens(source) && isPeakBillingTime(source.completed_at || source.completedAt);
 }
 
-function isDeepSeekBillingPeakTime(timestamp) {
-  if (!timestamp) return false;
+/// Window boundaries come from the catalog pricing document: `[from, to)`.
+function isPeakBillingTime(timestamp, peak = catalogPeakValley()) {
+  if (!timestamp || !peak || !peak.enabled) return false;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return false;
-  const beijingMinutes = (date.getUTCHours() + 8) % 24 * 60 + date.getUTCMinutes();
-  return (beijingMinutes >= 9 * 60 && beijingMinutes < 12 * 60)
-    || (beijingMinutes >= 14 * 60 && beijingMinutes < 18 * 60);
+  const offsetMinutes = Number.isFinite(Number(peak.utcOffsetMinutes))
+    ? Number(peak.utcOffsetMinutes)
+    : FALLBACK_PEAK_VALLEY.utcOffsetMinutes;
+  const local = new Date(date.getTime() + offsetMinutes * 60000);
+  const minute = local.getUTCHours() * 60 + local.getUTCMinutes();
+  return peak.windows.some((window) => minute >= window.from && minute < window.to);
 }
 
 function sumBalances(infos) {

@@ -1,4 +1,5 @@
 use crate::app_state::ProxyState;
+use crate::catalog_service::CatalogService;
 use crate::config_payload::{
     model_override_to_ui, temperature_to_ui, upstream_transport_to_ui, user_config_from_payload,
     web_search_backend_to_ui,
@@ -7,10 +8,9 @@ use crate::http_utils::{config_version, is_newer_version, normalize_version_labe
 use crate::runtime_config::{RuntimeConfigChangeSource, RuntimeConfigService};
 use crate::tools::registry::{selected_tool_ids, tool_registry, tool_settings};
 use codeseex_core::catalog::{
-    app_server_model_list, build_codeseex_catalog, catalog_file_is_compatible, codex_toml_snippet,
-    write_catalog_atomic,
+    app_server_model_list_for_document, build_codeseex_catalog_from_document,
+    catalog_file_is_compatible, codex_toml_snippet, write_catalog_atomic,
 };
-use codeseex_core::models::available_models;
 use codeseex_core::urls::balance_url;
 use codeseex_core::AppServerModelListParams;
 use codeseex_core::{AppConfig, UserConfig};
@@ -108,6 +108,7 @@ pub struct ManagerRuntime {
     runtime_config: RuntimeConfigService,
     store: Store,
     release_notes: ReleaseNotesCache,
+    catalog: CatalogService,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,10 +126,13 @@ impl ManagerRuntime {
                 "image capability migration was not completed; keeping the existing configuration"
             );
         }
+        let store = Store::open(&config.data_dir).await?;
+        let _ = store.set_pricing_table(config.pricing_table());
         Ok(Self {
-            store: Store::open(&config.data_dir).await?,
+            store,
             runtime_config: RuntimeConfigService::new(config),
             release_notes: ReleaseNotesCache::default(),
+            catalog: CatalogService::default(),
         })
     }
 
@@ -137,6 +141,7 @@ impl ManagerRuntime {
             runtime_config: state.runtime_config.clone(),
             store: state.store.clone(),
             release_notes: state.release_notes.clone(),
+            catalog: state.catalog.clone(),
         }
     }
 
@@ -170,6 +175,15 @@ impl ManagerRuntime {
             ("GET", "/api/app-info") => ok(app_info()),
             ("GET", "/api/update-check") => ok(self.update_check().await),
             ("GET", "/api/release-notes") => ok(self.release_notes().await),
+            ("GET", "/api/catalog") => ok(self.catalog_payload()),
+            ("POST", "/api/catalog/refresh") | ("GET", "/api/catalog/refresh") => {
+                ok(self.catalog_refresh().await)
+            }
+            ("GET", "/api/upstream/probe") => ok(self.upstream_probe(query).await),
+            ("GET", "/api/upstream/test") | ("POST", "/api/upstream/test") => {
+                ok(self.upstream_test().await)
+            }
+            ("POST", "/api/upstream/credential") => self.set_upstream_credential(body),
             ("GET", "/api/deepseek/balance") => self.balance().await,
             ("GET", "/api/events") => self.events(query).await,
             ("GET", "/api/codex-adapter")
@@ -197,13 +211,102 @@ impl ManagerRuntime {
         self.runtime_config.active_config()
     }
 
+    /// Catalog status plus the full data-driven model and pricing rows.
+    pub fn catalog_payload(&self) -> Value {
+        let config = self.active_config();
+        let mut payload = self.catalog.status(&config);
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "document".to_owned(),
+                self.catalog.document_payload(&config),
+            );
+            object.insert(
+                "credential_source".to_owned(),
+                Value::String(config.upstream.credential.label().to_owned()),
+            );
+            object.insert(
+                "upstream_key_configured".to_owned(),
+                Value::Bool(crate::secrets::upstream_api_key_configured(&config)),
+            );
+        }
+        payload
+    }
+
+    pub async fn catalog_refresh(&self) -> Value {
+        self.catalog
+            .refresh(&self.runtime_config, &self.client())
+            .await
+    }
+
+    pub async fn upstream_probe(&self, query: Option<&Value>) -> Value {
+        let config = self.active_config();
+        let force = query
+            .and_then(|query| query.get("force"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.catalog.probe(&config, &self.client(), force).await
+    }
+
+    pub async fn upstream_test(&self) -> Value {
+        let config = self.active_config();
+        self.catalog.upstream_test(&config, &self.client()).await
+    }
+
+    /// Stores or clears the upstream API key held by CodeSeeX.
+    pub fn set_upstream_credential(&self, body: Option<&Value>) -> ManagerJsonResponse {
+        let config = self.active_config();
+        let body = body.cloned().unwrap_or_else(|| json!({}));
+        let clear = body
+            .get("clear")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let api_key = body
+            .get("api_key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if clear {
+            if let Err(error) = crate::secrets::clear_upstream_api_key(&config) {
+                return status(
+                    500,
+                    json!({ "ok": false, "error": "upstream_key_clear_failed", "message": error.to_string() }),
+                );
+            }
+            return ok(json!({
+                "ok": true,
+                "upstream_key_configured": false,
+                "credential_source": config.upstream.credential.label()
+            }));
+        }
+        let Some(api_key) = api_key else {
+            return status(
+                400,
+                json!({ "ok": false, "error": "missing_api_key" }),
+            );
+        };
+        if let Err(error) = crate::secrets::write_upstream_api_key(&config, api_key) {
+            return status(
+                500,
+                json!({ "ok": false, "error": "upstream_key_write_failed", "message": error.to_string() }),
+            );
+        }
+        ok(json!({
+            "ok": true,
+            "upstream_key_configured": true,
+            "credential_source": config.upstream.credential.label()
+        }))
+    }
+
     pub fn model_list(&self, params: AppServerModelListParams) -> Value {
-        serde_json::to_value(app_server_model_list(params)).unwrap_or_else(|_| {
-            json!({
-                "data": [],
-                "nextCursor": null
-            })
-        })
+        let document = self.active_config().catalog_document();
+        serde_json::to_value(app_server_model_list_for_document(&document, params)).unwrap_or_else(
+            |_| {
+                json!({
+                    "data": [],
+                    "nextCursor": null
+                })
+            },
+        )
     }
 
     fn model_list_value(&self, query: Option<&Value>) -> Value {
@@ -388,7 +491,7 @@ impl ManagerRuntime {
             "data_dir": config.data_dir.to_string_lossy(),
             "base_url": config.proxy_base_url(),
             "catalog_path": config.catalog_path().to_string_lossy(),
-            "models": available_models().into_iter().map(|m| m.slug).collect::<Vec<_>>(),
+            "models": config.catalog_document().models.iter().map(|model| model.slug.clone()).collect::<Vec<_>>(),
             "runtime": {
                 "status": "running",
                 "port": config.port,
@@ -496,7 +599,14 @@ impl ManagerRuntime {
         let model = user_config.model.as_ref();
         let ui = user_config.ui.as_ref();
         let billing = user_config.billing.as_ref();
+        let _ = billing;
         let tools = user_config.tools.as_ref();
+        let catalog_source_url = user_config
+            .catalog
+            .as_ref()
+            .and_then(|value| value.source_url.clone())
+            .or_else(|| config.catalog_source_url.clone())
+            .unwrap_or_default();
         let upstream_base_url = upstream
             .and_then(|value| value.base_url.as_deref())
             .filter(|value| !value.trim().is_empty())
@@ -528,16 +638,14 @@ impl ManagerRuntime {
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
             "UI_CLOSE_BEHAVIOR": ui.and_then(|value| value.close_behavior.as_deref()).unwrap_or("exit"),
             "LOG_RETENTION_DAYS": ui.and_then(|value| value.log_retention_days).unwrap_or(7).to_string(),
-            "BILLING_PEAK_VALLEY_ENABLED": billing.and_then(|value| value.peak_valley_enabled).unwrap_or(true).to_string(),
-            "BILLING_FLASH_CACHED_INPUT_CNY": billing.and_then(|value| value.flash_cached_input_cny).unwrap_or(0.02).to_string(),
-            "BILLING_FLASH_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.flash_cache_miss_input_cny).unwrap_or(1.0).to_string(),
-            "BILLING_FLASH_OUTPUT_CNY": billing.and_then(|value| value.flash_output_cny).unwrap_or(2.0).to_string(),
-            "BILLING_PRO_CACHED_INPUT_CNY": billing.and_then(|value| value.pro_cached_input_cny).unwrap_or(0.025).to_string(),
-            "BILLING_PRO_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.pro_cache_miss_input_cny).unwrap_or(3.0).to_string(),
-            "BILLING_PRO_OUTPUT_CNY": billing.and_then(|value| value.pro_output_cny).unwrap_or(6.0).to_string(),
-            "BILLING_VISION_CACHED_INPUT_CNY": billing.and_then(|value| value.vision_cached_input_cny).unwrap_or(0.05).to_string(),
-            "BILLING_VISION_CACHE_MISS_INPUT_CNY": billing.and_then(|value| value.vision_cache_miss_input_cny).unwrap_or(1.5).to_string(),
-            "BILLING_VISION_OUTPUT_CNY": billing.and_then(|value| value.vision_output_cny).unwrap_or(4.5).to_string(),
+            "DEEPSEEK_CREDENTIAL_SOURCE": upstream
+                .and_then(|value| value.credential)
+                .unwrap_or(config.upstream.credential)
+                .label(),
+            "CODESEEX_CATALOG_URL": catalog_source_url,
+            "CODESEEX_CATALOG_REMOTE": config.catalog_remote_enabled.to_string(),
+            "CATALOG_PRICING": catalog_pricing_override(&user_config),
+            "CATALOG_MODELS": catalog_model_overrides(&user_config),
             "ENABLED_TOOLS": tools.and_then(|value| value.enabled.as_deref()).map(canonical_enabled_tool_ids).map(Value::from).unwrap_or(Value::Null)
         });
         let settings = crate::config_payload::tool_settings_from_user_config(&user_config);
@@ -561,6 +669,26 @@ impl ManagerRuntime {
                     }
                 }
             }
+            object.insert(
+                "CATALOG".to_owned(),
+                self.catalog.document_payload(&config),
+            );
+            object.insert(
+                "UPSTREAM_API_KEY_CONFIGURED".to_owned(),
+                Value::Bool(crate::secrets::upstream_api_key_configured(&config)),
+            );
+            object.insert(
+                "CATALOG_REVISION".to_owned(),
+                Value::String(config.catalog_revision()),
+            );
+            object.insert(
+                "CATALOG_SOURCE".to_owned(),
+                Value::String(config.catalog_source_label().to_owned()),
+            );
+            object.insert(
+                "CATALOG_STATUS".to_owned(),
+                self.catalog.status(&config),
+            );
             object.insert(
                 "VISION_ANALYZE_API_KEY_CONFIGURED".to_owned(),
                 Value::Bool(
@@ -1030,6 +1158,11 @@ impl ManagerRuntime {
 
     pub fn generate_adapter(&self) -> ManagerJsonResponse {
         let config = self.active_config();
+        let document = config.catalog_document();
+        let default_model = document
+            .model(document.default_slug())
+            .cloned()
+            .unwrap_or_else(|| document.models[0].clone());
         let before = catalog_file_state(&config);
         match ensure_catalog(&config) {
             Ok(()) => {
@@ -1042,9 +1175,9 @@ impl ManagerRuntime {
                     "catalog_mode": "builtin",
                     "catalog_path": config.catalog_path().to_string_lossy(),
                     "catalog_diagnostic": catalog_diagnostic(&config, &toml_snippet, &before, &after),
-                    "models": available_models().into_iter().map(|m| m.slug).collect::<Vec<_>>(),
-                    "context_window": 1_000_000,
-                    "effective_context_window_percent": 95,
+                    "models": document.models.iter().map(|model| model.slug.clone()).collect::<Vec<_>>(),
+                    "context_window": default_model.context_window,
+                    "effective_context_window_percent": default_model.effective_context_window_percent,
                     "toml_snippet": toml_snippet
                 }))
             }
@@ -1273,7 +1406,9 @@ fn catalog_file_state(config: &AppConfig) -> CatalogFileState {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let expected = serde_json::to_string_pretty(&build_codeseex_catalog())
+    let expected = serde_json::to_string_pretty(&build_codeseex_catalog_from_document(
+        &config.catalog_document(),
+    ))
         .map(|text| text + "\n")
         .unwrap_or_default();
 
@@ -1346,7 +1481,7 @@ fn catalog_diagnostic(
         "previous_issue": before.error.as_deref().unwrap_or(if before.exact_current { "none" } else { "outdated_or_missing" }),
         "model_count": after.model_count,
         "models": after.models,
-        "default_model": "deepseek-v4-pro",
+        "default_model": config.catalog_document().default_slug().to_owned(),
         "toml_has_model_catalog_json": toml_has_catalog,
         "toml_catalog_path": toml_catalog_path,
         "toml_catalog_path_matches": toml_catalog_matches,
@@ -1373,8 +1508,33 @@ fn toml_model_catalog_path(toml_snippet: &str) -> Option<String> {
     })
 }
 
+/// Sparse pricing override document produced by the settings UI. It only
+/// carries what the user actually changed; the effective table comes from the
+/// catalog layer stack.
+fn catalog_pricing_override(user_config: &UserConfig) -> Value {
+    user_config
+        .billing
+        .as_ref()
+        .and_then(codeseex_core::config::pricing_override_from_user_billing)
+        .unwrap_or(Value::Null)
+}
+
+fn catalog_model_overrides(user_config: &UserConfig) -> Value {
+    let Some(models) = user_config.models.as_ref() else {
+        return Value::Null;
+    };
+    let mut object = serde_json::Map::new();
+    for (slug, model) in models {
+        object.insert(
+            slug.clone(),
+            serde_json::to_value(model).unwrap_or(Value::Null),
+        );
+    }
+    Value::Object(object)
+}
+
 pub fn ensure_catalog(config: &AppConfig) -> anyhow::Result<()> {
-    let catalog = build_codeseex_catalog();
+    let catalog = build_codeseex_catalog_from_document(&config.catalog_document());
     if catalog_file_matches_current(&config.catalog_path(), &catalog) {
         return Ok(());
     }
@@ -2137,7 +2297,7 @@ mod tests {
         assert!(!refreshed.contains("_codeseex_stale_marker"));
         assert!(catalog_file_matches_current(
             &config.catalog_path(),
-            &build_codeseex_catalog()
+            &build_codeseex_catalog_from_document(&config.catalog_document())
         ));
         let _ = std::fs::remove_dir_all(config.data_dir);
     }
@@ -2148,6 +2308,8 @@ mod tests {
         let user_config = UserConfig {
             catalog: Some(codeseex_core::UserCatalogConfig {
                 mode: Some("auto".to_owned()),
+                source_url: None,
+                remote_enabled: Some(false),
             }),
             ..UserConfig::default()
         };

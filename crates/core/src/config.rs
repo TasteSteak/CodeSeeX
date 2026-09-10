@@ -1,13 +1,16 @@
+use crate::catalog::CatalogDocument;
 use crate::models::{TemperaturePreset, UpstreamModelOverride};
+use crate::pricing::PricingTable;
 use crate::urls::normalize_base_url;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub const IMAGE_CAPABILITY_SCHEMA_VERSION: u8 = 2;
 
@@ -21,6 +24,16 @@ pub struct AppConfig {
     pub temperature: TemperaturePreset,
     pub network_proxy: NetworkProxyMode,
     pub web_search_backend: WebSearchBackend,
+    /// Remote catalog manifest URL. `None` uses the built-in release URL.
+    pub catalog_source_url: Option<String>,
+    pub catalog_remote_enabled: bool,
+    /// Layer 3 catalog overrides parsed from the user TOML.
+    #[serde(skip)]
+    pub catalog_overrides: CatalogOverrides,
+    /// Highest layer reached so far: cache file at load time, remote document
+    /// after a successful background refresh.
+    #[serde(skip)]
+    pub catalog_remote: Option<Arc<CatalogDocument>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +41,10 @@ pub struct UpstreamConfig {
     pub base_url: String,
     pub official_v1_compat: bool,
     pub transport: UpstreamTransport,
+    /// Which credential reaches the upstream. `Auto` keeps the historical
+    /// resolution order; explicit values pin a single source so changing the
+    /// upstream URL cannot silently reuse another provider's key.
+    pub credential: UpstreamCredentialSource,
     // Process environment fallback only. Manager/user TOML is not credential storage.
     pub api_key: Option<String>,
     pub timeout_ms: u64,
@@ -35,10 +52,53 @@ pub struct UpstreamConfig {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum UpstreamTransport {
+pub enum UpstreamCredentialSource {
+    /// Official endpoints isolate client credentials; custom endpoints forward
+    /// the request Authorization when present.
     #[default]
     Auto,
+    /// Always forward the inbound request Authorization.
+    Request,
+    /// Always use the process `DEEPSEEK_API_KEY` environment variable.
+    Env,
+    /// Always use the Codex auth source (`auth.json` or cached request header).
+    CodexAuth,
+    /// Always use the OS credential store entry managed by CodeSeeX.
+    Secret,
+}
+
+impl UpstreamCredentialSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Request => "request",
+            Self::Env => "env",
+            Self::CodexAuth => "codex_auth",
+            Self::Secret => "secret",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" | "default" => Some(Self::Auto),
+            "request" | "client" | "passthrough" | "inbound" => Some(Self::Request),
+            "env" | "environment" | "deepseek_api_key" => Some(Self::Env),
+            "codex_auth" | "codex-auth" | "auth" | "auth_json" => Some(Self::CodexAuth),
+            "secret" | "secret_store" | "credential_store" | "keyring" => Some(Self::Secret),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamTransport {
+    /// Native Responses API transport. This is the default for every
+    /// upstream; Chat API compatibility is an explicit user opt-in.
+    #[default]
+    #[serde(alias = "auto", alias = "native", alias = "responses")]
     NativeResponses,
+    #[serde(alias = "chat", alias = "compat")]
     ChatCompat,
 }
 
@@ -55,6 +115,8 @@ pub struct UserConfig {
     pub proxy: Option<UserProxyConfig>,
     pub upstream: Option<UserUpstreamConfig>,
     pub model: Option<UserModelConfig>,
+    /// Per-model catalog overrides, keyed by slug: `[models."<slug>"]`.
+    pub models: Option<BTreeMap<String, UserCatalogModelConfig>>,
     pub catalog: Option<UserCatalogConfig>,
     pub network: Option<UserNetworkConfig>,
     pub ui: Option<UserUiConfig>,
@@ -73,6 +135,7 @@ pub struct UserUpstreamConfig {
     pub base_url: Option<String>,
     pub official_v1_compat: Option<bool>,
     pub transport: Option<UpstreamTransport>,
+    pub credential: Option<UpstreamCredentialSource>,
     // Kept to deserialize legacy TOML, but ignored when applying user config.
     pub api_key: Option<String>,
     pub timeout_ms: Option<u64>,
@@ -89,6 +152,75 @@ pub struct UserModelConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserCatalogConfig {
     pub mode: Option<String>,
+    /// Remote catalog manifest URL. Empty disables remote refresh.
+    pub source_url: Option<String>,
+    pub remote_enabled: Option<bool>,
+}
+
+/// `[models."<slug>"]` user override for one model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserCatalogModelConfig {
+    pub display_name: Option<String>,
+    pub short_display_name: Option<String>,
+    pub description: Option<String>,
+    pub context_window: Option<u64>,
+    pub effective_context_window_percent: Option<u8>,
+    pub upstream_slug: Option<String>,
+    pub aliases: Option<Vec<String>>,
+    pub pricing_group: Option<String>,
+    pub is_default: Option<bool>,
+    pub hidden: Option<bool>,
+}
+
+/// Resolved layer 3 overrides applied on top of the catalog document.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogOverrides {
+    pub models: BTreeMap<String, CatalogModelOverride>,
+    pub pricing: Option<Value>,
+}
+
+impl CatalogOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.models.is_empty() && self.pricing.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CatalogModelOverride {
+    pub display_name: Option<String>,
+    pub short_display_name: Option<String>,
+    pub description: Option<String>,
+    pub context_window: Option<u64>,
+    pub effective_context_window_percent: Option<u8>,
+    pub upstream_slug: Option<String>,
+    pub aliases: Option<Vec<String>>,
+    pub pricing_group: Option<String>,
+    pub is_default: Option<bool>,
+    pub hidden: Option<bool>,
+}
+
+impl From<&UserCatalogModelConfig> for CatalogModelOverride {
+    fn from(value: &UserCatalogModelConfig) -> Self {
+        Self {
+            display_name: value.display_name.clone(),
+            short_display_name: value.short_display_name.clone(),
+            description: value.description.clone(),
+            context_window: value.context_window,
+            effective_context_window_percent: value.effective_context_window_percent,
+            upstream_slug: value.upstream_slug.clone(),
+            aliases: value.aliases.clone(),
+            pricing_group: value.pricing_group.clone(),
+            is_default: value.is_default,
+            hidden: value.hidden,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserModelRatesConfig {
+    pub cached_input: Option<f64>,
+    pub cache_miss_input: Option<f64>,
+    pub output: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -110,6 +242,14 @@ pub struct UserUiConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserBillingConfig {
     pub peak_valley_enabled: Option<bool>,
+    pub peak_multiplier: Option<f64>,
+    /// Peak windows in `HH:MM-HH:MM` form.
+    pub peak_windows: Option<Vec<String>>,
+    pub timezone: Option<String>,
+    pub currency: Option<String>,
+    pub unit: Option<String>,
+    /// Per-model rates, keyed by slug: `[billing.rates."<slug>"]`.
+    pub rates: Option<BTreeMap<String, UserModelRatesConfig>>,
     pub flash_cached_input_cny: Option<f64>,
     pub flash_cache_miss_input_cny: Option<f64>,
     pub flash_output_cny: Option<f64>,
@@ -193,6 +333,13 @@ impl Default for AppConfig {
             temperature: env_temperature("DEEPSEEK_TEMPERATURE_PRESET"),
             network_proxy: env_network_proxy(),
             web_search_backend: env_web_search_backend(),
+            catalog_source_url: env::var("CODESEEX_CATALOG_URL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            catalog_remote_enabled: env_bool("CODESEEX_CATALOG_REMOTE", true),
+            catalog_overrides: CatalogOverrides::default(),
+            catalog_remote: None,
         }
     }
 }
@@ -205,6 +352,10 @@ impl Default for UpstreamConfig {
             base_url: normalize_base_url(&raw_base),
             official_v1_compat: env_bool("DEEPSEEK_OFFICIAL_V1_COMPAT", true),
             transport: env_upstream_transport(),
+            credential: env::var("DEEPSEEK_CREDENTIAL_SOURCE")
+                .ok()
+                .and_then(|value| UpstreamCredentialSource::parse(&value))
+                .unwrap_or_default(),
             api_key: env::var("DEEPSEEK_API_KEY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
@@ -224,12 +375,63 @@ impl AppConfig {
 
     pub fn load() -> Self {
         let mut config = Self::load_base();
+        config.load_cached_catalog();
         let path = config.config_path();
         let Ok(user_config) = UserConfig::read_from(&path) else {
+            config.refresh_catalog_document();
             return config;
         };
         config.apply_user_config(user_config);
         config
+    }
+
+    /// Reads the cached remote catalog document (layer 2). Never touches the
+    /// network; a missing or invalid cache file simply keeps the built-in
+    /// document.
+    pub fn load_cached_catalog(&mut self) {
+        if !self.catalog_remote_enabled {
+            return;
+        }
+        if let Some(document) = crate::catalog::read_cached_catalog_document(&self.catalog_cache_path())
+        {
+            self.catalog_remote = Some(Arc::new(document));
+        }
+    }
+
+    pub fn catalog_cache_path(&self) -> PathBuf {
+        self.data_dir.join("cache").join("model-catalog.json")
+    }
+
+    /// Currently effective catalog: built-in, then the highest available layer
+    /// (cache or remote), then user overrides.
+    pub fn catalog_document(&self) -> CatalogDocument {
+        let base = crate::catalog::embedded_catalog_document();
+        let layered = match self.catalog_remote.as_deref() {
+            Some(remote) => base.merge_authoritative(remote),
+            None => base,
+        };
+        crate::catalog::apply_catalog_overrides(&layered, &self.catalog_overrides)
+    }
+
+    pub fn pricing_table(&self) -> PricingTable {
+        self.catalog_document().pricing
+    }
+
+    pub fn catalog_revision(&self) -> String {
+        self.catalog_document().revision
+    }
+
+    /// `builtin`, `cache` or `remote` depending on the highest layer in use.
+    pub fn catalog_source_label(&self) -> &'static str {
+        if self.catalog_remote.is_some() {
+            "remote"
+        } else {
+            "builtin"
+        }
+    }
+
+    pub fn refresh_catalog_document(&mut self) {
+        let _ = self.catalog_document();
     }
 
     pub fn proxy_base_url(&self) -> String {
@@ -282,6 +484,11 @@ impl AppConfig {
                     self.upstream.transport = transport;
                 }
             }
+            if env::var("DEEPSEEK_CREDENTIAL_SOURCE").is_err() {
+                if let Some(credential) = upstream.credential {
+                    self.upstream.credential = credential;
+                }
+            }
             if env::var("UPSTREAM_REQUEST_TIMEOUT_MS").is_err() {
                 if let Some(timeout_ms) = upstream.timeout_ms {
                     self.upstream.timeout_ms = timeout_ms;
@@ -300,6 +507,44 @@ impl AppConfig {
                     self.temperature = temperature;
                 }
             }
+        }
+
+        if let Some(catalog) = user_config.catalog.as_ref() {
+            if env::var("CODESEEX_CATALOG_URL").is_err() {
+                if let Some(source_url) = catalog
+                    .source_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    self.catalog_source_url = Some(source_url.to_owned());
+                }
+            }
+            if env::var("CODESEEX_CATALOG_REMOTE").is_err() {
+                if let Some(enabled) = catalog.remote_enabled {
+                    self.catalog_remote_enabled = enabled;
+                }
+            }
+        }
+
+        let mut overrides = CatalogOverrides::default();
+        if let Some(models) = user_config.models.as_ref() {
+            for (slug, model) in models {
+                let slug = slug.trim();
+                if slug.is_empty() {
+                    continue;
+                }
+                overrides
+                    .models
+                    .insert(slug.to_owned(), CatalogModelOverride::from(model));
+            }
+        }
+        if let Some(billing) = user_config.billing.as_ref() {
+            overrides.pricing = pricing_override_from_user_billing(billing);
+        }
+        self.catalog_overrides = overrides;
+        if !self.catalog_remote_enabled {
+            self.catalog_remote = None;
         }
 
         let user_network_proxy = user_config
@@ -359,6 +604,152 @@ impl UserConfig {
         fs::rename(tmp, path)?;
         Ok(())
     }
+}
+
+/// Translates user billing settings into a sparse pricing override document.
+///
+/// The legacy `BILLING_*` fields are still read so a 0.7.0 configuration keeps
+/// its rates, but they are written back as `[billing.rates."<slug>"]`.
+pub fn pricing_override_from_user_billing(billing: &UserBillingConfig) -> Option<Value> {
+    let mut map = serde_json::Map::new();
+    if let Some(enabled) = billing.peak_valley_enabled {
+        map.insert("peak_valley_enabled".to_owned(), json!(enabled));
+    }
+    if let Some(multiplier) = billing.peak_multiplier {
+        map.insert("peak_multiplier".to_owned(), json!(multiplier));
+    }
+    if let Some(timezone) = billing
+        .timezone
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        map.insert("timezone".to_owned(), json!(timezone));
+    }
+    if let Some(currency) = billing
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        map.insert("currency".to_owned(), json!(currency));
+    }
+    if let Some(unit) = billing
+        .unit
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        map.insert("unit".to_owned(), json!(unit));
+    }
+    if let Some(windows) = billing.peak_windows.as_ref() {
+        let parsed = windows
+            .iter()
+            .filter_map(|window| parse_peak_window_spec(window))
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            map.insert("peak_windows".to_owned(), Value::Array(parsed));
+        }
+    }
+
+    let mut rates = serde_json::Map::new();
+    if let Some(configured) = billing.rates.as_ref() {
+        for (slug, rate) in configured {
+            let slug = slug.trim();
+            if slug.is_empty() {
+                continue;
+            }
+            let values = [
+                rate.cached_input.unwrap_or(0.0),
+                rate.cache_miss_input.unwrap_or(0.0),
+                rate.output.unwrap_or(0.0),
+            ];
+            if values.iter().any(|value| !value.is_finite() || *value < 0.0) {
+                continue;
+            }
+            rates.insert(
+                slug.to_owned(),
+                json!({
+                    "cached_input": values[0],
+                    "cache_miss_input": values[1],
+                    "output": values[2],
+                }),
+            );
+        }
+    }
+    for (slug, legacy) in legacy_billing_rates(billing) {
+        rates.entry(slug.to_owned()).or_insert(legacy);
+    }
+    if !rates.is_empty() {
+        map.insert("rates".to_owned(), Value::Object(rates));
+    }
+
+    (!map.is_empty()).then(|| Value::Object(map))
+}
+
+/// Legacy 0.7.0 rate fields mapped onto the built-in slugs.
+fn legacy_billing_rates(billing: &UserBillingConfig) -> Vec<(&'static str, Value)> {
+    let mut output = Vec::new();
+    let mut push = |slug: &'static str,
+                    cached: Option<f64>,
+                    cache_miss: Option<f64>,
+                    out: Option<f64>| {
+        if cached.is_none() && cache_miss.is_none() && out.is_none() {
+            return;
+        }
+        let values = [
+            cached.unwrap_or(0.0),
+            cache_miss.unwrap_or(0.0),
+            out.unwrap_or(0.0),
+        ];
+        if values.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            return;
+        }
+        output.push((
+            slug,
+            json!({
+                "cached_input": values[0],
+                "cache_miss_input": values[1],
+                "output": values[2],
+            }),
+        ));
+    };
+    push(
+        crate::models::MODEL_FLASH,
+        billing.flash_cached_input_cny,
+        billing.flash_cache_miss_input_cny,
+        billing.flash_output_cny,
+    );
+    push(
+        crate::models::MODEL_PRO,
+        billing.pro_cached_input_cny,
+        billing.pro_cache_miss_input_cny,
+        billing.pro_output_cny,
+    );
+    push(
+        "deepseek-v4-flash-vision-exp",
+        billing.vision_cached_input_cny,
+        billing.vision_cache_miss_input_cny,
+        billing.vision_output_cny,
+    );
+    output
+}
+
+fn parse_peak_window_spec(value: &str) -> Option<Value> {
+    let raw = value.trim();
+    let (from, to) = raw
+        .split_once('-')
+        .or_else(|| raw.split_once(".."))
+        .or_else(|| raw.split_once('~'))?;
+    let from = crate::pricing::parse_hhmm(from)?;
+    let to = crate::pricing::parse_hhmm(to)?;
+    if from >= to {
+        return None;
+    }
+    Some(json!({
+        "from": crate::pricing::minute_to_hhmm(from),
+        "to": crate::pricing::minute_to_hhmm(to),
+    }))
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -482,8 +873,9 @@ fn env_upstream_transport() -> UpstreamTransport {
 
 pub fn parse_upstream_transport(value: &str) -> Option<UpstreamTransport> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "" | "auto" => Some(UpstreamTransport::Auto),
-        "native" | "native_responses" | "responses" => Some(UpstreamTransport::NativeResponses),
+        "" | "auto" | "native" | "native_responses" | "responses" => {
+            Some(UpstreamTransport::NativeResponses)
+        }
         "chat" | "chat_compat" | "compat" => Some(UpstreamTransport::ChatCompat),
         _ => None,
     }
@@ -631,10 +1023,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_user_config_without_transport_keeps_auto_default() {
+    fn legacy_user_config_without_transport_keeps_native_default() {
         let mut config = AppConfig {
             upstream: UpstreamConfig {
-                transport: UpstreamTransport::Auto,
+                transport: UpstreamTransport::NativeResponses,
                 ..UpstreamConfig::default()
             },
             ..AppConfig::default()
@@ -644,12 +1036,38 @@ mod tests {
                 base_url: Some("https://api.deepseek.com".to_owned()),
                 official_v1_compat: Some(true),
                 transport: None,
+                credential: None,
                 api_key: None,
                 timeout_ms: None,
             }),
             ..UserConfig::default()
         });
 
-        assert_eq!(config.upstream.transport, UpstreamTransport::Auto);
+        assert_eq!(config.upstream.transport, UpstreamTransport::NativeResponses);
+    }
+
+    #[test]
+    fn legacy_transport_aliases_resolve_to_native_or_chat() {
+        assert_eq!(
+            parse_upstream_transport("auto"),
+            Some(UpstreamTransport::NativeResponses)
+        );
+        assert_eq!(
+            parse_upstream_transport("native"),
+            Some(UpstreamTransport::NativeResponses)
+        );
+        assert_eq!(
+            parse_upstream_transport("responses"),
+            Some(UpstreamTransport::NativeResponses)
+        );
+        assert_eq!(
+            parse_upstream_transport("chat"),
+            Some(UpstreamTransport::ChatCompat)
+        );
+        assert_eq!(
+            parse_upstream_transport("compat"),
+            Some(UpstreamTransport::ChatCompat)
+        );
+        assert_eq!(parse_upstream_transport("unknown"), None);
     }
 }
