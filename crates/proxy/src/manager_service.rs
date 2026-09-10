@@ -509,8 +509,7 @@ impl ManagerRuntime {
                 "average_ms": runtime.as_ref().map(|value| value.average_ms).unwrap_or(0)
             },
             "upstream": {
-                "base_url": config.upstream.base_url,
-                "official_v1_compat": config.upstream.official_v1_compat
+                "base_url": config.upstream.base_url
             }
         })
     }
@@ -624,7 +623,6 @@ impl ManagerRuntime {
             "PROXY_PORT_EFFECTIVE": config.port.to_string(),
             "PROXY_PORT_SOURCE": proxy_port_source(proxy.and_then(|value| value.port)),
             "DEEPSEEK_BASE_URL": upstream_base_url,
-            "DEEPSEEK_OFFICIAL_V1_COMPAT": upstream.and_then(|value| value.official_v1_compat).unwrap_or(config.upstream.official_v1_compat).to_string(),
             "DEEPSEEK_TRANSPORT": upstream_transport_to_ui(upstream.and_then(|value| value.transport).unwrap_or(config.upstream.transport)),
             "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(model_override),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),

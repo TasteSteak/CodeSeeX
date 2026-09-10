@@ -71,7 +71,6 @@ impl RuntimeConfigSnapshot {
         let network_proxy_signature = crate::network::proxy_cache_key(config.network_proxy);
         let upstream_signature = stable_json_signature(&json!({
             "base_url": config.upstream.base_url,
-            "official_v1_compat": config.upstream.official_v1_compat,
             "transport": config.upstream.transport,
             "credential": config.upstream.credential,
             "timeout_ms": config.upstream.timeout_ms
@@ -387,7 +386,6 @@ fn config_signature(config: &AppConfig) -> String {
         "port": config.port,
         "upstream": {
             "base_url": config.upstream.base_url,
-            "official_v1_compat": config.upstream.official_v1_compat,
             "transport": config.upstream.transport,
             "credential": config.upstream.credential,
             "timeout_ms": config.upstream.timeout_ms

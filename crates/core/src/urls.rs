@@ -19,13 +19,8 @@ pub fn normalize_base_url(value: &str) -> String {
     }
 }
 
-pub fn chat_completions_url(base_url: &str, official_v1_compat: bool) -> String {
+pub fn chat_completions_url(base_url: &str) -> String {
     let normalized = normalize_base_url(base_url);
-    if let Ok(url) = Url::parse(&normalized) {
-        if is_official_deepseek_url(&url) && official_v1_compat {
-            return "https://api.deepseek.com/v1/chat/completions".to_owned();
-        }
-    }
     format!("{}/chat/completions", normalized.trim_end_matches('/'))
 }
 
@@ -114,17 +109,17 @@ mod tests {
     }
 
     #[test]
-    fn official_compat_uses_v1_chat_completions() {
+    fn official_chat_completions_uses_the_root_path() {
         assert_eq!(
-            chat_completions_url("https://api.deepseek.com/", true),
-            "https://api.deepseek.com/v1/chat/completions"
+            chat_completions_url("https://api.deepseek.com/"),
+            "https://api.deepseek.com/chat/completions"
         );
     }
 
     #[test]
     fn custom_url_keeps_custom_prefix() {
         assert_eq!(
-            chat_completions_url("http://127.0.0.1:9000/v1", true),
+            chat_completions_url("http://127.0.0.1:9000/v1"),
             "http://127.0.0.1:9000/v1/chat/completions"
         );
     }

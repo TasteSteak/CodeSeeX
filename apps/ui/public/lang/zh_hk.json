@@ -36,8 +36,6 @@
   "brandSubtitle": "DeepSeek Bridge",
   "deepseekBaseUrl": "DeepSeek 上游介面地址",
   "deepseekBaseUrlHint": "留空則使用官方 DeepSeek API。自行部署時可填寫 OpenAI 相容介面，例如 http://127.0.0.1:8000/v1。",
-  "deepseekOfficialV1Compat": "官方 DeepSeek 請求路徑",
-  "deepseekOfficialV1CompatHint": "開啟後，官方 DeepSeek 請求使用 /v1/chat/completions。關閉後使用 /chat/completions。自訂上游地址不受影響。",
   "busyDetail": "請稍候...",
   "busyTitle": "正在處理",
   "cacheHit": "快取命中",

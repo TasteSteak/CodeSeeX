@@ -531,10 +531,9 @@ pub(crate) fn spawn_pricing_sync(
 
 fn probe_cache_key(upstream: &UpstreamConfig) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}",
         upstream.base_url,
         upstream.credential.label(),
-        upstream.official_v1_compat,
         upstream.api_key.is_some()
     )
 }

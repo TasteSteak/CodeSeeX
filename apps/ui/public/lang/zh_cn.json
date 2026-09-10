@@ -50,8 +50,6 @@
   "brandSubtitle": "DeepSeek Bridge",
   "deepseekBaseUrl": "DeepSeek 上游接口地址",
   "deepseekBaseUrlHint": "留空则使用官方 DeepSeek API。自部署时可填写 OpenAI 兼容接口，例如 http://127.0.0.1:8000/v1。",
-  "deepseekOfficialV1Compat": "官方 DeepSeek 请求路径",
-  "deepseekOfficialV1CompatHint": "开启后，官方 DeepSeek 请求使用 /v1/chat/completions。关闭后使用 /chat/completions。自定义上游地址不受影响。",
   "deepseekTransport": "Chat API 兼容模式",
   "deepseekTransportHint": "所有上游默认使用原生 Responses。当上游未实现 Responses API，或请求需要 CodeSeeX 本地工具执行器时，可选择 Chat API 兼容。",
   "deepseekTransport_native": "原生 Responses",

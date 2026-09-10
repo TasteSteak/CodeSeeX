@@ -37,7 +37,6 @@ fn test_config_with_upstream(data_dir: PathBuf, fake_addr: SocketAddr) -> AppCon
         data_dir,
         upstream: UpstreamConfig {
             base_url: format!("http://{fake_addr}"),
-            official_v1_compat: false,
             transport: codeseex_core::config::UpstreamTransport::ChatCompat,
             credential: Default::default(),
             api_key: Some("test-key".to_owned()),

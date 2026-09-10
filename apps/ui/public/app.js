@@ -122,7 +122,6 @@ const els = {
   pageTitle: byId("pageTitle"),
   pid: byId("pid"),
   pidLabel: byId("pidLabel"),
-  deepseekOfficialV1Compat: byId("DEEPSEEK_OFFICIAL_V1_COMPAT"),
   deepseekBaseUrl: byId("DEEPSEEK_BASE_URL"),
   proxyPort: byId("PROXY_PORT"),
   rechargeBalanceButton: byId("rechargeBalanceButton"),
@@ -408,7 +407,7 @@ function bind() {
     els.toolConfigList.addEventListener("focusout", handleConfigInput);
   }
 
-  [els.showThinking, els.autoStart, els.deepseekOfficialV1Compat, els.billingPeakValleyEnabled, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
+  [els.showThinking, els.autoStart, els.billingPeakValleyEnabled, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
@@ -1459,7 +1458,6 @@ function renderConfig(config) {
   setRadioValue("UI_THEME", nextTheme);
   els.showThinking.checked = !/^(0|false|no|off|disabled)$/i.test(String(config.SHOW_THINKING || "true"));
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
-  if (els.deepseekOfficialV1Compat) els.deepseekOfficialV1Compat.checked = isTruthy(config.DEEPSEEK_OFFICIAL_V1_COMPAT || "true");
   if (els.codexAppModelListInjection) els.codexAppModelListInjection.checked = config.CODEX_APP_MODEL_LIST_INJECTION !== "false";
   if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
@@ -4375,7 +4373,6 @@ function buildConfigPayload() {
     DEEPSEEK_TRANSPORT: selectedUpstreamTransportForSave(),
     WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND")),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
-    DEEPSEEK_OFFICIAL_V1_COMPAT: els.deepseekOfficialV1Compat && els.deepseekOfficialV1Compat.checked ? "true" : "false",
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",

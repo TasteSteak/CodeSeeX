@@ -50,8 +50,6 @@
   "brandSubtitle": "DeepSeek Bridge",
   "deepseekBaseUrl": "DeepSeek upstream URL",
   "deepseekBaseUrlHint": "Leave blank to use the official DeepSeek API. For self-hosted deployments, enter your OpenAI-compatible endpoint, for example http://127.0.0.1:8000/v1.",
-  "deepseekOfficialV1Compat": "Official DeepSeek request path",
-  "deepseekOfficialV1CompatHint": "When enabled, official DeepSeek requests use /v1/chat/completions. When disabled, they use /chat/completions. Custom upstream URLs are not affected.",
   "deepseekTransport": "Chat API compatibility",
   "deepseekTransportHint": "Default transport for every upstream. Select Chat API compatibility when the upstream does not implement the Responses API or a request requires a CodeSeeX-owned local tool executor.",
   "deepseekTransport_native": "Native Responses",

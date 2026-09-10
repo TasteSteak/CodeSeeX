@@ -20,7 +20,6 @@ pub(crate) fn user_config_from_payload(
     }
 
     if payload.get("DEEPSEEK_BASE_URL").is_some()
-        || payload.get("DEEPSEEK_OFFICIAL_V1_COMPAT").is_some()
         || payload.get("DEEPSEEK_TRANSPORT").is_some()
     {
         let upstream = config
@@ -28,9 +27,6 @@ pub(crate) fn user_config_from_payload(
             .get_or_insert_with(UserUpstreamConfig::default);
         if payload.get("DEEPSEEK_BASE_URL").is_some() {
             upstream.base_url = value_string(payload, "DEEPSEEK_BASE_URL");
-        }
-        if payload.get("DEEPSEEK_OFFICIAL_V1_COMPAT").is_some() {
-            upstream.official_v1_compat = value_bool(payload, "DEEPSEEK_OFFICIAL_V1_COMPAT");
         }
         if payload.get("DEEPSEEK_TRANSPORT").is_some() {
             upstream.transport = value_upstream_transport(payload, "DEEPSEEK_TRANSPORT");

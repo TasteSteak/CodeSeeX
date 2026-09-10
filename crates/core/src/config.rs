@@ -39,7 +39,6 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     pub base_url: String,
-    pub official_v1_compat: bool,
     pub transport: UpstreamTransport,
     /// Which credential reaches the upstream. `Auto` keeps the historical
     /// resolution order; explicit values pin a single source so changing the
@@ -133,7 +132,6 @@ pub struct UserProxyConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserUpstreamConfig {
     pub base_url: Option<String>,
-    pub official_v1_compat: Option<bool>,
     pub transport: Option<UpstreamTransport>,
     pub credential: Option<UpstreamCredentialSource>,
     // Kept to deserialize legacy TOML, but ignored when applying user config.
@@ -351,7 +349,6 @@ impl Default for UpstreamConfig {
             .unwrap_or_else(|_| "https://api.deepseek.com/".to_owned());
         Self {
             base_url: normalize_base_url(&raw_base),
-            official_v1_compat: env_bool("DEEPSEEK_OFFICIAL_V1_COMPAT", true),
             transport: env_upstream_transport(),
             credential: env::var("DEEPSEEK_CREDENTIAL_SOURCE")
                 .ok()
@@ -473,11 +470,6 @@ impl AppConfig {
             if env::var("DEEPSEEK_BASE_URL").is_err() {
                 if let Some(base_url) = upstream.base_url.filter(|value| !value.trim().is_empty()) {
                     self.upstream.base_url = normalize_base_url(&base_url);
-                }
-            }
-            if env::var("DEEPSEEK_OFFICIAL_V1_COMPAT").is_err() {
-                if let Some(official_v1_compat) = upstream.official_v1_compat {
-                    self.upstream.official_v1_compat = official_v1_compat;
                 }
             }
             if env::var("DEEPSEEK_TRANSPORT").is_err() {
@@ -1035,7 +1027,6 @@ mod tests {
         config.apply_user_config(UserConfig {
             upstream: Some(UserUpstreamConfig {
                 base_url: Some("https://api.deepseek.com".to_owned()),
-                official_v1_compat: Some(true),
                 transport: None,
                 credential: None,
                 api_key: None,

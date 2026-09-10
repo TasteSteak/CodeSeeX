@@ -294,7 +294,7 @@ pub async fn post_chat_completions(
     auth_context_payload: Option<&Value>,
     payload: Value,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let url = chat_completions_url(&upstream.base_url, upstream.official_v1_compat);
+    let url = chat_completions_url(&upstream.base_url);
     send_upstream_request(client, &url, upstream, auth, auth_context_payload, payload).await
 }
 
@@ -423,7 +423,6 @@ mod tests {
     fn upstream_with_key(api_key: Option<&str>) -> UpstreamConfig {
         UpstreamConfig {
             base_url: "https://api.deepseek.com".to_owned(),
-            official_v1_compat: true,
             transport: UpstreamTransport::NativeResponses,
             credential: UpstreamCredentialSource::Auto,
             api_key: api_key.map(str::to_owned),

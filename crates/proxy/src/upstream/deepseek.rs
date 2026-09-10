@@ -23,7 +23,6 @@ mod tests {
     fn upstream(base_url: &str) -> UpstreamConfig {
         UpstreamConfig {
             base_url: base_url.to_owned(),
-            official_v1_compat: true,
             transport: Default::default(),
             credential: Default::default(),
             api_key: None,

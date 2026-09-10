@@ -1607,7 +1607,6 @@ mod tests {
             data_dir,
             upstream: UpstreamConfig {
                 base_url: format!("http://{address}"),
-                official_v1_compat: false,
                 transport: UpstreamTransport::NativeResponses,
                 credential: Default::default(),
                 api_key: Some("native-test-key".to_owned()),
