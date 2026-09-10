@@ -3,6 +3,7 @@ use codeseex_core::config::{UpstreamConfig, UpstreamCredentialSource, UpstreamTr
 use codeseex_core::urls::{chat_completions_url, is_official_deepseek_url, responses_url};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
 use url::Url;
 
 pub(crate) mod deepseek;
@@ -67,6 +68,37 @@ impl UpstreamPassthrough {
             ("conversation_id", self.conversation_id.as_deref()),
         ]
     }
+
+    /// Applies the forwarded identity headers to an outbound request. Call it
+    /// after tool-specific headers so a real client value wins when present.
+    pub(crate) fn apply_to(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in self.entries() {
+            let Some(value) = value else { continue };
+            request = request.header(name, value);
+        }
+        request
+    }
+}
+
+static CACHED_PASSTHROUGH: OnceLock<Mutex<Option<UpstreamPassthrough>>> = OnceLock::new();
+
+/// Remembers the most recent client identity headers so tools that run outside
+/// the request path (Vision) can present the same caller to the upstream relay.
+pub(crate) fn remember_passthrough(passthrough: &UpstreamPassthrough) {
+    if let Ok(mut slot) = CACHED_PASSTHROUGH.get_or_init(|| Mutex::new(None)).lock() {
+        *slot = Some(passthrough.clone());
+    }
+}
+
+/// Returns the last remembered identity headers, or an empty set before the
+/// client has sent any request.
+pub(crate) fn cached_passthrough() -> UpstreamPassthrough {
+    CACHED_PASSTHROUGH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .unwrap_or_default()
 }
 
 /// Credential inputs available for one upstream request.
@@ -622,6 +654,48 @@ mod tests {
         assert_eq!(entries[1], ("user-agent", Some("codex_cli_rs/0.7.1")));
         assert_eq!(entries[2], ("session_id", None));
         assert_eq!(entries[3], ("conversation_id", None));
+    }
+
+    #[test]
+    fn apply_to_forwards_non_empty_identity_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        headers.insert("user-agent", HeaderValue::from_static("codex_cli_rs/0.7.1"));
+        headers.insert("session_id", HeaderValue::from_static("session-123"));
+        headers.insert("conversation_id", HeaderValue::from_static("conv-456"));
+        let passthrough = UpstreamPassthrough::from_headers(&headers);
+
+        let request = passthrough
+            .apply_to(reqwest::Client::new().post("https://example.test"))
+            .build()
+            .expect("request builds");
+
+        assert_eq!(request.headers().get("originator").unwrap(), "codex_cli_rs");
+        assert_eq!(
+            request.headers().get("user-agent").unwrap(),
+            "codex_cli_rs/0.7.1"
+        );
+        assert_eq!(request.headers().get("session_id").unwrap(), "session-123");
+        assert_eq!(
+            request.headers().get("conversation_id").unwrap(),
+            "conv-456"
+        );
+    }
+
+    #[test]
+    fn apply_to_keeps_tool_headers_when_no_client_value() {
+        let passthrough = UpstreamPassthrough::default();
+        let request = passthrough
+            .apply_to(
+                reqwest::Client::new()
+                    .post("https://example.test")
+                    .header("user-agent", "CodeSeeX Vision"),
+            )
+            .build()
+            .expect("request builds");
+
+        assert_eq!(request.headers().get("user-agent").unwrap(), "CodeSeeX Vision");
+        assert!(request.headers().get("originator").is_none());
     }
 
     #[tokio::test]

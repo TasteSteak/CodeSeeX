@@ -304,6 +304,8 @@ async fn try_native_responses(
     }
     let client = state.client();
     let managed_key = crate::secrets::upstream_api_key(&config);
+    let passthrough = crate::upstream::UpstreamPassthrough::from_headers(headers);
+    crate::upstream::remember_passthrough(&passthrough);
     let started = std::time::Instant::now();
     let upstream = crate::upstream::post_responses(
         &client,
@@ -312,7 +314,7 @@ async fn try_native_responses(
             inbound: auth.as_deref(),
             local_access_token: Some(&state.v1_access_token),
             managed_key: managed_key.as_deref(),
-            passthrough: crate::upstream::UpstreamPassthrough::from_headers(headers),
+            passthrough,
         },
         Some(input),
         payload.clone(),

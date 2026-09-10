@@ -298,13 +298,15 @@ pub(crate) async fn execute(
             responses_payload(&config.model, &prompt, &images)
         }
     };
-    let response = match client
+    let request = client
         .post(endpoint.clone())
         .bearer_auth(&config.api_key)
         .header(header::ACCEPT, "application/json")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::USER_AGENT, "CodeSeeX Vision")
-        .json(&payload)
+        .json(&payload);
+    let response = match crate::upstream::cached_passthrough()
+        .apply_to(request)
         .send()
         .await
     {
@@ -410,13 +412,15 @@ pub(crate) async fn execute_generate(
             responses_generation_payload(&config.model, &prompt, arguments)
         }
     };
-    let response = match client
+    let request = client
         .post(endpoint.clone())
         .bearer_auth(&config.api_key)
         .header(header::ACCEPT, "application/json")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::USER_AGENT, "CodeSeeX Vision")
-        .json(&payload)
+        .json(&payload);
+    let response = match crate::upstream::cached_passthrough()
+        .apply_to(request)
         .send()
         .await
     {
@@ -1978,6 +1982,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeVisionState {
         requests: Arc<Mutex<Vec<Value>>>,
+        headers: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
     }
 
     async fn fake_image_generations(
@@ -1995,6 +2000,35 @@ mod tests {
                 "revised_prompt": "Draw a tiny red cube."
             }],
             "usage": { "total_tokens": 42 }
+        }))
+    }
+
+    async fn fake_vision_responses(
+        State(state): State<FakeVisionState>,
+        headers: axum::http::HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        state
+            .requests
+            .lock()
+            .expect("fake vision lock poisoned")
+            .push(payload);
+        let mut captured = BTreeMap::new();
+        for (name, value) in headers.iter() {
+            if let Ok(value) = value.to_str() {
+                captured.insert(name.as_str().to_owned(), value.to_owned());
+            }
+        }
+        state
+            .headers
+            .lock()
+            .expect("fake vision headers lock poisoned")
+            .push(captured);
+        Json(json!({
+            "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "a pelican on a bicycle" }]
+            }]
         }))
     }
 
@@ -2489,6 +2523,87 @@ mod tests {
             .contains("base64"));
 
         let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn execute_forwards_client_identity_headers_to_the_vision_endpoint() {
+        let fake_state = FakeVisionState::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake vision");
+        let addr = listener.local_addr().expect("fake vision addr");
+        let app = Router::new()
+            .route("/v1/responses", post(fake_vision_responses))
+            .with_state(fake_state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fake vision server");
+        });
+
+        let mut config = AppConfig::default();
+        config.upstream = codeseex_core::config::UpstreamConfig {
+            base_url: format!("http://{addr}/v1"),
+            credential: codeseex_core::config::UpstreamCredentialSource::Env,
+            api_key: Some("relay-key".to_owned()),
+            ..Default::default()
+        };
+
+        let mut inbound = axum::http::HeaderMap::new();
+        inbound.insert(
+            "originator",
+            axum::http::HeaderValue::from_static("codex_cli_rs"),
+        );
+        inbound.insert(
+            "session_id",
+            axum::http::HeaderValue::from_static("session-xyz"),
+        );
+        inbound.insert(
+            "conversation_id",
+            axum::http::HeaderValue::from_static("conversation-xyz"),
+        );
+        crate::upstream::remember_passthrough(&crate::upstream::UpstreamPassthrough::from_headers(
+            &inbound,
+        ));
+
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            BASE64_STANDARD.encode(b"fake-png-bytes")
+        );
+        let result = execute(
+            &reqwest::Client::new(),
+            &config,
+            &ToolExecutionContext::default(),
+            &[],
+            &[],
+            &json!({ "image": data_url, "prompt": "describe" }),
+        )
+        .await;
+
+        assert_eq!(
+            result.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "{result}"
+        );
+        let headers = fake_state
+            .headers
+            .lock()
+            .expect("fake vision headers lock poisoned")
+            .last()
+            .cloned()
+            .expect("captured headers");
+        assert_eq!(
+            headers.get("originator").map(String::as_str),
+            Some("codex_cli_rs")
+        );
+        assert_eq!(
+            headers.get("session_id").map(String::as_str),
+            Some("session-xyz")
+        );
+        assert_eq!(
+            headers.get("conversation_id").map(String::as_str),
+            Some("conversation-xyz")
+        );
     }
 
     fn temp_dir(label: &str) -> PathBuf {

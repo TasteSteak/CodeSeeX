@@ -395,6 +395,7 @@ async fn chat_completions(
     let client = state.client();
     let managed_key = crate::secrets::upstream_api_key(&config);
     let passthrough = crate::upstream::UpstreamPassthrough::from_headers(&headers);
+    crate::upstream::remember_passthrough(&passthrough);
     match crate::upstream::post_chat_completions(
         &client,
         &config.upstream,
@@ -1205,6 +1206,7 @@ async fn responses(
     let client = state.client();
     let managed_key = crate::secrets::upstream_api_key(&config);
     let passthrough = crate::upstream::UpstreamPassthrough::from_headers(&headers);
+    crate::upstream::remember_passthrough(&passthrough);
     let upstream_started = std::time::Instant::now();
     match crate::upstream::post_chat_completions(
         &client,
