@@ -14,10 +14,10 @@ use super::safety::normalize_candidate_url;
 mod sources;
 use sources::{
     ranked_sources_from_health, refresh_search_source_health, search_plan,
-    source_health_diagnostic, RECENT_UNREACHABLE_SKIP_MS, SearchSource,
+    source_health_diagnostic, SearchSource,
 };
 #[cfg(test)]
-use sources::{SearchHealthSnapshot, SearchPlan, SearchSourceHealth};
+use sources::{SearchHealthSnapshot, SearchPlan, SearchSourceHealth, RECENT_UNREACHABLE_SKIP_MS};
 mod parsers;
 use parsers::{
     collect_duckduckgo_related, parse_bing_results, parse_brave_results,

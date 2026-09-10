@@ -460,7 +460,7 @@
   "visionDeepSeekModel": "Modèle DeepSeek Vision",
   "visionDeepSeekModelHint": "This dedicated image model is managed by CodeSeeX and is not added to the main Agent model catalog.",
   "visionDeepSeekEndpoint": "DeepSeek Vision endpoint",
-  "visionDeepSeekEndpointHint": "Requests go directly to the official Responses API and never loop through the local CodeSeeX endpoint.",
+  "visionDeepSeekEndpointHint": "Image understanding uses the configured upstream and the same credential as chat. Choose a custom vision endpoint only to override both.",
   "visionDeepSeekCredential": "Identifiant DeepSeek",
   "visionDeepSeekCredentialHint": "Uses the same safe DeepSeek credential source as the main provider. The key is never displayed.",
   "visionAnalyzeApiKey": "Clé API de compréhension d'image",

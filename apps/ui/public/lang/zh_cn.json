@@ -394,7 +394,7 @@
   "visionDeepSeekModel": "DeepSeek 识图模型",
   "visionDeepSeekModelHint": "此专用识图模型由 CodeSeeX 管理，不会加入 Agent 主模型目录。",
   "visionDeepSeekEndpoint": "DeepSeek 识图接口",
-  "visionDeepSeekEndpointHint": "请求直接发送到官方 Responses API，不会回送到 CodeSeeX 本地端点形成递归。",
+  "visionDeepSeekEndpointHint": "图像理解使用已配置的上游，并与对话共用同一凭据；只有选择“自定义模型”才会覆盖上游与凭据。",
   "visionDeepSeekCredential": "DeepSeek 凭据",
   "visionDeepSeekCredentialHint": "复用主服务的安全 DeepSeek 凭据来源，此处不会显示密钥。",
   "visionAnalyzeRequestUrl": "识图请求地址",

@@ -32,6 +32,17 @@ pub fn read_codex_auth_api_key(include_cached_authorization: bool) -> Option<Str
     api_key_from_codex_auth(&parsed)
 }
 
+/// Raw API key form of the most recent inbound client Authorization header
+/// that reached the proxy and was not CodeSeeX's own local access token.
+///
+/// Hosted tools that call the configured upstream (for example image
+/// understanding on a custom upstream) reuse this credential, because on a
+/// relay the key the client was configured with is the only one that can
+/// work there.
+pub fn read_cached_client_api_key() -> Option<String> {
+    cached_authorization_api_key()
+}
+
 pub fn read_deepseek_api_key() -> Option<String> {
     env::var("DEEPSEEK_API_KEY")
         .ok()

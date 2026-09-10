@@ -131,8 +131,8 @@ pub(crate) fn analyze_registry_config_fields(
             "labelKey": "visionDeepSeekEndpoint",
             "label": "DeepSeek Vision endpoint",
             "descriptionKey": "visionDeepSeekEndpointHint",
-            "description": "Image understanding is sent directly to the official Responses API and never loops through the local CodeSeeX endpoint.",
-            "value": DEEPSEEK_VISION_ENDPOINT,
+            "description": "Image understanding uses the configured upstream and the same credential as chat; only an explicit custom vision endpoint overrides this.",
+            "value": vision_upstream_request_url(app_config),
             "width": "wide",
             "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
         }),
@@ -143,8 +143,8 @@ pub(crate) fn analyze_registry_config_fields(
             "label": "DeepSeek credential",
             "descriptionKey": "visionDeepSeekCredentialHint",
             "description": "Uses the safe DeepSeek credential source. The key is never shown here.",
-            "valueKey": if deepseek_vision_api_key(app_config).is_some() { "secretConfigured" } else { "secretNotConfigured" },
-            "value": if deepseek_vision_api_key(app_config).is_some() { "Configured" } else { "Not configured" },
+            "valueKey": if vision_upstream_api_key(app_config).is_some() { "secretConfigured" } else { "secretNotConfigured" },
+            "value": if vision_upstream_api_key(app_config).is_some() { "Configured" } else { "Not configured" },
             "width": "compact",
             "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
         }),
@@ -491,21 +491,31 @@ impl VisionAnalyzeConfig {
         let backend = parse_analyze_backend(&settings);
         let image_detail = parse_image_detail(settings.get(IMAGE_DETAIL_KEY));
         if backend == VisionAnalyzeBackend::Deepseek {
-            let api_key = deepseek_vision_api_key(app_config);
+            let request_url = vision_upstream_request_url(app_config);
+            let api_key = vision_upstream_api_key(app_config);
+            let (missing, hint) = if crate::upstream::upstream_is_official(&app_config.upstream) {
+                (
+                    vec!["DEEPSEEK_API_KEY"],
+                    "DeepSeek Vision is unavailable because the DeepSeek API key is not configured.".to_owned(),
+                )
+            } else {
+                (
+                    vec!["upstream_credential"],
+                    format!(
+                        "Image understanding follows the configured upstream ({request_url}), but no credential is available for it. Set the upstream key in CodeSeeX, or configure a custom vision endpoint."
+                    ),
+                )
+            };
             return api_key
                 .filter(|value| !value.trim().is_empty())
                 .map(|api_key| Self {
-                    request_url: DEEPSEEK_VISION_ENDPOINT.to_owned(),
+                    request_url: request_url.clone(),
                     model: DEEPSEEK_VISION_MODEL.to_owned(),
                     api_key,
                     backend,
                     image_detail,
                 })
-                .ok_or_else(|| unavailable(
-                    ANALYZE_TOOL_NAME,
-                    vec!["DEEPSEEK_API_KEY"],
-                    Some("DeepSeek Vision is unavailable because the DeepSeek API key is not configured.".to_owned()),
-                ));
+                .ok_or_else(|| unavailable(ANALYZE_TOOL_NAME, missing, Some(hint)));
         }
         let request_url = setting_value_opt(&settings, ANALYZE_URL_KEY);
         let model = setting_value_opt(&settings, ANALYZE_MODEL_KEY);
@@ -535,9 +545,40 @@ impl VisionAnalyzeConfig {
     }
 }
 
-fn deepseek_vision_api_key(app_config: &AppConfig) -> Option<String> {
-    let _ = app_config;
-    codeseex_core::codex_auth::read_deepseek_api_key()
+/// The endpoint the default DeepSeek Vision backend must call. With a custom
+/// upstream it targets the configured upstream with the same credential the
+/// chat path uses, because on a relay the client key is the only one that
+/// exists; the explicit `external` backend supplies its own URL and key.
+fn vision_upstream_request_url(app_config: &AppConfig) -> String {
+    codeseex_core::urls::responses_url(&app_config.upstream.base_url)
+        .unwrap_or_else(|_| DEEPSEEK_VISION_ENDPOINT.to_owned())
+}
+
+/// Resolves the credential for the default image understanding backend the same
+/// way the main upstream path resolves it, so vision and chat share one key
+/// instead of inventing a second upstream.
+fn vision_upstream_api_key(app_config: &AppConfig) -> Option<String> {
+    use codeseex_core::config::UpstreamCredentialSource;
+    let upstream = &app_config.upstream;
+    let inbound = codeseex_core::codex_auth::read_cached_client_api_key;
+    let managed = || crate::secrets::upstream_api_key(app_config);
+    let configured = || {
+        upstream
+            .api_key
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+    };
+    let codex_auth = codeseex_core::codex_auth::read_deepseek_api_key;
+    match upstream.credential {
+        UpstreamCredentialSource::Request => inbound(),
+        UpstreamCredentialSource::Env => configured(),
+        UpstreamCredentialSource::Secret => managed(),
+        UpstreamCredentialSource::CodexAuth => codex_auth(),
+        UpstreamCredentialSource::Auto => inbound()
+            .or_else(managed)
+            .or_else(configured)
+            .or_else(codex_auth),
+    }
 }
 
 impl VisionGenerateConfig {
@@ -1963,6 +2004,34 @@ mod tests {
             visual_endpoint("https://api.example.com/v1/chat/completions").expect("endpoint");
         assert_eq!(kind, VisualEndpointKind::ChatCompletions);
         assert_eq!(url.as_str(), "https://api.example.com/v1/chat/completions");
+    }
+    #[test]
+    fn deepseek_vision_follows_a_custom_upstream_and_its_credential() {
+        let mut config = AppConfig::default();
+        config.upstream = codeseex_core::config::UpstreamConfig {
+            base_url: "https://relay.example.com/v1".to_owned(),
+            credential: codeseex_core::config::UpstreamCredentialSource::Env,
+            api_key: Some("relay-key".to_owned()),
+            ..Default::default()
+        };
+        let vision = VisionAnalyzeConfig::load(&config).expect("custom upstream vision config");
+        assert_eq!(vision.request_url, "https://relay.example.com/v1/responses");
+        assert_eq!(vision.model, DEEPSEEK_VISION_MODEL);
+        assert_eq!(vision.api_key, "relay-key");
+    }
+
+    #[test]
+    fn deepseek_vision_keeps_the_official_endpoint_for_the_official_upstream() {
+        let mut config = AppConfig::default();
+        config.upstream = codeseex_core::config::UpstreamConfig {
+            base_url: "https://api.deepseek.com/".to_owned(),
+            credential: codeseex_core::config::UpstreamCredentialSource::Env,
+            api_key: Some("sk-test".to_owned()),
+            ..Default::default()
+        };
+        let vision = VisionAnalyzeConfig::load(&config).expect("official vision config");
+        assert_eq!(vision.request_url, DEEPSEEK_VISION_ENDPOINT);
+        assert_eq!(vision.api_key, "sk-test");
     }
 
     #[test]
