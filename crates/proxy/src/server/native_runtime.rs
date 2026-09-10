@@ -4,8 +4,10 @@
 //! rebuilds Codex history nor reads a Codex transcript: the client's `input`
 //! remains authoritative. The native transport is the default for every
 //! upstream; Chat API compatibility is selected only when the user enables it.
-//! CodeSeeX-hosted tools that have no native executor (local web search) fail
-//! closed instead of silently changing tool ownership.
+//! CodeSeeX-hosted tools that have no native executor (local web search) are
+//! deferred to the Chat compatibility path, which owns that executor. That path
+//! drops the provider-native search declaration, so tool ownership never changes
+//! silently.
 
 use super::*;
 use crate::native_coordinator::{
@@ -135,35 +137,48 @@ async fn try_native_responses(
         }
     };
 
-    // CodeSeeX-hosted tools with no native executor (for example local web
-    // search) fail closed on the native transport; the user can select Chat
-    // API compatibility. Base workspace tools are executed by the Codex
-    // client, matching the client-owned tool flow of the native transport.
+    // CodeSeeX-hosted tools (for example local web search) need an executor the
+    // native transport does not have, and the Chat compatibility path owns it.
+    // Defer instead of failing: that path drops the provider-native search
+    // declaration and injects the CodeSeeX function, so ownership is unchanged.
+    // A request that also demands provider-owned search stays fail-closed,
+    // because no single path can honour both owners. Base workspace tools stay
+    // native because the Codex client executes them itself.
     if plan.requires_local_execution {
-        let mixed_official_search = config.web_search_backend == WebSearchBackend::Official
-            && plan.uses_official_web_search;
-        let message = if mixed_official_search {
-            "This request combines provider-owned official web search with a CodeSeeX-hosted tool. CodeSeeX did not silently replace either backend. Select Chat API compatibility for this request."
-                .to_owned()
-        } else {
-            "This request requires a CodeSeeX-hosted tool executor that is not available on the native Responses transport (for example local web search). Select Chat API compatibility for this request."
-                .to_owned()
-        };
-        let issue = if mixed_official_search {
-            "mixed_official_web_search_and_hosted_tool"
-        } else {
-            "hosted_tool_requires_chat_compat"
-        };
-        return Some(native_incompatible(
-            state,
-            config,
-            &id,
-            requested_model,
-            model,
-            issue,
-            message,
-        )
-        .await);
+        if config.web_search_backend == WebSearchBackend::Official && plan.uses_official_web_search
+        {
+            return Some(
+                native_incompatible(
+                    state,
+                    config,
+                    &id,
+                    requested_model,
+                    model,
+                    "mixed_official_web_search_and_hosted_tool",
+                    "This request combines provider-owned official web search with a CodeSeeX-hosted tool. CodeSeeX did not silently replace either backend. Select Chat API compatibility for this request.",
+                )
+                .await,
+            );
+        }
+        let detail = json!({
+            "id": &id,
+            "transport": "native_responses",
+            "issue": "hosted_tool_deferred_to_chat_compat",
+            "requested_model": requested_model,
+            "model": model,
+            "selected_web_search_backend": web_search_backend_label(config.web_search_backend),
+            "fallback": "chat_compat"
+        });
+        let _ = state
+            .store
+            .record_event(
+                "info",
+                "native_responses_compatibility_diagnostic",
+                "Native Responses deferred to Chat API compatibility for a CodeSeeX-hosted tool.",
+                Some(&detail),
+            )
+            .await;
+        return None;
     }
 
     let previous = input.get("previous_response_id").and_then(Value::as_str);
@@ -1651,8 +1666,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_search_fails_closed_on_native_transport() {
-        let data_dir = temp_data_dir("local-fallback");
+    async fn hosted_local_search_defers_to_chat_compat_instead_of_failing() {
+        let data_dir = temp_data_dir("local-defer-chat");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
             ..Default::default()
@@ -1665,11 +1680,12 @@ mod tests {
             "resp_native_local",
             true,
             json!([
-                { "type": "web_search" }
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
             ]),
         );
 
-        let response = try_native_responses(
+        assert!(
+            try_native_responses(
                 &state,
                 &HeaderMap::new(),
                 &input,
@@ -1678,15 +1694,43 @@ mod tests {
                 Some("deepseek-v4-flash"),
             )
             .await
-            .expect("hosted local search must fail closed on native");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            state
-                .store
-                .response_status("resp_native_local")
-                .await
-                .unwrap(),
-            None
+            .is_none(),
+            "CodeSeeX-hosted local search must reach the Chat compatibility executor"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn codex_provider_search_declaration_defers_when_local_search_is_selected() {
+        let data_dir = temp_data_dir("provider-search-defer");
+        let mut config = AppConfig {
+            data_dir: data_dir.clone(),
+            ..Default::default()
+        };
+        config.upstream.transport = UpstreamTransport::NativeResponses;
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        // The real Codex client advertises provider-native search even when the
+        // user selected CodeSeeX local search; that must not be a dead end.
+        let input = request(
+            "resp_native_provider_search",
+            true,
+            json!([{ "type": "web_search", "external_web_access": true }]),
+        );
+
+        assert!(
+            try_native_responses(
+                &state,
+                &HeaderMap::new(),
+                &input,
+                &config,
+                "deepseek-v4-flash",
+                Some("deepseek-v4-flash"),
+            )
+            .await
+            .is_none(),
+            "a provider-native search declaration must defer, not fail"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }

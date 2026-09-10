@@ -169,6 +169,12 @@ fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCa
 /// Converts the existing, Chat-shaped tool definitions into native Responses
 /// definitions without deciding how calls are executed. In particular, this
 /// keeps CodeSeeX local search and DeepSeek official search mutually exclusive.
+///
+/// Declarations the endpoint already owns natively (`namespace`, `tool_search`)
+/// are validated and forwarded verbatim. The verified endpoint accepts the
+/// grouping and echoes the namespace back on the call item, so flattening or
+/// rebuilding those declarations would change the tool identity the Codex
+/// client resolves. Unknown shapes still fail closed.
 pub(crate) fn plan_native_tools(
     chat_tool_definitions: &[Value],
     web_search_backend: WebSearchBackend,
@@ -195,10 +201,12 @@ pub(crate) fn plan_native_tools(
             // missing local function instead of silently switching backend.
             continue;
         }
-        let name = tool_name(definition).ok_or_else(|| {
-            "A native Responses tool definition is missing a callable name; CodeSeeX did not silently drop it."
-                .to_owned()
-        })?;
+        let name = tool_name(definition)
+            .or_else(|| provider_native_identity(definition))
+            .ok_or_else(|| {
+                "A native Responses tool definition is missing a callable name; CodeSeeX did not silently drop it."
+                    .to_owned()
+            })?;
         if matches!(name, "web_search" | "web_search_preview") {
             saw_local_web_search = true;
             if web_search_backend == WebSearchBackend::Official {
@@ -228,14 +236,11 @@ pub(crate) fn plan_native_tools(
         if names.insert("web_search".to_owned()) {
             tools.push(json!({ "type": "web_search" }));
         }
-    } else if saw_provider_web_search && !saw_local_web_search {
-        return Err(
-            "Provider-native web_search was requested while CodeSeeX local web_search is selected, but the local web_search function is unavailable. CodeSeeX will not silently switch to provider search."
-                .to_owned(),
-        );
-    } else if saw_local_web_search {
-        // The boolean documents the intended ownership in diagnostics and
-        // keeps the local backend explicit even when it is the default.
+    } else if saw_provider_web_search || saw_local_web_search {
+        // CodeSeeX owns local web search in this mode, and it has no native
+        // executor: the declaration asks for the CodeSeeX-hosted function
+        // instead of silently switching to provider search. The native runtime
+        // defers such a request to the Chat compatibility path that owns it.
         requires_local_execution = true;
     }
 
@@ -293,7 +298,100 @@ fn tool_name(definition: &Value) -> Option<&str> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// Provider-native grouped declarations CodeSeeX forwards untouched.
+///
+/// The Responses endpoint owns these shapes: it accepts the grouping and, for
+/// `namespace`, echoes the namespace on the returned `function_call` item so
+/// the client can still resolve which tool ran. Flattening a namespace would
+/// strand that grouping, and dropping the declaration would silently remove
+/// capability, so the only safe translation is none at all.
+fn is_provider_native_grouped_type(declared_type: &str) -> bool {
+    matches!(declared_type, "namespace" | "tool_search")
+}
+
+/// Validates a provider-native grouped declaration without rewriting it. The
+/// nested names are the callable identities the client already resolves, so
+/// CodeSeeX only proves the declaration is complete enough to forward.
+fn native_grouped_definition(
+    definition: &Value,
+    name: &str,
+    declared_type: &str,
+) -> Result<Value, String> {
+    if declared_type == "namespace" {
+        let tools = definition
+            .get("tools")
+            .and_then(Value::as_array)
+            .filter(|tools| !tools.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "Native Responses namespace tool '{name}' did not declare a non-empty nested tool list."
+                )
+            })?;
+        for nested in tools {
+            let nested_type = nested
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !matches!(nested_type, "function" | "custom") {
+                return Err(format!(
+                    "Native Responses namespace tool '{name}' contains an unsupported nested tool type '{nested_type}'."
+                ));
+            }
+            if nested
+                .get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(format!(
+                    "Native Responses namespace tool '{name}' contains a nested tool without a callable name."
+                ));
+            }
+        }
+    }
+
+    if declared_type == "tool_search" {
+        if definition
+            .get("execution")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(format!(
+                "Native Responses tool_search declaration '{name}' did not declare its execution mode."
+            ));
+        }
+        if !definition.get("parameters").is_some_and(Value::is_object) {
+            return Err(format!(
+                "Native Responses tool_search declaration '{name}' did not declare its parameters schema."
+            ));
+        }
+    }
+
+    Ok(definition.clone())
+}
+
 fn native_definition_from_chat(definition: &Value, name: &str) -> Result<Value, String> {
+    let declared_type = definition
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    // Grouped declarations are provider-owned and forwarded verbatim.
+    if is_provider_native_grouped_type(declared_type) {
+        return native_grouped_definition(definition, name, declared_type);
+    }
+
+    // An already-native custom declaration carries the grammar the provider
+    // needs, so it is forwarded verbatim instead of being rebuilt without it.
+    // `apply_patch` is the only custom tool the call coordinator has verified.
+    if declared_type == "custom" {
+        if name != "apply_patch" {
+            return Err(format!(
+                "Native Responses cannot safely translate tool '{name}' with type '{declared_type}'."
+            ));
+        }
+        return Ok(definition.clone());
+    }
+
     if name == "apply_patch" {
         let description = definition
             .pointer("/function/description")
@@ -307,10 +405,6 @@ fn native_definition_from_chat(definition: &Value, name: &str) -> Result<Value, 
         }));
     }
 
-    let declared_type = definition
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     if matches!(declared_type, "web_search" | "web_search_2025_08_26") {
         return Ok(json!({ "type": "web_search" }));
     }
@@ -355,11 +449,22 @@ fn is_provider_web_search_definition(definition: &Value) -> bool {
     )
 }
 
+/// Provider-owned declarations that carry no callable name of their own. The
+/// declaration type is their identity: `tool_search` is the single search entry
+/// point the client resolves, and the endpoint never names it.
+fn provider_native_identity(definition: &Value) -> Option<&'static str> {
+    match definition.get("type").and_then(Value::as_str) {
+        Some("tool_search") => Some("tool_search"),
+        _ => None,
+    }
+}
+
 fn tool_identity(definition: &Value) -> &str {
     definition
         .get("name")
         .and_then(Value::as_str)
         .or_else(|| definition.pointer("/function/name").and_then(Value::as_str))
+        .or_else(|| provider_native_identity(definition))
         .unwrap_or_default()
 }
 
@@ -863,11 +968,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_native_web_search_is_rejected_when_local_function_is_unavailable() {
-        let error = plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local)
-            .unwrap_err();
+    fn provider_native_web_search_without_the_local_function_asks_for_the_hosted_executor() {
+        let plan =
+            plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local).unwrap();
 
-        assert!(error.contains("local web_search function is unavailable"));
+        assert!(plan.requires_local_execution);
+        assert!(!plan.uses_official_web_search);
+        assert!(plan.tools.is_empty());
     }
 
     #[test]
@@ -1036,6 +1143,146 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("cannot safely translate"));
+    }
+
+    #[test]
+    fn codex_namespace_tools_keep_their_grouping_on_the_native_transport() {
+        // Shape captured from a live Codex client: a namespace groups
+        // short-named functions, and the endpoint echoes the namespace back on
+        // the call item so the client can still resolve which tool ran.
+        let namespace = json!({
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "description": "Tools for spawning and managing sub-agents.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "close_agent",
+                    "description": "Close an agent.",
+                    "strict": false,
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "target": { "type": "string" } },
+                        "required": ["target"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply one complete patch document.",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: /.+/"
+                    }
+                }
+            ]
+        });
+
+        let plan = plan_native_tools(
+            &[chat_function("exec_command"), namespace.clone()],
+            WebSearchBackend::Local,
+        )
+        .unwrap();
+
+        assert!(!plan.requires_local_execution);
+        assert!(!plan.uses_official_web_search);
+        assert_eq!(plan.tools.len(), 2);
+        assert_eq!(plan.tools[0]["name"], "exec_command");
+        assert_eq!(plan.tools[1], namespace);
+        assert_eq!(plan.tools[1]["tools"][0]["strict"], json!(false));
+        assert_eq!(plan.tools[1]["tools"][1]["format"]["syntax"], json!("lark"));
+    }
+
+    #[test]
+    fn provider_native_tool_search_declarations_pass_through_without_a_callable_name() {
+        let declaration = json!({
+            "type": "tool_search",
+            "execution": "client",
+            "description": "Search for deferred tools.",
+            "parameters": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        });
+
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local).unwrap();
+
+        assert!(!plan.requires_local_execution);
+        assert_eq!(plan.tools, vec![declaration]);
+    }
+
+    #[test]
+    fn native_custom_apply_patch_keeps_the_grammar_the_provider_needs() {
+        let declaration = json!({
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply one complete patch document.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: /.+/"
+            }
+        });
+
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local).unwrap();
+
+        assert!(!plan.requires_local_execution);
+        assert_eq!(plan.tools, vec![declaration]);
+    }
+
+    #[test]
+    fn malformed_or_unowned_grouped_declarations_fail_closed() {
+        let cases = [
+            (
+                json!({ "type": "namespace", "name": "mcp__node_repl" }),
+                "did not declare a non-empty nested tool list",
+            ),
+            (
+                json!({ "type": "namespace", "name": "mcp__node_repl", "tools": [] }),
+                "did not declare a non-empty nested tool list",
+            ),
+            (
+                json!({
+                    "type": "namespace",
+                    "name": "mcp__node_repl",
+                    "tools": [{ "type": "web_search" }]
+                }),
+                "unsupported nested tool type 'web_search'",
+            ),
+            (
+                json!({
+                    "type": "namespace",
+                    "name": "mcp__node_repl",
+                    "tools": [{ "type": "function", "name": "  " }]
+                }),
+                "nested tool without a callable name",
+            ),
+            (
+                json!({ "type": "tool_search", "parameters": { "type": "object" } }),
+                "did not declare its execution mode",
+            ),
+            (
+                json!({ "type": "tool_search", "execution": "client" }),
+                "did not declare its parameters schema",
+            ),
+            (
+                json!({ "type": "custom", "name": "other_custom" }),
+                "cannot safely translate tool 'other_custom'",
+            ),
+        ];
+
+        for (declaration, expected) in cases {
+            let error =
+                plan_native_tools(&[declaration.clone()], WebSearchBackend::Local).unwrap_err();
+            assert!(
+                error.contains(expected),
+                "declaration {declaration} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

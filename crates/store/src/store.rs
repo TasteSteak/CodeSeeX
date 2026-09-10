@@ -3081,6 +3081,20 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                 ],
             );
         }
+        "native_responses_compatibility_diagnostic" => copy_log_fields(
+            object,
+            &mut output,
+            &[
+                "id",
+                "transport",
+                "issue",
+                "model",
+                "requested_model",
+                "selected_web_search_backend",
+                "selection",
+                "fallback",
+            ],
+        ),
         _ => copy_log_fields(
             object,
             &mut output,

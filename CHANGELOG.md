@@ -38,6 +38,9 @@ CodeSeeX 0.7.1 turns the model list and pricing into versioned, remotely updatab
 - Fixed a fetched-but-unchanged remote manifest discarding its ETag, which made every later refresh re-download the full document.
 - Fixed the settings UI silently pricing unknown models at the Pro rate.
 - Fixed the peak/valley window and multiplier being implemented twice in Rust and JavaScript; both now come from the pricing document.
+- Fixed provider-native grouped tool declarations (`namespace`, `tool_search`) being rejected as untranslatable. CodeSeeX now validates and forwards those declarations verbatim so the endpoint keeps the tool grouping and namespace it owns, while unknown or malformed shapes still fail closed instead of being silently dropped.
+- Fixed the default configuration being unusable for any tool request: with the native Responses transport and the CodeSeeX local web-search backend, the provider-native `web_search` declaration Codex always advertises was rejected outright. Such a request is now deferred to the Chat API compatibility path, which owns the local executor and drops the provider declaration, so tool ownership still never changes silently; only an explicit mix of provider-owned search with a CodeSeeX-hosted tool keeps failing closed.
+- Fixed native Responses compatibility failures being logged without their `issue`, `selected_web_search_backend`, and `fallback` fields, which made an incompatible request impossible to diagnose from the log.
 
 ### Compatibility Notes
 
