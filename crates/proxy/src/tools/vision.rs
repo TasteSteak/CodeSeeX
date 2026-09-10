@@ -19,6 +19,7 @@ pub(crate) const GENERATE_ALIAS_TOOL_NAME: &str = "image_gen";
 pub(crate) const ANALYZE_URL_KEY: &str = "VISION_ANALYZE_URL";
 pub(crate) const ANALYZE_MODEL_KEY: &str = "VISION_ANALYZE_MODEL";
 pub(crate) const ANALYZE_BACKEND_KEY: &str = "VISION_ANALYZE_BACKEND";
+pub(crate) const ANALYZE_DEEPSEEK_MODEL_KEY: &str = "VISION_DEEPSEEK_MODEL";
 pub(crate) const IMAGE_DETAIL_KEY: &str = "VISION_IMAGE_DETAIL";
 pub(crate) const GENERATE_URL_KEY: &str = "VISION_GENERATE_URL";
 pub(crate) const GENERATE_MODEL_KEY: &str = "VISION_GENERATE_MODEL";
@@ -65,10 +66,11 @@ enum GenerateEndpointKind {
     Responses,
 }
 
-pub(crate) fn config_keys() -> [&'static str; 9] {
+pub(crate) fn config_keys() -> [&'static str; 10] {
     [
         ANALYZE_BACKEND_KEY,
         IMAGE_DETAIL_KEY,
+        ANALYZE_DEEPSEEK_MODEL_KEY,
         ANALYZE_URL_KEY,
         ANALYZE_MODEL_KEY,
         GENERATE_URL_KEY,
@@ -115,38 +117,17 @@ pub(crate) fn analyze_registry_config_fields(
             "value": settings.get(IMAGE_DETAIL_KEY).cloned().unwrap_or_else(|| "auto".to_owned())
         }),
         json!({
-            "key": "DEEPSEEK_VISION_MODEL_EFFECTIVE",
-            "type": "readonly",
+            "key": ANALYZE_DEEPSEEK_MODEL_KEY,
+            "type": "text",
             "labelKey": "visionDeepSeekModel",
             "label": "DeepSeek Vision model",
             "descriptionKey": "visionDeepSeekModelHint",
-            "description": "The official image understanding model is managed by CodeSeeX and is not added to the main Agent model catalog.",
-            "value": DEEPSEEK_VISION_MODEL,
+            "description": "Leave empty to use the built-in image understanding model. The dedicated image model is never added to the main Agent model catalog.",
+            "placeholderKey": "visionDeepSeekModelPlaceholder",
+            "placeholder": DEEPSEEK_VISION_MODEL,
             "width": "compact",
-            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
-        }),
-        json!({
-            "key": "DEEPSEEK_VISION_ENDPOINT_EFFECTIVE",
-            "type": "readonly",
-            "labelKey": "visionDeepSeekEndpoint",
-            "label": "DeepSeek Vision endpoint",
-            "descriptionKey": "visionDeepSeekEndpointHint",
-            "description": "Image understanding uses the configured upstream and the same credential as chat; only an explicit custom vision endpoint overrides this.",
-            "value": vision_upstream_request_url(app_config),
-            "width": "wide",
-            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
-        }),
-        json!({
-            "key": "DEEPSEEK_VISION_CREDENTIAL_STATUS",
-            "type": "readonly",
-            "labelKey": "visionDeepSeekCredential",
-            "label": "DeepSeek credential",
-            "descriptionKey": "visionDeepSeekCredentialHint",
-            "description": "Uses the safe DeepSeek credential source. The key is never shown here.",
-            "valueKey": if vision_upstream_api_key(app_config).is_some() { "secretConfigured" } else { "secretNotConfigured" },
-            "value": if vision_upstream_api_key(app_config).is_some() { "Configured" } else { "Not configured" },
-            "width": "compact",
-            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" }
+            "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" },
+            "value": setting_value(settings, ANALYZE_DEEPSEEK_MODEL_KEY)
         }),
         json!({
             "key": ANALYZE_URL_KEY,
@@ -497,6 +478,8 @@ impl VisionAnalyzeConfig {
         if backend == VisionAnalyzeBackend::Deepseek {
             let request_url = vision_upstream_request_url(app_config);
             let api_key = vision_upstream_api_key(app_config);
+            let model = setting_value_opt(&settings, ANALYZE_DEEPSEEK_MODEL_KEY)
+                .unwrap_or_else(|| DEEPSEEK_VISION_MODEL.to_owned());
             let (missing, hint) = if crate::upstream::upstream_is_official(&app_config.upstream) {
                 (
                     vec!["DEEPSEEK_API_KEY"],
@@ -514,7 +497,7 @@ impl VisionAnalyzeConfig {
                 .filter(|value| !value.trim().is_empty())
                 .map(|api_key| Self {
                     request_url: request_url.clone(),
-                    model: DEEPSEEK_VISION_MODEL.to_owned(),
+                    model,
                     api_key,
                     backend,
                     image_detail,
@@ -2066,6 +2049,68 @@ mod tests {
         let vision = VisionAnalyzeConfig::load(&config).expect("official vision config");
         assert_eq!(vision.request_url, DEEPSEEK_VISION_ENDPOINT);
         assert_eq!(vision.api_key, "sk-test");
+    }
+
+    #[test]
+    fn deepseek_vision_model_setting_overrides_the_builtin_default() {
+        let data_dir = temp_dir("vision-deepseek-model");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        let config = AppConfig {
+            data_dir: data_dir.clone(),
+            upstream: codeseex_core::config::UpstreamConfig {
+                base_url: "https://relay.example.com/v1".to_owned(),
+                credential: codeseex_core::config::UpstreamCredentialSource::Env,
+                api_key: Some("relay-key".to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            ANALYZE_DEEPSEEK_MODEL_KEY.to_owned(),
+            "deepseek-v4-flash".to_owned(),
+        );
+        UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                settings: Some(settings),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .write_atomic(&config.config_path())
+        .expect("write config");
+
+        let vision = VisionAnalyzeConfig::load(&config).expect("custom vision model config");
+        assert_eq!(vision.model, "deepseek-v4-flash");
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn analyze_registry_replaces_readonly_displays_with_an_editable_model() {
+        let config = AppConfig::default();
+        let fields = analyze_registry_config_fields(&config, &BTreeMap::new());
+        let keys = fields
+            .iter()
+            .filter_map(|field| field.get("key").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(keys.contains(&ANALYZE_DEEPSEEK_MODEL_KEY));
+        assert!(!keys.contains(&"DEEPSEEK_VISION_MODEL_EFFECTIVE"));
+        assert!(!keys.contains(&"DEEPSEEK_VISION_ENDPOINT_EFFECTIVE"));
+        assert!(!keys.contains(&"DEEPSEEK_VISION_CREDENTIAL_STATUS"));
+
+        let field = fields
+            .iter()
+            .find(|field| {
+                field.get("key").and_then(Value::as_str) == Some(ANALYZE_DEEPSEEK_MODEL_KEY)
+            })
+            .expect("deepseek model field");
+        assert_eq!(field.get("type").and_then(Value::as_str), Some("text"));
+        assert_eq!(
+            field.get("placeholder").and_then(Value::as_str),
+            Some(DEEPSEEK_VISION_MODEL)
+        );
     }
 
     #[test]

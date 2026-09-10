@@ -332,15 +332,15 @@ mod tests {
             Some("external")
         );
         assert_eq!(
-            vision.pointer("/config/5/key").and_then(Value::as_str),
+            vision.pointer("/config/3/key").and_then(Value::as_str),
             Some("VISION_ANALYZE_URL")
         );
         assert_eq!(
-            vision.pointer("/config/6/key").and_then(Value::as_str),
+            vision.pointer("/config/4/key").and_then(Value::as_str),
             Some("VISION_ANALYZE_MODEL")
         );
         assert_eq!(
-            vision.pointer("/config/7/type").and_then(Value::as_str),
+            vision.pointer("/config/5/type").and_then(Value::as_str),
             Some("password")
         );
         let generation = tools
