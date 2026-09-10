@@ -410,6 +410,11 @@ pub(crate) fn tool_settings_from_user_config(config: &UserConfig) -> BTreeMap<St
         );
         insert_tool_setting(
             &mut settings,
+            crate::tools::vision::ANALYZE_DEEPSEEK_MODEL_KEY,
+            vision.deepseek_model.as_deref(),
+        );
+        insert_tool_setting(
+            &mut settings,
             crate::tools::vision::ANALYZE_URL_KEY,
             vision.analyze_url.as_deref(),
         );
@@ -539,6 +544,12 @@ fn set_vision_tool_setting(tools: &mut UserToolsConfig, key: &str, value: Option
                 _ => None,
             });
         }
+        crate::tools::vision::ANALYZE_DEEPSEEK_MODEL_KEY => {
+            tools
+                .vision_analyze
+                .get_or_insert_with(UserVisionToolConfig::default)
+                .deepseek_model = value;
+        }
         crate::tools::vision::ANALYZE_URL_KEY => {
             tools
                 .vision_analyze
@@ -586,6 +597,7 @@ fn insert_tool_setting(settings: &mut BTreeMap<String, String>, key: &str, value
 fn vision_tool_config_is_empty(config: &UserVisionToolConfig) -> bool {
     config.backend.is_none()
         && config.image_detail.is_none()
+        && option_string_is_empty(config.deepseek_model.as_deref())
         && option_string_is_empty(config.analyze_url.as_deref())
         && option_string_is_empty(config.analyze_model.as_deref())
         && option_string_is_empty(config.generate_url.as_deref())
@@ -1016,6 +1028,31 @@ mod tests {
         assert_eq!(
             tools.enabled.as_deref(),
             Some(&["image_gen".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn payload_persists_deepseek_vision_model_into_the_structured_vision_section() {
+        let config = user_config_from_payload(
+            &json!({ "VISION_DEEPSEEK_MODEL": "deepseek-v4-flash" }),
+            UserConfig::default(),
+            &AppConfig::default(),
+        );
+        let tools = config.tools.as_ref().expect("tools config");
+        let vision = tools
+            .vision_analyze
+            .as_ref()
+            .expect("vision analyze config");
+        assert_eq!(
+            vision.deepseek_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        let settings = tool_settings_from_user_config(&config);
+        assert_eq!(
+            settings
+                .get(crate::tools::vision::ANALYZE_DEEPSEEK_MODEL_KEY)
+                .map(String::as_str),
+            Some("deepseek-v4-flash")
         );
     }
 }

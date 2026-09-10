@@ -281,6 +281,7 @@ pub struct UserWebSearchToolConfig {
 pub struct UserVisionToolConfig {
     pub backend: Option<VisionAnalyzeBackend>,
     pub image_detail: Option<VisionImageDetail>,
+    pub deepseek_model: Option<String>,
     pub analyze_url: Option<String>,
     pub analyze_model: Option<String>,
     // Legacy fields are retained for TOML migration only.
