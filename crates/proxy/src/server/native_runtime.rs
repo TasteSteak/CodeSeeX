@@ -4,19 +4,20 @@
 //! rebuilds Codex history nor reads a Codex transcript: the client's `input`
 //! remains authoritative. The native transport is the default for every
 //! upstream; Chat API compatibility is selected only when the user enables it.
-//! CodeSeeX-hosted tools that have no native executor (local web search) are
-//! deferred to the Chat compatibility path, which owns that executor. That path
-//! drops the provider-native search declaration, so tool ownership never changes
-//! silently.
+//! CodeSeeX-hosted tools (local web search) are executed inside this transport
+//! by the hosted tool loop; the native route never borrows the Chat
+//! compatibility executor, so tool ownership never changes silently.
 
 use super::*;
 use crate::native_coordinator::{
     NativePendingContinuation, NativePendingError, PendingNativeToolGroup,
 };
 use crate::native_responses::{
-    native_stream_finalization, native_tool_call_group_from_response, plan_native_tools,
-    rewrite_provider_response_identity, NativeResponseSseRelay, NativeStreamFinalization,
-    NativeToolCallGroup,
+    append_complete_native_tool_group, native_stream_finalization,
+    native_tool_call_group_from_response, native_tool_output_item, plan_native_tools,
+    rewrite_provider_response_identity, NativeResponseSseRelay, NativeResponseStreamInspection,
+    NativeResponseTerminal, NativeStreamFinalization, NativeToolCall, NativeToolCallGroup,
+    NativeToolPlan,
 };
 use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::WebSearchBackend;
@@ -137,13 +138,13 @@ async fn try_native_responses(
         }
     };
 
-    // CodeSeeX-hosted tools (for example local web search) need an executor the
-    // native transport does not have, and the Chat compatibility path owns it.
-    // Defer instead of failing: that path drops the provider-native search
-    // declaration and injects the CodeSeeX function, so ownership is unchanged.
-    // A request that also demands provider-owned search stays fail-closed,
-    // because no single path can honour both owners. Base workspace tools stay
-    // native because the Codex client executes them itself.
+    // CodeSeeX-hosted tools (for example local web search) are executed inside
+    // the native transport itself. The native route never hands a request to
+    // the Chat compatibility path, so the two APIs stay independent and tool
+    // ownership never changes silently. A request that mixes provider-owned
+    // official search with a hosted tool has no single owner and stays
+    // fail-closed. Base workspace tools stay native because the Codex client
+    // executes them itself.
     if plan.requires_local_execution {
         if config.web_search_backend == WebSearchBackend::Official && plan.uses_official_web_search
         {
@@ -160,25 +161,18 @@ async fn try_native_responses(
                 .await,
             );
         }
-        let detail = json!({
-            "id": &id,
-            "transport": "native_responses",
-            "issue": "hosted_tool_deferred_to_chat_compat",
-            "requested_model": requested_model,
-            "model": model,
-            "selected_web_search_backend": web_search_backend_label(config.web_search_backend),
-            "fallback": "chat_compat"
-        });
-        let _ = state
-            .store
-            .record_event(
-                "info",
-                "native_responses_compatibility_diagnostic",
-                "Native Responses deferred to Chat API compatibility for a CodeSeeX-hosted tool.",
-                Some(&detail),
-            )
-            .await;
-        return None;
+        return Some(
+            native_hosted_tool_loop(NativeHostedToolLoopParams {
+                state,
+                headers,
+                input,
+                config,
+                model,
+                requested_model,
+                plan: &plan,
+            })
+            .await,
+        );
     }
 
     let previous = input.get("previous_response_id").and_then(Value::as_str);
@@ -408,6 +402,541 @@ async fn try_native_responses(
         )
         .await,
     )
+}
+
+/// One CodeSeeX-hosted call the native transport can execute itself.
+fn native_hosted_call_is_local(call: &NativeToolCall, config: &AppConfig) -> bool {
+    crate::tools::ownership::is_web_search_tool(&call.name)
+        && config.web_search_backend != WebSearchBackend::Official
+}
+
+/// Drains a native SSE body into memory while rewriting the narrow provider
+/// response-id boundary. The hosted loop needs the complete output group before
+/// it can decide whether a turn is final or carries a hosted tool call, so the
+/// final turn reaches the client only after that decision.
+async fn buffer_native_sse(
+    response: reqwest::Response,
+    response_id: &str,
+) -> Result<(Vec<u8>, NativeResponseStreamInspection), reqwest::Error> {
+    use futures_util::StreamExt;
+
+    let mut upstream = response.bytes_stream();
+    let mut relay = NativeResponseSseRelay::new(response_id.to_owned());
+    let mut buffered = Vec::new();
+    while let Some(next) = upstream.next().await {
+        let chunk = next?;
+        for frame in relay.relay_bytes(&chunk) {
+            buffered.extend_from_slice(&frame);
+        }
+    }
+    if let Some(remainder) = relay.finish() {
+        buffered.extend_from_slice(&remainder);
+    }
+    let inspection = relay.inspection().clone();
+    Ok((buffered, inspection))
+}
+
+struct NativeHostedToolLoopParams<'a> {
+    state: &'a ProxyState,
+    headers: &'a HeaderMap,
+    input: &'a Value,
+    config: &'a AppConfig,
+    model: &'a str,
+    requested_model: Option<&'a str>,
+    plan: &'a NativeToolPlan,
+}
+
+/// Executes CodeSeeX-hosted tools (local web search) inside the native
+/// Responses transport. The native route owns its own tool loop and never
+/// defers to the Chat compatibility path, so the two APIs stay independent and
+/// a request can never change tool ownership silently. Every provider tool
+/// group is executed in full and replayed as one complete native continuation.
+async fn native_hosted_tool_loop(
+    params: NativeHostedToolLoopParams<'_>,
+) -> axum::response::Response {
+    let NativeHostedToolLoopParams {
+        state,
+        headers,
+        input,
+        config,
+        model,
+        requested_model,
+        plan,
+    } = params;
+    let id = response_id_from_input(input);
+    let previous = input.get("previous_response_id").and_then(Value::as_str);
+
+    let mut payload = match native_payload(input, model, &plan.tools) {
+        Ok(payload) => payload,
+        Err(message) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "native_responses_input_invalid",
+                message,
+            );
+        }
+    };
+    let pending = match state.native_pending_tool_groups.continuation_for(input) {
+        Ok(pending) => pending,
+        Err(error) => {
+            if let Some(detail) = error.diagnostic() {
+                let message = error.message();
+                let _ = state
+                    .store
+                    .record_event(
+                        "warn",
+                        "native_pending_continuation_diagnostic",
+                        &message,
+                        Some(&detail),
+                    )
+                    .await;
+            }
+            return native_pending_error_response(error);
+        }
+    };
+    if let Some(continuation) = pending.as_ref() {
+        payload["input"] = Value::Array(continuation.merged_input.clone());
+    }
+    if let Err(error) = state
+        .store
+        .checkpoint_request(&id, previous, Some(model), input)
+        .await
+    {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_checkpoint_failed",
+            error.to_string(),
+        );
+    }
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "request_started",
+            "Native Responses request started with the hosted tool loop.",
+            Some(&json!({
+                "id": id,
+                "endpoint": "/v1/responses",
+                "transport": "native_responses",
+                "tool_loop": "native_hosted",
+                "requested_model": requested_model,
+                "model": model,
+                "web_search_backend": web_search_backend_label(config.web_search_backend)
+            })),
+        )
+        .await;
+
+    let auth = upstream_authorization_from_headers(headers, &state.v1_access_token);
+    if let Some(auth) = auth.as_deref() {
+        codeseex_core::codex_auth::remember_authorization_header(auth);
+    }
+    let client = state.client();
+    let managed_key = crate::secrets::upstream_api_key(config);
+    let passthrough = crate::upstream::UpstreamPassthrough::from_headers(headers);
+    crate::upstream::remember_passthrough(&passthrough);
+    let tool_context = crate::tools::ToolExecutionContext::from_request(input);
+    let mut tool_messages: Vec<Value> = input
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut authoritative_input = payload
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let max_iterations = crate::tools::diagnostics::MAX_TOOL_LOOP_ITERATIONS;
+    let mut iteration = 0_u32;
+    loop {
+        iteration += 1;
+        let started = std::time::Instant::now();
+        let upstream = crate::upstream::post_responses(
+            &client,
+            &config.upstream,
+            crate::upstream::UpstreamAuthRequest {
+                inbound: auth.as_deref(),
+                local_access_token: Some(&state.v1_access_token),
+                managed_key: managed_key.as_deref(),
+                passthrough: passthrough.clone(),
+            },
+            Some(input),
+            payload.clone(),
+        )
+        .await;
+        let response = match upstream {
+            Ok(response) => response,
+            Err(error) => {
+                let detail = json!({
+                    "id": id,
+                    "transport": "native_responses",
+                    "tool_loop": "native_hosted",
+                    "error": error.to_string()
+                });
+                let _ = state
+                    .store
+                    .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                    .await;
+                let _ = state
+                    .store
+                    .record_event(
+                        "error",
+                        "request_failed",
+                        "Failed to connect to native Responses upstream.",
+                        Some(&detail),
+                    )
+                    .await;
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "native_upstream_connection_failed",
+                    error.to_string(),
+                );
+            }
+        };
+        let status = response.status();
+        let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+        let response_headers = response.headers().clone();
+        if !status.is_success() {
+            return native_upstream_status_failure(
+                state,
+                &id,
+                requested_model,
+                model,
+                status,
+                response,
+                pending.as_ref(),
+            )
+            .await;
+        }
+        let is_sse = content_type
+            .as_ref()
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/event-stream"));
+        let (body, output_items, completed, usage) = if is_sse {
+            match buffer_native_sse(response, &id).await {
+                Ok((bytes, inspection)) => {
+                    if inspection.output_items_incomplete {
+                        let detail = json!({
+                            "id": id,
+                            "transport": "native_responses",
+                            "tool_loop": "native_hosted",
+                            "issue": "stream_output_items_incomplete"
+                        });
+                        let _ = state
+                            .store
+                            .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                            .await;
+                        return json_error(
+                            StatusCode::BAD_GATEWAY,
+                            "native_tool_protocol_invalid",
+                            "Native Responses stream did not yield a safe complete output group."
+                                .to_owned(),
+                        );
+                    }
+                    let completed = matches!(
+                        inspection.terminal,
+                        Some(NativeResponseTerminal::Completed)
+                    );
+                    (
+                        bytes,
+                        inspection.output_items,
+                        completed,
+                        inspection.final_usage,
+                    )
+                }
+                Err(error) => {
+                    let detail = upstream_body_read_error_detail(
+                        &id,
+                        requested_model,
+                        Some(model),
+                        status,
+                        &response_headers,
+                        &error,
+                    );
+                    let _ = state
+                        .store
+                        .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                        .await;
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "native_upstream_body_failed",
+                        error.to_string(),
+                    );
+                }
+            }
+        } else {
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let detail = upstream_body_read_error_detail(
+                        &id,
+                        requested_model,
+                        Some(model),
+                        status,
+                        &response_headers,
+                        &error,
+                    );
+                    let _ = state
+                        .store
+                        .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                        .await;
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "native_upstream_body_failed",
+                        error.to_string(),
+                    );
+                }
+            };
+            let native = match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    let detail = upstream_json_parse_error_detail(
+                        &id,
+                        requested_model,
+                        Some(model),
+                        status,
+                        &response_headers,
+                        bytes.len(),
+                        &error,
+                    );
+                    let _ = state
+                        .store
+                        .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                        .await;
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "native_upstream_json_failed",
+                        error.to_string(),
+                    );
+                }
+            };
+            let completed = native.get("status").and_then(Value::as_str) == Some("completed");
+            let output_items = native
+                .get("output")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            (bytes.to_vec(), output_items, completed, native.get("usage").cloned())
+        };
+
+        let tool_group =
+            match native_tool_call_group_from_response(&json!({ "output": output_items })) {
+                Ok(group) => group,
+                Err(error) => {
+                    let detail = json!({
+                        "id": id,
+                        "transport": "native_responses",
+                        "tool_loop": "native_hosted",
+                        "error": error
+                    });
+                    let _ = state
+                        .store
+                        .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                        .await;
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        "native_tool_protocol_invalid",
+                        error,
+                    );
+                }
+            };
+
+        let Some(group) = tool_group else {
+            let status_to_store = if completed {
+                RequestStatus::Completed
+            } else {
+                RequestStatus::Failed
+            };
+            let detail = json!({
+                "transport": "native_responses",
+                "tool_loop": "native_hosted",
+                "web_search_backend": web_search_backend_label(config.web_search_backend),
+                "provider_tool_calls": 0
+            });
+            let _ = state
+                .store
+                .record_event(
+                    "info",
+                    "upstream_call_usage_breakdown",
+                    "CodeSeeX upstream call usage breakdown.",
+                    Some(&upstream_call_usage_breakdown_event(
+                        &id,
+                        "native_hosted_loop",
+                        iteration,
+                        input,
+                        &payload,
+                        usage.as_ref(),
+                        Some(started.elapsed().as_millis() as u64),
+                        false,
+                    )),
+                )
+                .await;
+            let _ = state
+                .store
+                .finish_request(&id, status_to_store, None, Some(&detail))
+                .await;
+            if is_sse {
+                return response_from_bytes(
+                    reqwest::StatusCode::OK,
+                    Some(HeaderValue::from_static("text/event-stream")),
+                    body,
+                );
+            }
+            let mut native = match serde_json::from_slice::<Value>(&body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return response_from_bytes(
+                        reqwest::StatusCode::OK,
+                        response_content_type_json(),
+                        body,
+                    );
+                }
+            };
+            let provider_id = native.get("id").and_then(Value::as_str).map(str::to_owned);
+            if let Some(provider_id) = provider_id.as_deref() {
+                rewrite_provider_response_identity(&mut native, provider_id, &id);
+            }
+            return json_response(native);
+        };
+
+        // A group that mixes hosted and client-owned calls has no single owner.
+        // The native transport fails closed instead of handing either side to
+        // the other transport.
+        let all_hosted = group
+            .calls
+            .iter()
+            .all(|call| native_hosted_call_is_local(call, config));
+        if !all_hosted {
+            let hosted = group
+                .calls
+                .iter()
+                .filter(|call| native_hosted_call_is_local(call, config))
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>();
+            let client_owned = group
+                .calls
+                .iter()
+                .filter(|call| !native_hosted_call_is_local(call, config))
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>();
+            return native_incompatible(
+                state,
+                config,
+                &id,
+                requested_model,
+                model,
+                "mixed_hosted_and_client_tool_group",
+                format!(
+                    "Native Responses returned a mixed tool group (hosted: {hosted:?}, client-owned: {client_owned:?}). CodeSeeX does not split tool ownership between transports."
+                ),
+            )
+            .await;
+        }
+
+        if iteration >= max_iterations {
+            let message = format!(
+                "Native hosted tool loop exceeded {max_iterations} iterations; CodeSeeX stopped the loop to avoid unbounded execution."
+            );
+            let detail = json!({
+                "id": id,
+                "transport": "native_responses",
+                "tool_loop": "native_hosted",
+                "iterations": iteration,
+                "error": message
+            });
+            let _ = state
+                .store
+                .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                .await;
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "native_tool_loop_iteration_limit",
+                message,
+            );
+        }
+
+        let mut outputs = Vec::with_capacity(group.calls.len());
+        for call in &group.calls {
+            let _ = state
+                .store
+                .record_event(
+                    "info",
+                    "tool_call",
+                    "CodeSeeX tool requested in the native hosted tool loop.",
+                    Some(&json!({
+                        "id": id,
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "iteration": iteration,
+                        "transport": "native_responses"
+                    })),
+                )
+                .await;
+            let result = crate::tools::execute_tool_with_client(
+                &client,
+                config,
+                &tool_context,
+                &tool_messages,
+                &[],
+                &call.name,
+                &call.input,
+            )
+            .await;
+            let replay = crate::tools::hosted::model_replay_tool_result_for(&call.name, &result);
+            outputs.push(native_tool_output_item(call, replay.clone()));
+            let _ = state
+                .store
+                .record_event(
+                    "info",
+                    "tool_result",
+                    "CodeSeeX tool result in the native hosted tool loop.",
+                    Some(&crate::tools::hosted::tool_result_event_detail_for(
+                        &id,
+                        &call.call_id,
+                        &call.name,
+                        iteration,
+                        &result,
+                    )),
+                )
+                .await;
+            tool_messages.push(json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": { "name": call.name, "arguments": call.input }
+                }]
+            }));
+            tool_messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call.call_id,
+                "content": replay
+            }));
+        }
+        let next_input =
+            match append_complete_native_tool_group(&authoritative_input, &group, &outputs) {
+                Ok(next) => next,
+                Err(error) => {
+                    let detail = json!({
+                        "id": id,
+                        "transport": "native_responses",
+                        "tool_loop": "native_hosted",
+                        "error": error
+                    });
+                    let _ = state
+                        .store
+                        .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                        .await;
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "native_tool_continuation_failed",
+                        error,
+                    );
+                }
+            };
+        authoritative_input = next_input.clone();
+        payload["input"] = Value::Array(next_input);
+    }
 }
 
 async fn native_incompatible(
@@ -1237,6 +1766,112 @@ mod tests {
         }))
     }
 
+    async fn fake_native_hosted_tool_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        let call_count = {
+            let mut requests = capture.requests.lock().expect("capture lock");
+            requests.push(payload);
+            requests.len()
+        };
+        if call_count == 1 {
+            return Json(json!({
+                "id": "provider_hosted_turn_1",
+                "object": "response",
+                "model": "deepseek-v4-flash",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_hosted_1",
+                    "call_id": "call_hosted_1",
+                    "name": "web_search",
+                    "arguments": "not-json",
+                    "status": "completed"
+                }],
+                "usage": { "input_tokens": 3, "output_tokens": 1, "total_tokens": 4 }
+            }));
+        }
+        Json(json!({
+            "id": "provider_hosted_turn_2",
+            "object": "response",
+            "model": "deepseek-v4-flash",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done via native hosted loop" }]
+            }],
+            "usage": { "input_tokens": 5, "output_tokens": 2, "total_tokens": 7 }
+        }))
+    }
+
+    async fn fake_native_sse_hosted_tool_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> axum::response::Response {
+        let call_count = {
+            let mut requests = capture.requests.lock().expect("capture lock");
+            requests.push(payload);
+            requests.len()
+        };
+        let bytes = if call_count == 1 {
+            concat!(
+                "event: response.created\n",
+                "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_sse_hosted_1\"}}\n\n",
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"sequence_number\":2,\"response_id\":\"provider_sse_hosted_1\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_sse_hosted_1\",\"call_id\":\"call_sse_hosted_1\",\"name\":\"web_search\",\"arguments\":\"not-json\",\"status\":\"completed\"}}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"provider_sse_hosted_1\",\"status\":\"completed\"}}\n\n"
+            )
+        } else {
+            concat!(
+                "event: response.created\n",
+                "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_sse_hosted_2\"}}\n\n",
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"sequence_number\":2,\"response_id\":\"provider_sse_hosted_2\",\"item\":{\"type\":\"message\",\"id\":\"msg_sse_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"final\"}]}}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"provider_sse_hosted_2\",\"status\":\"completed\"}}\n\n"
+            )
+        };
+        (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            bytes.to_owned(),
+        )
+            .into_response()
+    }
+
+    async fn fake_native_mixed_tool_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        capture.requests.lock().expect("capture lock").push(payload);
+        Json(json!({
+            "id": "provider_mixed_turn_1",
+            "object": "response",
+            "model": "deepseek-v4-flash",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_mixed_hosted",
+                    "call_id": "call_mixed_hosted",
+                    "name": "web_search",
+                    "arguments": "not-json",
+                    "status": "completed"
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_mixed_client",
+                    "call_id": "call_mixed_client",
+                    "name": "shell_command",
+                    "arguments": "{}",
+                    "status": "completed"
+                }
+            ]
+        }))
+    }
+
     fn request(id: &str, stream: bool, tools: Value) -> Value {
         json!({
             "id": id,
@@ -1682,8 +2317,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hosted_local_search_defers_to_chat_compat_instead_of_failing() {
-        let data_dir = temp_data_dir("local-defer-chat");
+    async fn hosted_local_search_stays_on_native_and_never_defers_to_chat_compat() {
+        let data_dir = temp_data_dir("local-hosted-native");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
             ..Default::default()
@@ -1700,25 +2335,27 @@ mod tests {
             ]),
         );
 
-        assert!(
-            try_native_responses(
-                &state,
-                &HeaderMap::new(),
-                &input,
-                &config,
-                "deepseek-v4-flash",
-                Some("deepseek-v4-flash"),
-            )
-            .await
-            .is_none(),
-            "CodeSeeX-hosted local search must reach the Chat compatibility executor"
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("CodeSeeX-hosted local search must stay on the native transport");
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the native transport must not reject its own hosted tool"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
-    async fn codex_provider_search_declaration_defers_when_local_search_is_selected() {
-        let data_dir = temp_data_dir("provider-search-defer");
+    async fn codex_provider_search_declaration_stays_on_native_when_local_search_is_selected() {
+        let data_dir = temp_data_dir("provider-search-native");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
             ..Default::default()
@@ -1735,18 +2372,184 @@ mod tests {
             json!([{ "type": "web_search", "external_web_access": true }]),
         );
 
-        assert!(
-            try_native_responses(
-                &state,
-                &HeaderMap::new(),
-                &input,
-                &config,
-                "deepseek-v4-flash",
-                Some("deepseek-v4-flash"),
-            )
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("a provider-native search declaration must stay on the native transport");
+        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_hosted_tool_loop_executes_local_search_without_chat_compat() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_hosted_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let input = request(
+            "resp_native_hosted_loop",
+            false,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
+            ]),
+        );
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted tool loop owns the native response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .is_none(),
-            "a provider-native search declaration must defer, not fail"
+            .unwrap();
+        let native: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(native["id"], "resp_native_hosted_loop");
+        assert_eq!(native["status"], "completed");
+
+        let requests = capture.requests.lock().expect("capture lock");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the hosted loop must continue upstream instead of handing the request to Chat compatibility"
+        );
+        assert_eq!(
+            requests[1]["tools"][0]["name"],
+            "web_search",
+            "the second native request must keep the native tool declaration"
+        );
+        let continuation = requests[1]["input"]
+            .as_array()
+            .expect("second request input array");
+        assert!(
+            continuation.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item.get("call_id").and_then(Value::as_str) == Some("call_hosted_1")
+            }),
+            "the second native request must carry the executed hosted tool output"
+        );
+        drop(requests);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_hosted_tool_loop_streams_the_final_turn_after_executing_search() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_sse_hosted_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-stream");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let input = request(
+            "resp_native_hosted_stream",
+            true,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
+            ]),
+        );
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted tool loop owns the native response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.contains("resp_native_hosted_stream"),
+            "the streamed final turn must carry the local response id"
+        );
+        assert!(
+            !text.contains("provider_sse_hosted_2"),
+            "the provider identity must not leak past the relay"
+        );
+
+        let requests = capture.requests.lock().expect("capture lock");
+        assert_eq!(requests.len(), 2);
+        let continuation = requests[1]["input"]
+            .as_array()
+            .expect("second request input array");
+        assert!(continuation.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(Value::as_str) == Some("call_sse_hosted_1")
+        }));
+        drop(requests);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_mixed_hosted_and_client_tool_group_fails_closed() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_mixed_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-mixed");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let input = request(
+            "resp_native_mixed",
+            false,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
+            ]),
+        );
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the native transport owns the response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            capture.requests.lock().expect("capture lock").len(),
+            1,
+            "a mixed tool group must never trigger a second upstream call or a transport switch"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }

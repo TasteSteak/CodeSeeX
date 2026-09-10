@@ -18,8 +18,8 @@ const MAX_RETAINED_NATIVE_OUTPUT_BYTES: usize = 1_048_576;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeToolPlan {
     pub(crate) tools: Vec<Value>,
-    /// True means the request needs a future native local-tool coordinator;
-    /// it is not eligible for the initial direct native transport slice.
+    /// True means the request needs the native hosted tool loop, which executes
+    /// CodeSeeX-hosted tools (local web search) inside the native transport.
     pub(crate) requires_local_execution: bool,
     pub(crate) uses_official_web_search: bool,
 }
@@ -212,8 +212,8 @@ pub(crate) fn plan_native_tools(
             if web_search_backend == WebSearchBackend::Official {
                 continue;
             }
-            // CodeSeeX-hosted local search has no native executor: keep it on
-            // the compatibility path rather than silently changing ownership.
+            // CodeSeeX-hosted local search is executed by the native hosted
+            // tool loop; ownership never changes silently.
             requires_local_execution = true;
         } else if is_codeseex_local_tool(name) {
             // Workspace tools (list_directory, read_file_range,
@@ -237,10 +237,9 @@ pub(crate) fn plan_native_tools(
             tools.push(json!({ "type": "web_search" }));
         }
     } else if saw_provider_web_search || saw_local_web_search {
-        // CodeSeeX owns local web search in this mode, and it has no native
-        // executor: the declaration asks for the CodeSeeX-hosted function
-        // instead of silently switching to provider search. The native runtime
-        // defers such a request to the Chat compatibility path that owns it.
+        // CodeSeeX owns local web search in this mode: the declaration asks for
+        // the CodeSeeX-hosted function instead of silently switching to
+        // provider search. The native hosted tool loop executes that call.
         requires_local_execution = true;
     }
 

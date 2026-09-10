@@ -33,7 +33,7 @@ fn test_config(data_dir: PathBuf) -> AppConfig {
 }
 
 fn test_config_with_upstream(data_dir: PathBuf, fake_addr: SocketAddr) -> AppConfig {
-    let mut config = AppConfig {
+    let config = AppConfig {
         data_dir,
         upstream: UpstreamConfig {
             base_url: format!("http://{fake_addr}"),

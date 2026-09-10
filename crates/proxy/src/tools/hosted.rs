@@ -102,16 +102,29 @@ pub(crate) fn tool_result_event_detail(
     iteration: u32,
     result: &Value,
 ) -> Value {
+    tool_result_event_detail_for(request_id, &call.id, &call.name, iteration, result)
+}
+
+/// Protocol-agnostic form. The native Responses transport logs tool results
+/// without borrowing the Chat tool-call type, so the two API paths never share
+/// a tool-call representation.
+pub(crate) fn tool_result_event_detail_for(
+    request_id: &str,
+    call_id: &str,
+    name: &str,
+    iteration: u32,
+    result: &Value,
+) -> Value {
     let mut detail = json!({
         "id": request_id,
-        "call_id": call.id,
-        "name": call.name,
+        "call_id": call_id,
+        "name": name,
         "iteration": iteration,
         "ok": result.get("ok").and_then(Value::as_bool),
         "summary": summarize_tool_result_for_log(result),
         "result_size": crate::diagnostics::tool_result_size_summary(result)
     });
-    if crate::tools::ownership::is_web_search_tool(&call.name) {
+    if crate::tools::ownership::is_web_search_tool(name) {
         if let Some(object) = detail.as_object_mut() {
             object.insert(
                 "web_search".to_owned(),
@@ -129,7 +142,7 @@ pub(crate) fn tool_result_event_detail(
         }
     }
     if matches!(
-        call.name.as_str(),
+        name,
         "vision_analyze" | "vision_generate" | "image_gen"
     ) {
         if let Some(object) = detail.as_object_mut() {
@@ -152,7 +165,13 @@ pub(crate) fn tool_result_event_detail(
 }
 
 pub(crate) fn model_replay_tool_result(call: &ChatToolCall, result: &Value) -> String {
-    if crate::tools::ownership::is_web_search_tool(&call.name) {
+    model_replay_tool_result_for(&call.name, result)
+}
+
+/// Protocol-agnostic form. The native Responses transport replays tool results
+/// without borrowing the Chat tool-call type.
+pub(crate) fn model_replay_tool_result_for(name: &str, result: &Value) -> String {
+    if crate::tools::ownership::is_web_search_tool(name) {
         return compact_web_search_result_for_model(result).to_string();
     }
     let text = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_owned());
@@ -162,7 +181,7 @@ pub(crate) fn model_replay_tool_result(call: &ChatToolCall, result: &Value) -> S
     }
     json!({
         "ok": result.get("ok").cloned().unwrap_or(Value::Null),
-        "tool": call.name,
+        "tool": name,
         "codeseex_truncated_for_model": true,
         "original_chars": text.chars().count(),
         "summary": summarize_tool_result(result)

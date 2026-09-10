@@ -2087,7 +2087,6 @@ mod tests {
 
     #[test]
     fn analyze_registry_replaces_readonly_displays_with_an_editable_model() {
-        let config = AppConfig::default();
         let fields = analyze_registry_config_fields(&BTreeMap::new());
         let keys = fields
             .iter()
