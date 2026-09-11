@@ -2,7 +2,7 @@ use crate::native_responses::{NativeToolCall, NativeToolCallKind};
 use crate::response_sse::thinking_display_prefix;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -259,7 +259,9 @@ impl NativePendingToolGroups {
                         .collect(),
                 },
             )?;
-        let (client_outputs, suffix) = collect_client_outputs(after_visible, &group.client_calls)?;
+        let untracked_call_ids = group.untracked_client_call_ids();
+        let (client_outputs, suffix) =
+            collect_client_outputs(after_visible, &group.client_calls, &untracked_call_ids)?;
 
         let injected_item_count = group
             .injected_items
@@ -367,6 +369,23 @@ impl PendingNativeToolGroup {
             })).collect::<Vec<_>>()
         })
     }
+
+    /// Call ids inside the retained group that the client answers itself.
+    ///
+    /// The provider can call Codex's own `tool_search`. CodeSeeX forwards that
+    /// call like any other provider item, but Codex executes it and replays the
+    /// `tool_search_output` on its own, so the call never becomes one of the
+    /// verified `client_calls`. Its output still sits in the client's replay,
+    /// and can sit between the outputs CodeSeeX does verify, so the coordinator
+    /// has to recognise it instead of reading it as a shifted tool output.
+    fn untracked_client_call_ids(&self) -> BTreeSet<String> {
+        self.visible_provider_output
+            .iter()
+            .filter(|item| item_type(item) == "tool_search_call")
+            .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
 }
 
 fn matching_group<'a>(
@@ -453,9 +472,36 @@ fn validate_request_anchor(
     }
 }
 
+/// Whether an item is the client's own answer to a provider call CodeSeeX does
+/// not verify, such as the `tool_search_output` Codex replays for a provider
+/// `tool_search_call`. Only an answer to a call the retained group actually
+/// carries is recognised; every other stray item still fails closed.
+fn is_untracked_client_answer(item: &Value, untracked_call_ids: &BTreeSet<String>) -> bool {
+    item_type(item) == "tool_search_output"
+        && item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .is_some_and(|call_id| untracked_call_ids.contains(call_id))
+}
+
+/// Whether a replayed tool output actually carries a result payload.
+///
+/// Codex answers most client tools with a text `output`, but a tool that returns
+/// media answers with an `output` array of content parts: `view_image` replays
+/// `[{"type":"input_image",...}]`. The upstream compiler also reads `content`
+/// and `result`, so accepting every shape it understands keeps a valid answer
+/// from failing the turn, while an item with no payload at all still fails
+/// closed.
+fn client_tool_output_has_payload(item: &Value) -> bool {
+    ["output", "content", "result"]
+        .iter()
+        .any(|field| item.get(*field).is_some_and(|value| !value.is_null()))
+}
+
 fn collect_client_outputs(
     input: &[Value],
     calls: &[NativeToolCall],
+    untracked_call_ids: &BTreeSet<String>,
 ) -> Result<(Vec<Value>, Vec<Value>), NativePendingError> {
     // A provider tool group and its outputs are an ordered protocol unit.
     // Do not use a map to "fix" an out-of-order client replay: that would
@@ -469,59 +515,72 @@ fn collect_client_outputs(
         .cloned()
         .collect::<Vec<_>>();
     let input = input.as_slice();
-    let mut outputs = Vec::with_capacity(calls.len());
+    // The client's own answers stay exactly where it replayed them, so the
+    // continuation keeps the order the client sent instead of moving a
+    // `tool_search_output` behind the verified outputs.
+    let mut answers = Vec::with_capacity(calls.len());
+    let mut next = 0_usize;
     for (index, call) in calls.iter().enumerate() {
-        let Some(item) = input.get(index) else {
-            return Err(NativePendingError::MissingClientToolOutput {
-                call_id: call.call_id.clone(),
-            });
-        };
-        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-        let is_tool_output = matches!(
-            item_type,
-            "function_call_output" | "custom_tool_call_output"
-        );
-        if !is_tool_output {
-            return Err(NativePendingError::ClientToolOutputOrderMismatch {
-                expected_call_id: call.call_id.clone(),
-                actual_call_id: "non_tool_item".to_owned(),
-            });
-        }
-        let call_id = item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| NativePendingError::UnexpectedToolOutput {
-                call_id: "missing".to_owned(),
-            })?;
-        if call_id != call.call_id {
-            if calls[..index]
-                .iter()
-                .any(|previous| previous.call_id == call_id)
-            {
-                return Err(NativePendingError::DuplicateClientToolOutput {
+        loop {
+            let Some(item) = input.get(next) else {
+                return Err(NativePendingError::MissingClientToolOutput {
+                    call_id: call.call_id.clone(),
+                });
+            };
+            if is_untracked_client_answer(item, untracked_call_ids) {
+                answers.push(item.clone());
+                next += 1;
+                continue;
+            }
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+            let is_tool_output = matches!(
+                item_type,
+                "function_call_output" | "custom_tool_call_output"
+            );
+            if !is_tool_output {
+                return Err(NativePendingError::ClientToolOutputOrderMismatch {
+                    expected_call_id: call.call_id.clone(),
+                    actual_call_id: "non_tool_item".to_owned(),
+                });
+            }
+            let call_id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| NativePendingError::UnexpectedToolOutput {
+                    call_id: "missing".to_owned(),
+                })?;
+            if call_id != call.call_id {
+                if calls[..index]
+                    .iter()
+                    .any(|previous| previous.call_id == call_id)
+                {
+                    return Err(NativePendingError::DuplicateClientToolOutput {
+                        call_id: call_id.to_owned(),
+                    });
+                }
+                if calls.iter().any(|expected| expected.call_id == call_id) {
+                    return Err(NativePendingError::ClientToolOutputOrderMismatch {
+                        expected_call_id: call.call_id.clone(),
+                        actual_call_id: call_id.to_owned(),
+                    });
+                }
+                return Err(NativePendingError::UnexpectedToolOutput {
                     call_id: call_id.to_owned(),
                 });
             }
-            if calls.iter().any(|expected| expected.call_id == call_id) {
-                return Err(NativePendingError::ClientToolOutputOrderMismatch {
-                    expected_call_id: call.call_id.clone(),
-                    actual_call_id: call_id.to_owned(),
+            let expected_type = output_type_for(call.kind);
+            if item_type != expected_type || !client_tool_output_has_payload(item) {
+                return Err(NativePendingError::InvalidClientToolOutput {
+                    call_id: call_id.to_owned(),
                 });
             }
-            return Err(NativePendingError::UnexpectedToolOutput {
-                call_id: call_id.to_owned(),
-            });
+            answers.push(item.clone());
+            next += 1;
+            break;
         }
-        let expected_type = output_type_for(call.kind);
-        if item_type != expected_type || item.get("output").and_then(Value::as_str).is_none() {
-            return Err(NativePendingError::InvalidClientToolOutput {
-                call_id: call_id.to_owned(),
-            });
-        }
-        outputs.push(item.clone());
     }
-    let suffix = input[calls.len()..].to_vec();
+    let suffix = input[next..].to_vec();
     for item in &suffix {
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
         if !matches!(
@@ -544,7 +603,7 @@ fn collect_client_outputs(
             call_id: call_id.to_owned(),
         });
     }
-    Ok((outputs, suffix))
+    Ok((answers, suffix))
 }
 
 fn validate_pending_group(group: &PendingNativeToolGroup) -> Result<(), NativePendingError> {
@@ -1707,6 +1766,211 @@ mod tests {
             groups.continuation_for(&replay),
             Err(NativePendingError::VisibleProviderOutputMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn client_owned_tool_search_output_keeps_its_place_between_verified_outputs() {
+        // Live shape: the provider called Codex's own `tool_search` twice and
+        // then `exec_command` inside one group. CodeSeeX forwards the two
+        // `tool_search_call` items but only verifies the `exec_command` output,
+        // and Codex replays both `tool_search_output` items before it. Reading
+        // those as a shifted tool output rejected the whole turn.
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![
+            json!({
+                "type": "tool_search_call",
+                "id": "43f35b3b-7cd7-421f-a8a3-e4f915d5e79a",
+                "call_id": "call_00_search",
+                "status": "completed",
+                "execution": "client",
+                "arguments": { "limit": 10, "query": "search the internet" }
+            }),
+            json!({
+                "type": "tool_search_call",
+                "id": "5a60265f-eb49-40d8-87f3-7c7afb691fe8",
+                "call_id": "call_01_search",
+                "status": "completed",
+                "execution": "client",
+                "arguments": { "limit": 10, "query": "browser tool" }
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_02_shell",
+                "name": "exec_command",
+                "arguments": "{}",
+                "status": "completed"
+            }),
+        ];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_02_shell", "exec_command")],
+            ))
+            .unwrap();
+
+        let replay = vec![
+            authoritative[0].clone(),
+            provider[0].clone(),
+            provider[1].clone(),
+            provider[2].clone(),
+            json!({
+                "type": "tool_search_output",
+                "call_id": "call_00_search",
+                "status": "completed",
+                "execution": "client",
+                "tools": []
+            }),
+            json!({
+                "type": "tool_search_output",
+                "call_id": "call_01_search",
+                "status": "completed",
+                "execution": "client",
+                "tools": []
+            }),
+            json!({ "type": "function_call_output", "call_id": "call_02_shell", "output": "ok" }),
+        ];
+        let continuation = groups
+            .continuation_for(&request(replay.clone()))
+            .unwrap()
+            .expect("the group is still answered");
+
+        assert_eq!(continuation.client_output_count, 1);
+        assert_eq!(
+            continuation.merged_input, replay,
+            "the client's own answers keep the order it replayed them in"
+        );
+    }
+
+    #[test]
+    fn a_tool_search_output_the_group_never_called_still_fails_closed() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_shell",
+            "name": "exec_command",
+            "arguments": "{}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_shell", "exec_command")],
+            ))
+            .unwrap();
+
+        let error = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                provider[0].clone(),
+                json!({
+                    "type": "tool_search_output",
+                    "call_id": "call_09_invented",
+                    "status": "completed",
+                    "execution": "client",
+                    "tools": []
+                }),
+                json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+            ]))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            NativePendingError::ClientToolOutputOrderMismatch {
+                expected_call_id: "call_shell".to_owned(),
+                actual_call_id: "non_tool_item".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn client_image_output_replays_content_parts_instead_of_text() {
+        // Live shape: Codex answered `view_image` with a `function_call_output`
+        // whose `output` is an array of content parts. Requiring a text output
+        // rejected the whole turn with `tool_output_required`.
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_view_image",
+            "name": "view_image",
+            "arguments": "{\"path\":\"probe.png\",\"detail\":\"high\"}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_view_image", "view_image")],
+            ))
+            .unwrap();
+
+        let replay = vec![
+            authoritative[0].clone(),
+            provider[0].clone(),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_view_image",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,AAAA",
+                    "detail": "high"
+                }]
+            }),
+        ];
+        let continuation = groups
+            .continuation_for(&request(replay.clone()))
+            .unwrap()
+            .expect("the image answer completes the retained group");
+
+        assert_eq!(continuation.client_output_count, 1);
+        assert_eq!(continuation.merged_input, replay);
+    }
+
+    #[test]
+    fn a_client_output_without_any_payload_still_fails_closed() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_view_image",
+            "name": "view_image",
+            "arguments": "{}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_view_image", "view_image")],
+            ))
+            .unwrap();
+
+        let error = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                provider[0].clone(),
+                json!({ "type": "function_call_output", "call_id": "call_view_image" }),
+            ]))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            NativePendingError::InvalidClientToolOutput {
+                call_id: "call_view_image".to_owned(),
+            }
+        );
     }
 
     #[test]
