@@ -154,7 +154,6 @@
   "running": "エージェント実行中",
   "runtimeEvent": "ランタイムイベント。",
   "runtimeStats": "ランタイム統計",
-  "showThinking": "思考チェーンを表示",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "ソースコードを表示",
   "sourceUnavailable": "現在のバージョンではソースコードリポジトリのURLが設定されていません。",

@@ -2332,7 +2332,7 @@ fn mapped_response_keeps_codex_completion_metadata() {
         "usage": { "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12 }
     });
 
-    let response = chat_completion_to_response(&config, "resp_test", "deepseek-v4-pro", chat, true);
+    let response = chat_completion_to_response(&config, "resp_test", "deepseek-v4-pro", chat);
 
     assert_eq!(response["status"], "completed");
     assert_eq!(response["error"], Value::Null);
@@ -2778,7 +2778,6 @@ fn external_collision_takes_ownership_from_ordinary_codeseex_code_tool() {
         chat,
         &crate::community_tools::CommunityToolSet::default(),
         &tool_context,
-        true,
     );
     let output = response["output"].as_array().unwrap();
 
@@ -2858,7 +2857,6 @@ fn web_search_maps_to_native_response_item_not_proxy_tool_item() {
         chat,
         &crate::community_tools::CommunityToolSet::default(),
         &crate::tool_passthrough::ToolContext::default(),
-        true,
     );
     let output = response["output"].as_array().unwrap();
 
@@ -2969,69 +2967,6 @@ fn proxy_visible_items_preserve_tool_order_without_text_messages() {
 }
 
 #[tokio::test]
-async fn streaming_closes_thinking_before_final_content() {
-    let fake_state = FakeUpstreamState::default();
-    let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let fake_addr = fake_listener.local_addr().unwrap();
-    let fake_app = Router::new()
-        .route(
-            "/chat/completions",
-            post(fake_reasoning_then_content_streaming_chat_completions),
-        )
-        .with_state(fake_state);
-    tokio::spawn(async move {
-        axum::serve(fake_listener, fake_app).await.unwrap();
-    });
-
-    let data_dir = std::env::temp_dir().join(format!(
-        "codeseex-thinking-order-test-{}",
-        Uuid::new_v4().simple()
-    ));
-    let config = test_config_with_upstream(data_dir, fake_addr);
-    let store = Store::open(&config.data_dir).await.unwrap();
-    let proxy_state = ProxyState::for_test(config, store);
-    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let proxy_addr = proxy_listener.local_addr().unwrap();
-    let proxy_app = Router::new()
-        .route("/v1/responses", post(responses))
-        .with_state(proxy_state);
-    tokio::spawn(async move {
-        axum::serve(proxy_listener, proxy_app).await.unwrap();
-    });
-
-    let body = reqwest::Client::new()
-        .post(format!("http://{proxy_addr}/v1/responses"))
-        .json(&json!({
-            "id": "resp_stream_thinking_order",
-            "model": "deepseek-v4-pro",
-            "stream": true,
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "answer once" }]
-            }]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-
-    let reasoning_done = body
-        .find("response.reasoning_summary_text.done")
-        .expect("reasoning should be closed");
-    let thinking_done = body
-        .find("\"codeseex_display_only\":\"thinking_markdown\"")
-        .expect("thinking display item should be emitted");
-    let content_delta = body
-        .find("\"delta\":\"final answer\"")
-        .expect("final content should stream");
-    assert!(reasoning_done < content_delta, "{body}");
-    assert!(thinking_done < content_delta, "{body}");
-}
-
-#[tokio::test]
 async fn streaming_internal_tools_execute_inside_proxy_without_client_function_call() {
     let fake_state = FakeUpstreamState::default();
     let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -3081,19 +3016,6 @@ async fn streaming_internal_tools_execute_inside_proxy_without_client_function_c
         .await
         .unwrap();
 
-    assert!(
-        body.contains("response.reasoning_summary_text.delta"),
-        "{body}"
-    );
-    assert!(body.contains("DeepSeek Thinking"), "{body}");
-    assert!(body.contains("codeseex_display_only"), "{body}");
-    assert_eq!(
-        body.matches("\"delta\":\"**DeepSeek Thinking**\\n\"")
-            .count(),
-        1,
-        "{body}"
-    );
-    assert!(body.contains("after tool"), "{body}");
     assert!(!body.contains("已使用工具 `list_directory`"), "{body}");
     assert!(body.contains("\"type\":\"proxy_tool_call\""), "{body}");
     assert!(body.contains("directory checked"), "{body}");
@@ -3103,18 +3025,6 @@ async fn streaming_internal_tools_execute_inside_proxy_without_client_function_c
     );
     assert!(!body.contains("\"type\":\"function_call\""), "{body}");
     assert!(!body.contains("unsupported call"), "{body}");
-    let reasoning_done = body
-        .find("response.reasoning_summary_text.done")
-        .expect("reasoning should close before tool display");
-    let thinking_added = body
-        .find("\"codeseex_display_only\":\"thinking_markdown\"")
-        .expect("thinking display should be emitted before tool display");
-    let proxy_tool = body
-        .find("\"type\":\"proxy_tool_call\"")
-        .expect("proxy tool item should be emitted");
-    assert!(reasoning_done < proxy_tool, "{body}");
-    assert!(thinking_added < proxy_tool, "{body}");
-
     let requests = fake_state
         .requests
         .lock()
@@ -7367,13 +7277,7 @@ async fn streaming_apply_patch_returns_native_custom_tool_call() {
     );
     assert!(!body.contains("patch-ok"), "{body}");
     assert!(body.contains("encrypted_content"), "{body}");
-    let thinking_done = body
-        .find("response.output_text.done")
-        .expect("thinking display should close before native tool completion");
-    let completed = body
-        .find("response.completed")
-        .expect("stream should complete");
-    assert!(thinking_done < completed, "{body}");
+    assert!(body.contains("response.completed"), "{body}");
     assert!(
         !patch_file.exists(),
         "proxy must not execute native apply_patch"
@@ -8340,7 +8244,7 @@ fn reconstructed_tool_call_history_keeps_reasoning_content_field() {
     let reasoning = "read the file before answering";
     let response = json!({
         "output": [
-            reasoning_response_item(&config, reasoning, false),
+            reasoning_response_item(&config, reasoning),
             {
                 "type": "function_call",
                 "call_id": "call_prev",
@@ -8380,7 +8284,7 @@ fn reasoning_item_empty_content_is_safe_only_when_replay_payload_exists() {
     });
 
     let encrypted_response = json!({
-        "output": [reasoning_response_item(&config, reasoning, false), call.clone()]
+        "output": [reasoning_response_item(&config, reasoning), call.clone()]
     });
     let summary_response = json!({
         "output": [

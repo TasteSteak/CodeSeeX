@@ -627,7 +627,6 @@ impl ManagerRuntime {
             "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(model_override),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
             "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
-            "SHOW_THINKING": ui.and_then(|value| value.show_thinking).unwrap_or(true).to_string(),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
             "WEB_SEARCH_BACKEND": web_search_backend_to_ui(tools.and_then(|value| value.web_search.as_ref()).and_then(|value| value.backend).unwrap_or(config.web_search_backend)),
             "AUTO_START": ui.and_then(|value| value.auto_start).unwrap_or(false).to_string(),

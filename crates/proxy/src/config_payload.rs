@@ -51,7 +51,6 @@ pub(crate) fn user_config_from_payload(
 
     if payload.get("UI_THEME").is_some()
         || payload.get("UI_LANGUAGE").is_some()
-        || payload.get("SHOW_THINKING").is_some()
         || payload.get("AUTO_START").is_some()
         || payload.get("CODEX_APP_MODEL_LIST_INJECTION").is_some()
         || payload.get("UI_CLOSE_BEHAVIOR").is_some()
@@ -63,9 +62,6 @@ pub(crate) fn user_config_from_payload(
         }
         if payload.get("UI_LANGUAGE").is_some() {
             ui.language = value_string(payload, "UI_LANGUAGE");
-        }
-        if payload.get("SHOW_THINKING").is_some() {
-            ui.show_thinking = value_bool(payload, "SHOW_THINKING");
         }
         if payload.get("AUTO_START").is_some() {
             ui.auto_start = value_bool(payload, "AUTO_START");

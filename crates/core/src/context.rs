@@ -16,9 +16,6 @@ pub struct ContextDiagnostic {
     pub message_items: u64,
     pub tool_result_items: u64,
     pub verified_fact_items: u64,
-    pub display_only_items: u64,
-    pub display_only_thinking_items: u64,
-    pub display_only_chars: u64,
     pub tool_output_chars: u64,
     pub truncated_tool_output_items: u64,
     pub unsupported_items: u64,
@@ -117,16 +114,6 @@ pub fn compile_responses_input_with_tool_outputs(
             let mut last_reasoning = String::new();
 
             for item in items {
-                if response_item_is_display_only(item) {
-                    diagnostic.display_only_items += 1;
-                    let text = item.get("content").map(content_to_text).unwrap_or_default();
-                    diagnostic.display_only_chars += text.chars().count() as u64;
-                    if response_item_is_display_only_thinking(item) {
-                        diagnostic.display_only_thinking_items += 1;
-                    }
-                    continue;
-                }
-
                 if let Some(reasoning) = response_item_to_reasoning_text(item) {
                     diagnostic.estimated_chars += reasoning.chars().count() as u64;
                     pending_reasoning = join_nonempty(&pending_reasoning, &reasoning);
@@ -593,40 +580,6 @@ fn decode_reasoning_content(value: &str) -> Option<String> {
         .decode(value.trim())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
-}
-
-fn response_item_is_display_only(item: &Value) -> bool {
-    item.get("codeseex_display_only").is_some()
-        || item
-            .pointer("/metadata/codeseex_display_only")
-            .and_then(Value::as_bool)
-            == Some(true)
-        || (response_item_role(item) == Some("assistant")
-            && item
-                .get("content")
-                .map(content_to_text)
-                .map(|text| response_text_is_display_only(&text))
-                .unwrap_or(false))
-}
-
-fn response_item_is_display_only_thinking(item: &Value) -> bool {
-    item.get("content")
-        .map(content_to_text)
-        .map(|text| text.trim_start().starts_with("**DeepSeek Thinking**"))
-        .unwrap_or(false)
-}
-
-fn response_item_role(item: &Value) -> Option<&str> {
-    item.get("role")
-        .or_else(|| item.pointer("/metadata/role"))
-        .and_then(Value::as_str)
-}
-
-fn response_text_is_display_only(text: &str) -> bool {
-    let text = text.trim();
-    text.starts_with("**DeepSeek Thinking**")
-        || text.starts_with("已使用工具 `")
-        || (text.starts_with("已使用 ") && text.contains(" 个工具\n`"))
 }
 
 fn response_item_to_tool_result_message(
@@ -1224,49 +1177,6 @@ mod tests {
         let compiled = compile_responses_input(&input);
         assert_eq!(compiled.messages.len(), 1);
         assert_eq!(compiled.messages[0].content, "please inspect this");
-    }
-
-    #[test]
-    fn skips_display_only_text_even_if_metadata_is_missing() {
-        let input = json!([
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> hidden" }]
-            },
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": "已使用工具 `list_directory`" }]
-            },
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "continue" }]
-            }
-        ]);
-        let compiled = compile_responses_input(&input);
-
-        assert_eq!(compiled.diagnostic.display_only_items, 2);
-        assert_eq!(compiled.diagnostic.display_only_thinking_items, 1);
-        assert!(compiled.diagnostic.display_only_chars > 0);
-        assert_eq!(compiled.messages.len(), 1);
-        assert_eq!(compiled.messages[0].role, "user");
-        assert_eq!(compiled.messages[0].content, "continue");
-    }
-
-    #[test]
-    fn ordinary_user_text_is_not_counted_as_display_only_thinking() {
-        let input = json!([{
-            "role": "user",
-            "content": [{ "type": "input_text", "text": "**DeepSeek Thinking** is visible user text" }]
-        }]);
-        let compiled = compile_responses_input(&input);
-
-        assert_eq!(compiled.diagnostic.display_only_items, 0);
-        assert_eq!(compiled.diagnostic.display_only_thinking_items, 0);
-        assert_eq!(compiled.messages.len(), 1);
-        assert!(compiled.messages[0].content.contains("visible user text"));
     }
 
     #[test]

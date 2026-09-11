@@ -10,20 +10,18 @@
 
 use super::*;
 use crate::native_coordinator::{
-    is_display_only_item, NativeInjectedItems, NativePendingContinuation, NativePendingError,
-    PendingNativeToolGroup,
+    NativeInjectedItems, NativePendingContinuation, PendingNativeToolGroup,
 };
 use crate::native_responses::{
     append_complete_native_tool_group, native_stream_finalization,
     native_tool_call_group_from_response, native_tool_output_item, plan_native_tools,
-    present_reasoning_summary_in_response, reconcile_grouped_tool_namespaces,
-    repair_provider_tool_schemas, rewrite_provider_response_identity, NativeResponseSseRelay,
-    NativeResponseStreamInspection, NativeResponseTerminal, NativeStreamFinalization,
-    NativeToolCall, NativeToolCallGroup, NativeToolPlan,
+    reconcile_grouped_tool_namespaces, repair_provider_tool_schemas,
+    rewrite_provider_response_identity, NativeResponseSseRelay, NativeResponseStreamInspection,
+    NativeResponseTerminal, NativeStreamFinalization, NativeToolCall, NativeToolCallGroup,
+    NativeToolPlan,
 };
 use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::WebSearchBackend;
-use super::response_helpers::show_thinking_enabled;
 
 pub(super) async fn dispatch_if_selected(
     state: &ProxyState,
@@ -192,16 +190,7 @@ async fn try_native_responses(
             ));
         }
     };
-    let pending = match state.native_pending_tool_groups.continuation_for(input) {
-        Ok(pending) => pending,
-        Err(error) => {
-            record_native_continuation_rejection(state, &error).await;
-            return Some(native_pending_error_response(error));
-        }
-    };
-    if let Some(continuation) = pending.as_ref() {
-        payload["input"] = Value::Array(continuation.merged_input.clone());
-    }
+    let pending = resolve_native_pending_input(state, &id, input, &mut payload).await;
     let reconciled_namespaces = reconcile_grouped_tool_namespaces(&mut payload);
     record_namespace_reconciliation(state, &id, &reconciled_namespaces).await;
     let repaired_schemas = repair_provider_tool_schemas(&mut payload);
@@ -307,7 +296,7 @@ async fn try_native_responses(
             passthrough,
         },
         Some(input),
-        native_upstream_payload(&payload, should_adapt_tool_protocol(&config.upstream, model)),
+        payload.clone(),
     )
     .await;
     let response = match upstream {
@@ -373,7 +362,6 @@ async fn try_native_responses(
             content_type,
             upstream_started: started,
             web_search_backend: config.web_search_backend,
-            present_reasoning_summary: show_thinking_enabled(config),
             settle_pending_response_id: pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.clone()),
@@ -393,7 +381,6 @@ async fn try_native_responses(
             response_headers,
             started,
             config.web_search_backend,
-            show_thinking_enabled(config),
             pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.as_str()),
@@ -415,13 +402,11 @@ fn native_hosted_call_is_local(call: &NativeToolCall, config: &AppConfig) -> boo
 async fn buffer_native_sse(
     response: reqwest::Response,
     response_id: &str,
-    present_reasoning_summary: bool,
 ) -> Result<(Vec<u8>, NativeResponseStreamInspection), reqwest::Error> {
     use futures_util::StreamExt;
 
     let mut upstream = response.bytes_stream();
-    let mut relay = NativeResponseSseRelay::new(response_id.to_owned())
-        .with_reasoning_summary_presentation(present_reasoning_summary);
+    let mut relay = NativeResponseSseRelay::new(response_id.to_owned());
     let mut buffered = Vec::new();
     while let Some(next) = upstream.next().await {
         let chunk = next?;
@@ -476,16 +461,7 @@ async fn native_hosted_tool_loop(
             );
         }
     };
-    let pending = match state.native_pending_tool_groups.continuation_for(input) {
-        Ok(pending) => pending,
-        Err(error) => {
-            record_native_continuation_rejection(state, &error).await;
-            return native_pending_error_response(error);
-        }
-    };
-    if let Some(continuation) = pending.as_ref() {
-        payload["input"] = Value::Array(continuation.merged_input.clone());
-    }
+    let pending = resolve_native_pending_input(state, &id, input, &mut payload).await;
     let reconciled_namespaces = reconcile_grouped_tool_namespaces(&mut payload);
     record_namespace_reconciliation(state, &id, &reconciled_namespaces).await;
     let repaired_schemas = repair_provider_tool_schemas(&mut payload);
@@ -566,7 +542,7 @@ async fn native_hosted_tool_loop(
                 passthrough: passthrough.clone(),
             },
             Some(input),
-            native_upstream_payload(&payload, should_adapt_tool_protocol(&config.upstream, model)),
+            payload.clone(),
         )
         .await;
         let response = match upstream {
@@ -626,7 +602,7 @@ async fn native_hosted_tool_loop(
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/event-stream"));
         let (body, output_items, completed, usage) = if is_sse {
-            match buffer_native_sse(response, &id, show_thinking_enabled(config)).await {
+            match buffer_native_sse(response, &id).await {
                 Ok((bytes, inspection)) => {
                     if inspection.output_items_incomplete {
                         let detail = json!({
@@ -1010,31 +986,11 @@ async fn native_hosted_client_tool_group(
         pending,
     } = params;
     if completed {
-        // The client only ever saw this turn, so the retained group is anchored
-        // on the client-visible input. Items CodeSeeX injected earlier in this
-        // same hosted loop stay out of that anchor: the client cannot replay
-        // what it never received.
-        let authoritative_input = input
-            .get("input")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if let Err(error) = retain_native_pending_tool_group(
-            state,
-            id,
-            input,
-            &authoritative_input,
-            injected_items,
-            group,
-        )
-        .await
-        {
-            let detail = json!({ "id": id, "error": error.message() });
-            let _ = state
-                .store
-                .finish_request(id, RequestStatus::Failed, None, Some(&detail))
-                .await;
-            return native_pending_error_response(error);
+        // CodeSeeX owns only the hosted rounds it ran itself: they are the one
+        // part of this turn Codex never saw and cannot replay. Nothing else
+        // about the client's conversation is retained or inspected.
+        if !injected_items.is_empty() {
+            retain_native_pending_tool_group(state, id, input, injected_items, group).await;
         }
         if let Some(continuation) = pending {
             state
@@ -1227,78 +1183,6 @@ fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, 
     Ok(Value::Object(object))
 }
 
-/// The upstream boundary for the client-facing reasoning presentation.
-///
-/// The native relay presents provider `reasoning_text` as the summary Codex
-/// renders. DeepSeek's thinking mode then requires the text back in
-/// `reasoning_text` on the next call, so the presentation is undone here before
-/// a replay reaches upstream. The mapping is read from the item itself, so it
-/// holds for every replayed item, including the ones Codex re-serializes
-/// without the provider item id.
-fn native_upstream_payload(payload: &Value, restore_reasoning_text: bool) -> Value {
-    let mut payload = payload.clone();
-    let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
-        return payload;
-    };
-    // Display-only artifacts exist for the conversation view only; they are
-    // never part of the provider's conversation, for any upstream.
-    items.retain(|item| !is_display_only_item(item));
-    if !restore_reasoning_text {
-        return payload;
-    }
-    for item in items.iter_mut() {
-        restore_reasoning_text_field(item);
-    }
-    payload
-}
-
-/// Puts a presented summary back into the provider's own `reasoning_text`
-/// content and drops the summary CodeSeeX added, so a thinking-mode replay
-/// always carries the text DeepSeek requires.
-fn restore_reasoning_text_field(item: &mut Value) {
-    if !item.is_object() || item.get("type").and_then(Value::as_str) != Some("reasoning") {
-        return;
-    }
-    let summary_text = item
-        .get("summary")
-        .and_then(Value::as_array)
-        .map(|parts| parts.iter().map(summary_part_text).collect::<String>())
-        .unwrap_or_default();
-    let content_text = item
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|parts| {
-            parts
-                .iter()
-                .filter(|part| {
-                    part.get("type").and_then(Value::as_str) == Some("reasoning_text")
-                })
-                .map(summary_part_text)
-                .collect::<String>()
-        })
-        .unwrap_or_default();
-    if content_text.is_empty() {
-        if summary_text.is_empty() {
-            return;
-        }
-        item["content"] = json!([{ "type": "reasoning_text", "text": summary_text }]);
-        item["summary"] = Value::Array(Vec::new());
-        return;
-    }
-    // Keep a provider-authored summary when it is not the presentation CodeSeeX
-    // added; only an exact duplicate of the reasoning text is dropped.
-    if content_text == summary_text {
-        item["summary"] = Value::Array(Vec::new());
-    }
-}
-
-fn summary_part_text(part: &Value) -> String {
-    part.get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
 async fn native_upstream_status_failure(
     state: &ProxyState,
     id: &str,
@@ -1318,7 +1202,7 @@ async fn native_upstream_status_failure(
                 "requested_model": requested_model,
                 "model": model,
                 "upstream_error": upstream_error_detail(body_json.as_ref(), &bytes),
-                "pending_tool_group_retained": pending.is_some()
+                "hosted_round_replayed": pending.is_some()
             });
             let _ = state
                 .store
@@ -1343,7 +1227,7 @@ async fn native_upstream_status_failure(
                 "requested_model": requested_model,
                 "model": model,
                 "error": error.to_string(),
-                "pending_tool_group_retained": pending.is_some()
+                "hosted_round_replayed": pending.is_some()
             });
             let _ = state
                 .store
@@ -1380,7 +1264,6 @@ async fn native_non_streaming_response(
     response_headers: HeaderMap,
     started: std::time::Instant,
     web_search_backend: WebSearchBackend,
-    present_reasoning_summary: bool,
     settle_pending_response_id: Option<&str>,
 ) -> axum::response::Response {
     let bytes = match response.bytes().await {
@@ -1462,32 +1345,6 @@ async fn native_non_streaming_response(
     };
     let response_completed = native.get("status").and_then(Value::as_str) == Some("completed");
     if response_completed {
-        if let Some(group) = tool_group.as_ref() {
-            let authoritative_input = payload
-                .get("input")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            // This path never executes a hosted round itself, so the stored
-            // group carried no CodeSeeX-injected input.
-            if let Err(error) = retain_native_pending_tool_group(
-                state,
-                id,
-                input,
-                &authoritative_input,
-                Vec::new(),
-                group,
-            )
-            .await
-            {
-                let detail = json!({ "id": id, "error": error.message() });
-                let _ = state
-                    .store
-                    .finish_request(id, RequestStatus::Failed, None, Some(&detail))
-                    .await;
-                return native_pending_error_response(error);
-            }
-        }
         if let Some(pending_response_id) = settle_pending_response_id {
             state.native_pending_tool_groups.settle(pending_response_id);
         }
@@ -1547,13 +1404,7 @@ async fn native_non_streaming_response(
             )),
         )
         .await;
-    // Only the client copy carries the reasoning presentation: the retained
-    // group and the stored response must keep the provider's own item shape.
-    let mut client_response = native;
-    if present_reasoning_summary {
-        present_reasoning_summary_in_response(&mut client_response);
-    }
-    json_response(client_response)
+    json_response(native)
 }
 
 struct NativeStreamingResponseParams {
@@ -1567,7 +1418,6 @@ struct NativeStreamingResponseParams {
     content_type: Option<HeaderValue>,
     upstream_started: std::time::Instant,
     web_search_backend: WebSearchBackend,
-    present_reasoning_summary: bool,
     settle_pending_response_id: Option<String>,
 }
 
@@ -1583,7 +1433,6 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         content_type,
         upstream_started,
         web_search_backend,
-        present_reasoning_summary,
         settle_pending_response_id,
     } = params;
     let cancelled = register_streaming_response(&response_id);
@@ -1593,8 +1442,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         async_stream::try_stream! {
             let _stream_guard = guard;
             let mut upstream = response.bytes_stream();
-            let mut relay = NativeResponseSseRelay::new(response_id.clone())
-                .with_reasoning_summary_presentation(present_reasoning_summary);
+            let mut relay = NativeResponseSseRelay::new(response_id.clone());
             loop {
                 tokio::select! {
                     _ = cancelled.cancelled() => {
@@ -1650,7 +1498,6 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
             let inspection = relay.inspection().clone();
             let mut finalization = native_stream_finalization(&inspection, streaming_response_cancelled(&cancelled));
             let mut provider_tool_calls = 0_usize;
-            let mut pending_tool_group_retained = false;
             let mut tool_group_issue = None;
             if finalization == NativeStreamFinalization::Completed {
                 if inspection.output_items_incomplete {
@@ -1662,32 +1509,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                 } else {
                     let native_output = json!({ "output": inspection.output_items.clone() });
                     match native_tool_call_group_from_response(&native_output) {
-                        Ok(Some(group)) => {
-                            provider_tool_calls = group.calls.len();
-                            // The streamed path never executes a hosted round
-                            // itself, so the stored group carried none either.
-                            let authoritative_input = payload
-                                .get("input")
-                                .and_then(Value::as_array)
-                                .cloned()
-                                .unwrap_or_default();
-                            match retain_native_pending_tool_group(
-                                &state,
-                                &response_id,
-                                &original_request,
-                                &authoritative_input,
-                                Vec::new(),
-                                &group,
-                            )
-                            .await
-                            {
-                                Ok(()) => pending_tool_group_retained = true,
-                                Err(error) => {
-                                    finalization = NativeStreamFinalization::Failed;
-                                    tool_group_issue = Some(error.message());
-                                }
-                            }
-                        }
+                        Ok(Some(group)) => provider_tool_calls = group.calls.len(),
                         Ok(None) => {}
                         Err(error) => {
                             finalization = NativeStreamFinalization::Failed;
@@ -1719,7 +1541,6 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                 "output_items_bytes": inspection.output_items_bytes,
                 "output_items_incomplete": inspection.output_items_incomplete,
                 "provider_tool_calls": provider_tool_calls,
-                "pending_tool_group_retained": pending_tool_group_retained,
                 "tool_group_issue": tool_group_issue
             });
             let _ = state.store.record_event(
@@ -1804,68 +1625,84 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
     )
 }
 
-fn native_pending_error_response(error: NativePendingError) -> axum::response::Response {
-    json_error(StatusCode::BAD_REQUEST, error.code(), error.message())
+/// Replays the hosted rounds CodeSeeX executed inside a previous turn.
+///
+/// The client's own items are the base of the request and are copied through
+/// untouched; only CodeSeeX's own rounds are put back. Every outcome is
+/// recorded, so a round that could not be replayed is visible in the event log
+/// instead of silently changing what the provider sees.
+async fn resolve_native_pending_input(
+    state: &ProxyState,
+    id: &str,
+    input: &Value,
+    payload: &mut Value,
+) -> Option<NativePendingContinuation> {
+    match state.native_pending_tool_groups.continuation_for(input) {
+        None => {
+            if !state.native_pending_tool_groups.has_round_for(input) {
+                return None;
+            }
+            let _ = state
+                .store
+                .record_event(
+                    "warn",
+                    "native_pending_round_not_replayed",
+                    "CodeSeeX retained a hosted tool round for this session, but this request does not continue it. The request was forwarded unchanged, so the provider does not see that round again.",
+                    Some(&json!({ "id": id })),
+                )
+                .await;
+            None
+        }
+        Some(continuation) => {
+            payload["input"] = Value::Array(continuation.merged_input.clone());
+            let _ = state
+                .store
+                .record_event(
+                    "info",
+                    "native_pending_round_replayed",
+                    "CodeSeeX replayed the hosted tool round it executed inside this turn.",
+                    Some(&json!({
+                        "id": id,
+                        "injected_rounds": continuation.injected_items.len(),
+                    })),
+                )
+                .await;
+            Some(continuation)
+        }
+    }
 }
 
-/// Every rejected native continuation is recorded, not only the ones that carry
-/// a structured mismatch detail. Otherwise a client sees a bare 400 and the
-/// event log stays empty, which leaves an operator nothing to act on.
-async fn record_native_continuation_rejection(state: &ProxyState, error: &NativePendingError) {
-    let message = error.message();
-    let detail = json!({
-        "code": error.code(),
-        "message": message,
-        "diagnostic": error.diagnostic(),
-    });
-    let _ = state
-        .store
-        .record_event(
-            "warn",
-            "native_pending_continuation_rejected",
-            &message,
-            Some(&detail),
-        )
-        .await;
-}
-
-/// Registers exactly the provider output group that Codex observed, plus the
-/// hosted rounds CodeSeeX executed for it. This state stays only in RAM and is
-/// used solely to reject partial/out-of-order client tool outputs on the
-/// immediate full-replay continuation. The caller supplies the input prefix the
-/// client is expected to replay, so it must be the client-visible history and
-/// never a payload CodeSeeX extended locally; injected rounds travel separately
-/// so the anchor stays client-visible.
+/// Remembers the hosted rounds CodeSeeX executed inside this turn.
+///
+/// They are the only part of the turn Codex never received, so they are the
+/// only part worth retaining: the next request gets them spliced back into the
+/// client's own items. The state stays in RAM and is advisory; losing it costs
+/// the replayed round, never the turn.
 async fn retain_native_pending_tool_group(
     state: &ProxyState,
     response_id: &str,
     original_request: &Value,
-    authoritative_input: &[Value],
     injected_items: Vec<NativeInjectedItems>,
     group: &NativeToolCallGroup,
-) -> Result<(), NativePendingError> {
-    let pending = PendingNativeToolGroup::new(
-        response_id,
-        original_request,
-        authoritative_input.to_vec(),
-        injected_items,
-        group.provider_output.clone(),
-        group.provider_output.clone(),
-        Vec::new(),
-        group.calls.clone(),
-    );
+) {
+    let client_call_ids = group
+        .calls
+        .iter()
+        .map(|call| call.call_id.clone())
+        .collect::<Vec<_>>();
+    let pending =
+        PendingNativeToolGroup::new(response_id, original_request, injected_items, client_call_ids);
     let pending_diagnostic = pending.diagnostic();
-    state.native_pending_tool_groups.register(pending)?;
+    state.native_pending_tool_groups.register(pending);
     let _ = state
         .store
         .record_event(
             "info",
             "native_pending_tool_group",
-            "Native Responses retained a complete client tool group in RAM.",
+            "CodeSeeX retained the hosted tool round it executed inside this turn.",
             Some(&json!({ "id": response_id, "group": pending_diagnostic })),
         )
         .await;
-    Ok(())
 }
 
 fn native_transport_diagnostic(
@@ -1896,8 +1733,7 @@ fn native_transport_diagnostic(
             "previous_response_id_forwarded": payload.get("previous_response_id").is_some()
         },
         "pending_continuation": pending.map(|value| json!({
-            "client_output_count": value.client_output_count,
-            "local_output_count": value.local_output_count,
+            "replayed_round_count": value.injected_items.len(),
             "injected_item_count": value
                 .injected_items
                 .iter()
@@ -1933,8 +1769,6 @@ fn web_search_backend_label(backend: WebSearchBackend) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_coordinator::PendingNativeToolGroup;
-    use crate::native_responses::{NativeToolCall, NativeToolCallKind};
     use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
@@ -2002,58 +1836,6 @@ mod tests {
             "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_stream_1\"}}\n\n",
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"provider_stream_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":5},\"output_tokens\":1,\"total_tokens\":8}}}\n\n"
-        );
-        (
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            bytes.to_owned(),
-        )
-            .into_response()
-    }
-
-    async fn fake_native_sse_failed(
-        State(capture): State<Capture>,
-        Json(payload): Json<Value>,
-    ) -> axum::response::Response {
-        capture.requests.lock().expect("capture lock").push(payload);
-        let bytes = concat!(
-            "event: response.created\n",
-            "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_stream_failed_1\"}}\n\n",
-            "event: response.failed\n",
-            "data: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"id\":\"provider_stream_failed_1\",\"status\":\"failed\"}}\n\n"
-        );
-        (
-            [(header::CONTENT_TYPE, "text/event-stream")],
-            bytes.to_owned(),
-        )
-            .into_response()
-    }
-
-    /// A provider turn that streams its thinking the way DeepSeek does: as
-    /// `reasoning_text` content, with an empty `summary`.
-    async fn fake_native_sse_reasoning(
-        State(capture): State<Capture>,
-        Json(payload): Json<Value>,
-    ) -> axum::response::Response {
-        capture.requests.lock().expect("capture lock").push(payload);
-        let bytes = concat!(
-            "event: response.created\n",
-            "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_reasoning_1\"}}\n\n",
-            "event: response.output_item.added\n",
-            "data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"response_id\":\"provider_reasoning_1\",\"output_index\":0,\"item\":{\"id\":\"rs_provider\",\"type\":\"reasoning\",\"status\":\"in_progress\",\"content\":[],\"summary\":[]}}\n\n",
-            "event: response.content_part.added\n",
-            "data: {\"type\":\"response.content_part.added\",\"sequence_number\":3,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"reasoning_text\",\"text\":\"\"}}\n\n",
-            "event: response.reasoning_text.delta\n",
-            "data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":4,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"delta\":\"step one \"}\n\n",
-            "event: response.reasoning_text.delta\n",
-            "data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":5,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"delta\":\"step two\"}\n\n",
-            "event: response.reasoning_text.done\n",
-            "data: {\"type\":\"response.reasoning_text.done\",\"sequence_number\":6,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"text\":\"step one step two\"}\n\n",
-            "event: response.output_item.done\n",
-            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":7,\"response_id\":\"provider_reasoning_1\",\"output_index\":0,\"item\":{\"id\":\"rs_provider\",\"type\":\"reasoning\",\"status\":\"completed\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"step one step two\"}],\"summary\":[],\"encrypted_content\":\"blob\"}}\n\n",
-            "event: response.output_item.done\n",
-            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":8,\"response_id\":\"provider_reasoning_1\",\"output_index\":1,\"item\":{\"id\":\"msg_provider\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"42\",\"annotations\":[]}]}}\n\n",
-            "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"sequence_number\":9,\"response\":{\"id\":\"provider_reasoning_1\",\"status\":\"completed\",\"output\":[{\"id\":\"rs_provider\",\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"step one step two\"}],\"summary\":[],\"encrypted_content\":\"blob\"},{\"id\":\"msg_provider\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"42\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":7,\"output_tokens\":2,\"total_tokens\":9}}}\n\n"
         );
         (
             [(header::CONTENT_TYPE, "text/event-stream")],
@@ -2141,40 +1923,6 @@ mod tests {
             "usage": { "input_tokens": 3, "output_tokens": 1, "total_tokens": 4 }
         }))
     }
-    async fn fake_native_client_tool_turn_failed(
-        State(capture): State<Capture>,
-        Json(payload): Json<Value>,
-    ) -> Json<Value> {
-        let call_count = {
-            let mut requests = capture.requests.lock().expect("capture lock");
-            requests.push(payload);
-            requests.len()
-        };
-        if call_count == 1 {
-            return Json(json!({
-                "id": "provider_tool_failed_1",
-                "object": "response",
-                "model": "deepseek-v4-flash",
-                "status": "completed",
-                "output": [{
-                    "type": "function_call",
-                    "id": "fc_native_failed_1",
-                    "call_id": "call_native_failed_1",
-                    "name": "shell_command",
-                    "arguments": "{}",
-                    "status": "completed"
-                }]
-            }));
-        }
-        Json(json!({
-            "id": "provider_tool_failed_2",
-            "object": "response",
-            "model": "deepseek-v4-flash",
-            "status": "failed",
-            "output": []
-        }))
-    }
-
     async fn fake_native_hosted_tool_turn(
         State(capture): State<Capture>,
         Json(payload): Json<Value>,
@@ -2530,113 +2278,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_stream_presents_reasoning_as_a_summary_and_keeps_the_provider_shape() {
-        let capture = Capture::default();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/responses", post(fake_native_sse_reasoning))
-            .with_state(capture.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let data_dir = temp_data_dir("reasoning-mirror");
-        let config = config_for_fake(data_dir.clone(), address);
-        let store = Store::open(&data_dir).await.unwrap();
-        let state = ProxyState::for_test(config.clone(), store);
-
-        let first = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &request("resp_native_reasoning", true, json!([])),
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("native streaming response");
-        let body = axum::body::to_bytes(first.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let stream = String::from_utf8(body.to_vec()).unwrap();
-
-        // Codex receives the thinking as the summary it renders, and never as
-        // raw reasoning content it would drop.
-        assert!(stream.contains("event: response.reasoning_summary_part.added"));
-        assert!(stream.contains("event: response.reasoning_summary_text.delta"));
-        assert!(stream.contains("event: response.reasoning_summary_text.done"));
-        assert!(!stream.contains("event: response.reasoning_text.delta"));
-        assert!(!stream.contains("\"type\":\"reasoning_text\""));
-        assert!(stream
-            .contains("\"summary\":[{\"text\":\"step one step two\",\"type\":\"summary_text\"}]"));
-        assert!(!stream.contains("[DONE]"));
-
-        // Codex replays the item as a summary on the following turn, preceded
-        // by the readable thinking message CodeSeeX added. Codex cannot carry
-        // the display-only marker on a `message`, so only the text is left.
-        let mut replay = request("resp_native_reasoning_second", true, json!([]));
-        replay["input"] = json!([
-            { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "again" }] },
-            {
-                "type": "message",
-                "id": "msg_display",
-                "role": "assistant",
-                "phase": "commentary",
-                "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> step one step two" }]
-            },
-            {
-                "type": "reasoning",
-                "id": "rs_provider",
-                "summary": [{ "type": "summary_text", "text": "step one step two" }],
-                "content": null,
-                "encrypted_content": "blob"
-            }
-        ]);
-        let second = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &replay,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("second native response");
-        let _ = axum::body::to_bytes(second.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-
-        // The presentation is undone: upstream gets the provider's own shape.
-        let requests = capture.requests.lock().expect("capture lock");
-        let forwarded = requests.last().expect("second upstream request");
-        let replayed_reasoning = forwarded["input"]
-            .as_array()
-            .expect("forwarded input array")
-            .iter()
-            .find(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
-            .expect("the replayed reasoning item still travels");
-        assert_eq!(replayed_reasoning["summary"], json!([]));
-        assert_eq!(
-            replayed_reasoning["content"][0]["type"],
-            json!("reasoning_text")
-        );
-        assert_eq!(
-            replayed_reasoning["content"][0]["text"],
-            json!("step one step two")
-        );
-        assert_eq!(replayed_reasoning["encrypted_content"], json!("blob"));
-        assert!(
-            !forwarded["input"]
-                .as_array()
-                .expect("forwarded input array")
-                .iter()
-                .any(is_display_only_item),
-            "the display-only thinking message must never reach upstream"
-        );
-        drop(requests);
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
     async fn sub_agent_thread_sharing_the_parent_anchor_dispatches_as_a_new_conversation() {
         let capture = Capture::default();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -2669,10 +2310,14 @@ mod tests {
         let _ = axum::body::to_bytes(parent_response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            0,
+            "a turn CodeSeeX did not execute itself retains nothing"
+        );
 
         // A spawned thread reuses the parent's prompt_cache_key but is its own
-        // conversation: it answers none of the parent's pending tool calls.
+        // conversation: it answers none of the parent's tool calls.
         let mut child = request("resp_child_turn", true, tools);
         child["previous_response_id"] = Value::Null;
         child["input"] = json!([{
@@ -2700,84 +2345,6 @@ mod tests {
             2,
             "the sub-agent turn must reach upstream instead of failing closed"
         );
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
-    async fn native_stream_registers_complete_client_tool_group_before_partial_replay() {
-        let capture = Capture::default();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/responses", post(fake_native_sse_client_tool_group))
-            .with_state(capture.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let data_dir = temp_data_dir("streaming-tool-continuation");
-        let config = config_for_fake(data_dir.clone(), address);
-        let store = Store::open(&data_dir).await.unwrap();
-        let state = ProxyState::for_test(config.clone(), store);
-        let tools = json!([
-            { "type": "function", "function": { "name": "shell_command", "parameters": { "type": "object" } } },
-            { "type": "function", "function": { "name": "apply_patch", "parameters": { "type": "object" } } }
-        ]);
-        let first_input = request("resp_native_stream_tool_first", true, tools.clone());
-        let first = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &first_input,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("streaming native response");
-        let body = axum::body::to_bytes(first.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let stream = String::from_utf8(body.to_vec()).unwrap();
-        assert!(stream.contains("call_stream_shell"));
-        assert!(stream.contains("call_stream_patch"));
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
-
-        let shell_call = json!({
-            "type": "function_call",
-            "id": "fc_stream_1",
-            "call_id": "call_stream_shell",
-            "name": "shell_command",
-            "arguments": "{}",
-            "status": "completed"
-        });
-        let patch_call = json!({
-            "type": "custom_tool_call",
-            "id": "ctc_stream_1",
-            "call_id": "call_stream_patch",
-            "name": "apply_patch",
-            "input": "*** Begin Patch\n*** End Patch",
-            "status": "completed"
-        });
-        let mut continuation = request("resp_native_stream_tool_second", false, tools);
-        continuation["previous_response_id"] = json!("resp_native_stream_tool_first");
-        continuation["input"] = json!([
-            first_input["input"][0].clone(),
-            shell_call,
-            patch_call,
-            { "type": "function_call_output", "call_id": "call_stream_shell", "output": "done" }
-        ]);
-        let partial = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &continuation,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("partial replay must be rejected locally");
-        assert_eq!(partial.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
-        assert_eq!(capture.requests.lock().expect("capture lock").len(), 1);
-
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -2818,7 +2385,11 @@ mod tests {
             .unwrap();
         let first_response = serde_json::from_slice::<Value>(&first_body).unwrap();
         assert_eq!(first_response["id"], "resp_native_tool_first");
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            0,
+            "the client's own turn is forwarded as it is, with nothing retained"
+        );
 
         let provider_call = json!({
             "type": "function_call",
@@ -2877,402 +2448,6 @@ mod tests {
             "current authoritative instructions"
         );
         drop(captured);
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
-    async fn failed_non_streaming_continuation_keeps_prior_tool_group_pending() {
-        let capture = Capture::default();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/responses", post(fake_native_client_tool_turn_failed))
-            .with_state(capture);
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let data_dir = temp_data_dir("failed-tool-continuation");
-        let config = config_for_fake(data_dir.clone(), address);
-        let store = Store::open(&data_dir).await.unwrap();
-        let state = ProxyState::for_test(config.clone(), store);
-        let tool = json!({
-            "type": "function",
-            "name": "shell_command",
-            "parameters": { "type": "object", "properties": {} }
-        });
-        let first_input = request("resp_native_failed_first", false, json!([tool.clone()]));
-        let first = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &first_input,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("first native response");
-        let _ = axum::body::to_bytes(first.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
-
-        let mut continuation = request("resp_native_failed_second", false, json!([tool]));
-        continuation["previous_response_id"] = json!("resp_native_failed_first");
-        continuation["input"] = json!([
-            first_input["input"][0].clone(),
-            {
-                "type": "function_call",
-                "id": "fc_native_failed_1",
-                "call_id": "call_native_failed_1",
-                "name": "shell_command",
-                "arguments": "{}",
-                "status": "completed"
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "call_native_failed_1",
-                "output": "done"
-            }
-        ]);
-        let second = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &continuation,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("failed native response is relayed");
-        let body = axum::body::to_bytes(second.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap()["status"],
-            "failed"
-        );
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
-
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
-    async fn failed_streaming_continuation_keeps_prior_tool_group_pending() {
-        let capture = Capture::default();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/responses", post(fake_native_sse_failed))
-            .with_state(capture);
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let data_dir = temp_data_dir("failed-streaming-tool-continuation");
-        let config = config_for_fake(data_dir.clone(), address);
-        let store = Store::open(&data_dir).await.unwrap();
-        let state = ProxyState::for_test(config.clone(), store);
-        let tool = json!({
-            "type": "function",
-            "name": "shell_command",
-            "parameters": { "type": "object", "properties": {} }
-        });
-        let first_input = request(
-            "resp_native_stream_pending_first",
-            false,
-            json!([tool.clone()]),
-        );
-        let provider_call = json!({
-            "type": "function_call",
-            "id": "fc_native_stream_pending_1",
-            "call_id": "call_native_stream_pending_1",
-            "name": "shell_command",
-            "arguments": "{}",
-            "status": "completed"
-        });
-        state
-            .native_pending_tool_groups
-            .register(PendingNativeToolGroup::new(
-                "resp_native_stream_pending_first",
-                &first_input,
-                first_input["input"].as_array().unwrap().clone(),
-                Vec::new(),
-                vec![provider_call.clone()],
-                vec![provider_call.clone()],
-                Vec::new(),
-                vec![NativeToolCall {
-                    call_id: "call_native_stream_pending_1".to_owned(),
-                    name: "shell_command".to_owned(),
-                    input: "{}".to_owned(),
-                    kind: NativeToolCallKind::Function,
-                }],
-            ))
-            .unwrap();
-        let mut continuation = request("resp_native_stream_pending_second", true, json!([tool]));
-        continuation["previous_response_id"] = json!("resp_native_stream_pending_first");
-        continuation["input"] = json!([
-            first_input["input"][0].clone(),
-            provider_call,
-            {
-                "type": "function_call_output",
-                "call_id": "call_native_stream_pending_1",
-                "output": "done"
-            }
-        ]);
-        let response = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &continuation,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("streaming failure is relayed");
-        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
-
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
-    async fn codex_normalized_client_tool_replay_still_dispatches_the_retained_group() {
-        let capture = Capture::default();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/responses", post(fake_native_response))
-            .with_state(capture.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let data_dir = temp_data_dir("normalized-client-tool-replay");
-        let config = config_for_fake(data_dir.clone(), address);
-        let store = Store::open(&data_dir).await.unwrap();
-        let state = ProxyState::for_test(config.clone(), store);
-        let tool = json!({
-            "type": "function",
-            "name": "exec_command",
-            "parameters": { "type": "object", "properties": {} }
-        });
-        let first_input = request("resp_native_normalized_first", false, json!([tool.clone()]));
-        // DeepSeek returns bare UUID item ids and a `status` on function calls. Codex
-        // drops both before it replays history, so the continuation check must accept
-        // that normalized copy.
-        let provider_message = json!({
-            "type": "message",
-            "id": "c53e120a-544c-49fc-8314-6ebf26c2a122",
-            "role": "assistant",
-            "content": [{ "type": "output_text", "text": "working" }]
-        });
-        let provider_call = json!({
-            "type": "function_call",
-            "id": "2997568c-4abb-4010-999b-7a914321067a",
-            "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
-            "name": "exec_command",
-            "arguments": "{\"cmd\":\"pwsh\"}",
-            "status": "completed"
-        });
-        state
-            .native_pending_tool_groups
-            .register(PendingNativeToolGroup::new(
-                "resp_native_normalized_first",
-                &first_input,
-                first_input["input"].as_array().unwrap().clone(),
-                Vec::new(),
-                vec![provider_message.clone(), provider_call.clone()],
-                vec![provider_message, provider_call],
-                Vec::new(),
-                vec![NativeToolCall {
-                    call_id: "call_00_mDEXZuYtEFUSlPgouz1p8384".to_owned(),
-                    name: "exec_command".to_owned(),
-                    input: "{\"cmd\":\"pwsh\"}".to_owned(),
-                    kind: NativeToolCallKind::Function,
-                }],
-            ))
-            .unwrap();
-        let mut continuation = request("resp_native_normalized_second", false, json!([tool]));
-        continuation["previous_response_id"] = json!("resp_native_normalized_first");
-        continuation["input"] = json!([
-            first_input["input"][0].clone(),
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": "working" }]
-            },
-            {
-                "type": "function_call",
-                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
-                "name": "exec_command",
-                "arguments": "{\"cmd\":\"pwsh\"}"
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
-                "output": "done"
-            }
-        ]);
-
-        let response = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &continuation,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("the normalized Codex replay must still continue");
-        assert_eq!(response.status(), StatusCode::OK);
-        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert_eq!(
-            state.native_pending_tool_groups.pending_count(),
-            0,
-            "a dispatched continuation settles the retained group"
-        );
-        let requests = capture.requests.lock().expect("capture lock");
-        let sent = requests
-            .last()
-            .expect("the continuation reached the provider");
-        let items = sent["input"].as_array().expect("forwarded input");
-        assert!(
-            items.iter().any(|item| {
-                item.get("id").and_then(Value::as_str)
-                    == Some("2997568c-4abb-4010-999b-7a914321067a")
-            }),
-            "upstream must keep CodeSeeX's stored provider item, not the client's normalized copy"
-        );
-
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
-    async fn codex_replay_of_the_readable_thinking_message_does_not_break_the_retained_group() {
-        // Live regression: with the readable thinking chain enabled, CodeSeeX
-        // adds `**DeepSeek Thinking**` as an assistant message before the
-        // provider's reasoning item. Codex cannot carry the display-only marker
-        // on a `message`, so by the time it replays history the text is the only
-        // trace left. That replay must still continue the retained tool group
-        // instead of failing closed.
-        let capture = Capture::default();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/responses", post(fake_native_response))
-            .with_state(capture.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let data_dir = temp_data_dir("display-thinking-continuation");
-        let config = config_for_fake(data_dir.clone(), address);
-        let store = Store::open(&data_dir).await.unwrap();
-        let state = ProxyState::for_test(config.clone(), store);
-        let tool = json!({
-            "type": "function",
-            "name": "exec_command",
-            "parameters": { "type": "object", "properties": {} }
-        });
-        let first_input = request("resp_native_thinking_first", false, json!([tool.clone()]));
-        let provider_reasoning = json!({
-            "type": "reasoning",
-            "id": "81779b52-d903-4292-8403-deb482a70054",
-            "summary": [{ "type": "summary_text", "text": "thinking" }],
-            "content": null,
-            "encrypted_content": "blob"
-        });
-        let provider_call = json!({
-            "type": "function_call",
-            "id": "b137f544-a01b-4919-b44d-2e5518bf7b7c",
-            "call_id": "call_00_TmpU4u8YPxrcsHPS2Ef48629",
-            "name": "exec_command",
-            "arguments": "{\"cmd\":\"pwsh\"}",
-            "status": "completed"
-        });
-        state
-            .native_pending_tool_groups
-            .register(PendingNativeToolGroup::new(
-                "resp_native_thinking_first",
-                &first_input,
-                first_input["input"].as_array().unwrap().clone(),
-                Vec::new(),
-                vec![provider_reasoning.clone(), provider_call.clone()],
-                vec![provider_reasoning, provider_call],
-                Vec::new(),
-                vec![NativeToolCall {
-                    call_id: "call_00_TmpU4u8YPxrcsHPS2Ef48629".to_owned(),
-                    name: "exec_command".to_owned(),
-                    input: "{\"cmd\":\"pwsh\"}".to_owned(),
-                    kind: NativeToolCallKind::Function,
-                }],
-            ))
-            .unwrap();
-        let mut continuation = request("resp_native_thinking_second", false, json!([tool]));
-        continuation["previous_response_id"] = json!("resp_native_thinking_first");
-        continuation["input"] = json!([
-            first_input["input"][0].clone(),
-            {
-                "type": "message",
-                "id": "msg_66203fd4de464138bae5f9d119e4ed72",
-                "role": "assistant",
-                "content": [{
-                    "type": "output_text",
-                    "text": "**DeepSeek Thinking**\n> thinking"
-                }]
-            },
-            {
-                "type": "reasoning",
-                "summary": [{ "type": "summary_text", "text": "thinking" }],
-                "content": null,
-                "encrypted_content": "blob"
-            },
-            {
-                "type": "function_call",
-                "call_id": "call_00_TmpU4u8YPxrcsHPS2Ef48629",
-                "name": "exec_command",
-                "arguments": "{\"cmd\":\"pwsh\"}"
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "call_00_TmpU4u8YPxrcsHPS2Ef48629",
-                "output": "done"
-            }
-        ]);
-
-        let response = try_native_responses(
-            &state,
-            &HeaderMap::new(),
-            &continuation,
-            &config,
-            "deepseek-v4-flash",
-            Some("deepseek-v4-flash"),
-        )
-        .await
-        .expect("the replay of the readable thinking message must still continue");
-        assert_eq!(response.status(), StatusCode::OK);
-        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert_eq!(
-            state.native_pending_tool_groups.pending_count(),
-            0,
-            "a dispatched continuation settles the retained group"
-        );
-        let requests = capture.requests.lock().expect("capture lock");
-        let sent = requests
-            .last()
-            .expect("the continuation reached the provider");
-        let items = sent["input"].as_array().expect("forwarded input");
-        assert!(
-            !items.iter().any(is_display_only_item),
-            "the readable thinking message must never reach upstream"
-        );
-        assert!(
-            items.iter().any(|item| {
-                item.get("id").and_then(Value::as_str)
-                    == Some("81779b52-d903-4292-8403-deb482a70054")
-            }),
-            "upstream must keep CodeSeeX's stored reasoning item"
-        );
-
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -3520,8 +2695,8 @@ mod tests {
         );
         assert_eq!(
             state.native_pending_tool_groups.pending_count(),
-            1,
-            "the handed-back group must stay retained for the continuation check"
+            0,
+            "CodeSeeX executes no hosted round here, so it retains nothing"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -3642,8 +2817,8 @@ mod tests {
         drop(requests);
         assert_eq!(
             state.native_pending_tool_groups.pending_count(),
-            1,
-            "the Codex-owned tool group must stay retained for the continuation check"
+            0,
+            "CodeSeeX executes no hosted round here, so it retains nothing"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -4058,76 +3233,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
-    #[test]
-    fn upstream_payload_restores_the_provider_reasoning_shape() {
-        let client_payload = json!({
-            "model": "deepseek-v4-flash",
-            "input": [
-                {
-                    "type": "reasoning",
-                    "id": "rs_presented",
-                    "summary": [{ "type": "summary_text", "text": "think" }],
-                    "content": null,
-                    "encrypted_content": "blob"
-                },
-                {
-                    "type": "reasoning",
-                    "id": "rs_provider_summary",
-                    "summary": [{ "type": "summary_text", "text": "provider summary" }],
-                    "content": [{ "type": "reasoning_text", "text": "different" }]
-                },
-                {
-                    "type": "reasoning",
-                    "id": "rs_already_native",
-                    "summary": [{ "type": "summary_text", "text": "same" }],
-                    "content": [{ "type": "reasoning_text", "text": "same" }]
-                },
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**" }]
-                },
-                { "type": "message", "role": "user", "content": "hi" }
-            ]
-        });
-
-        let upstream = native_upstream_payload(&client_payload, true);
-
-        // A presented item goes back to the shape DeepSeek's thinking mode
-        // requires on the next call.
-        assert_eq!(upstream["input"][0]["summary"], json!([]));
-        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("think"));
-        assert_eq!(
-            upstream["input"][0]["content"][0]["type"],
-            json!("reasoning_text")
-        );
-        assert_eq!(upstream["input"][0]["encrypted_content"], json!("blob"));
-        // A provider-authored summary that is not a duplicate is left alone.
-        assert_eq!(
-            upstream["input"][1]["summary"][0]["text"],
-            json!("provider summary")
-        );
-        // An exact duplicate of the reasoning text is dropped.
-        assert_eq!(upstream["input"][2]["summary"], json!([]));
-        assert_eq!(upstream["input"][2]["content"][0]["text"], json!("same"));
-        assert_eq!(upstream["input"][3]["content"], json!("hi"));
-        assert_eq!(
-            upstream["input"].as_array().unwrap().len(),
-            4,
-            "the display-only thinking message is dropped before upstream"
-        );
-        // The client-visible copy keeps the presentation.
-        assert_eq!(
-            client_payload["input"][0]["summary"][0]["text"],
-            json!("think")
-        );
-
-        // A non-DeepSeek upstream is never rewritten.
-        let untouched = native_upstream_payload(&client_payload, false);
-        assert_eq!(
-            untouched["input"][0]["summary"][0]["text"],
-            json!("think")
-        );
-        assert_eq!(untouched["input"][0]["content"], Value::Null);
-    }
 }

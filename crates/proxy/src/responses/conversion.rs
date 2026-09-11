@@ -15,7 +15,6 @@ pub(crate) fn chat_completion_to_response(
     id: &str,
     model: &str,
     chat: Value,
-    visible_thinking_enabled: bool,
 ) -> Value {
     let message = chat
         .pointer("/choices/0/message")
@@ -31,11 +30,7 @@ pub(crate) fn chat_completion_to_response(
         .unwrap_or_default();
     let mut output = Vec::new();
     if !reasoning.trim().is_empty() {
-        output.push(reasoning_response_item(
-            config,
-            reasoning,
-            visible_thinking_enabled,
-        ));
+        output.push(reasoning_response_item(config, reasoning));
     }
     output.push(json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
@@ -66,7 +61,6 @@ pub(crate) fn chat_completion_tool_calls_to_response(
     chat: Value,
     community_tools: &crate::community_tools::CommunityToolSet,
     tool_context: &crate::tool_passthrough::ToolContext,
-    visible_thinking_enabled: bool,
 ) -> Value {
     let calls = chat_tool_calls(&chat);
     let mut output = Vec::new();
@@ -75,11 +69,7 @@ pub(crate) fn chat_completion_tool_calls_to_response(
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty())
     {
-        output.push(reasoning_response_item(
-            config,
-            reasoning,
-            visible_thinking_enabled,
-        ));
+        output.push(reasoning_response_item(config, reasoning));
     }
     if let Some(text) = chat
         .pointer("/choices/0/message/content")
@@ -127,9 +117,7 @@ pub(crate) fn final_chat_turn_message(chat: &Value) -> Option<Value> {
         .pointer("/choices/0/message/reasoning_content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if (text.trim().is_empty() && reasoning_content.trim().is_empty())
-        || text_is_thinking_display_markdown(text)
-    {
+    if text.trim().is_empty() && reasoning_content.trim().is_empty() {
         return None;
     }
     let mut message = json!({
@@ -142,27 +130,9 @@ pub(crate) fn final_chat_turn_message(chat: &Value) -> Option<Value> {
     Some(message)
 }
 
-pub(crate) fn text_is_thinking_display_markdown(text: &str) -> bool {
-    text.trim_start().starts_with("**DeepSeek Thinking**")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn final_turn_message_skips_thinking_display_markdown() {
-        let chat = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "**DeepSeek Thinking**\n> hidden reasoning"
-                }
-            }]
-        });
-
-        assert!(final_chat_turn_message(&chat).is_none());
-    }
 
     #[test]
     fn final_turn_message_preserves_reasoning_content_for_next_chat_turn() {

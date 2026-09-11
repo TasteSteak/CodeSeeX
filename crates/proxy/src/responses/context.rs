@@ -988,9 +988,6 @@ fn response_output_text(response: &Value) -> Option<String> {
     let output = response.get("output")?.as_array()?;
     let mut parts = Vec::new();
     for item in output {
-        if response_item_is_display_only(item) {
-            continue;
-        }
         if item.get("type").and_then(Value::as_str) != Some("message") {
             continue;
         }
@@ -1008,33 +1005,6 @@ fn response_output_text(response: &Value) -> Option<String> {
     } else {
         Some(parts.join("\n"))
     }
-}
-
-fn response_item_is_display_only(item: &Value) -> bool {
-    item.get("codeseex_display_only").is_some()
-        || item
-            .pointer("/metadata/codeseex_display_only")
-            .and_then(Value::as_bool)
-            == Some(true)
-        || item
-            .get("content")
-            .map(content_to_text)
-            .map(|text| response_text_is_display_only(&text))
-            .unwrap_or(false)
-}
-
-fn response_text_is_display_only(text: &str) -> bool {
-    let text = text.trim();
-    if text.starts_with("**DeepSeek Thinking**")
-        || text.starts_with("\u{5df2}\u{4f7f}\u{7528}\u{5de5}\u{5177} `")
-        || text.starts_with("\u{4f7f}\u{7528}\u{5de5}\u{5177} `")
-        || (text.starts_with("\u{5df2}\u{4f7f}\u{7528} ")
-            && text.contains(" \u{4e2a}\u{5de5}\u{5177}\n`"))
-    {
-        return true;
-    }
-    text.starts_with("宸蹭娇鐢ㄥ伐鍏?`")
-        || (text.starts_with("宸蹭娇鐢?") && text.contains(" 涓伐鍏穃n`"))
 }
 
 #[cfg(test)]
@@ -1208,16 +1178,6 @@ mod tests {
     use codeseex_store::{RequestStatus, Store};
     use serde_json::json;
     use uuid::Uuid;
-
-    #[test]
-    fn display_only_detection_accepts_current_thinking_markdown() {
-        assert!(response_text_is_display_only(
-            "**DeepSeek Thinking**\n> current format"
-        ));
-        assert!(response_text_is_display_only(
-            "**DeepSeek Thinking**\n\n> legacy spaced format"
-        ));
-    }
 
     #[test]
     fn replay_keeps_leading_tool_output_for_previous_handoff_call() {

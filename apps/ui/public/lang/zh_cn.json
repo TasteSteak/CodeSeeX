@@ -222,7 +222,6 @@
   "running": "代理运行中",
   "runtimeEvent": "运行事件。",
   "runtimeStats": "运行统计",
-  "showThinking": "显示思考链",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "查看源代码",
   "sourceUnavailable": "当前版本还没有配置源代码仓库地址。",

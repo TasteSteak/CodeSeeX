@@ -12,7 +12,6 @@ use crate::tools::response_items::{
 };
 use axum::body::Bytes;
 use axum::http::{header, HeaderMap, StatusCode};
-use codeseex_core::{AppConfig, UserConfig};
 use codeseex_store::Store;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -328,13 +327,6 @@ pub(super) async fn record_apply_patch_input_micro_repair_diagnostic(
             })),
         )
         .await;
-}
-
-pub(super) fn show_thinking_enabled(config: &AppConfig) -> bool {
-    UserConfig::read_from(&config.config_path())
-        .ok()
-        .and_then(|user_config| user_config.ui.and_then(|ui| ui.show_thinking))
-        .unwrap_or(true)
 }
 
 pub(super) fn native_apply_patch_client_tool_sse_events(

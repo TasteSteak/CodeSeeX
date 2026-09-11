@@ -8,16 +8,19 @@ use crate::responses::compaction::{decode_opaque_text, encode_opaque_text};
 
 const REASONING_PREFIX: &str = "codeseex-reasoning-v1:";
 
+/// A hidden reasoning carrier.
+///
+/// The provider's reasoning text is kept only in `encrypted_content` so it can
+/// be replayed to DeepSeek on the next turn. CodeSeeX does not present it to
+/// Codex and never makes it visible: what the client shows is Codex's decision.
 pub(crate) fn reasoning_response_item(
     config: &AppConfig,
     reasoning: &str,
-    visible_summary: bool,
 ) -> Value {
     reasoning_response_item_with_id(
         config,
         &format!("rs_{}", Uuid::new_v4().simple()),
         reasoning,
-        visible_summary,
     )
 }
 
@@ -25,21 +28,12 @@ pub(crate) fn reasoning_response_item_with_id(
     config: &AppConfig,
     id: &str,
     reasoning: &str,
-    visible_summary: bool,
 ) -> Value {
     let mut item = json!({
         "id": id,
         "type": "reasoning",
         "status": "completed",
-        "summary": if visible_summary {
-            vec![json!({
-                "type": "summary_text",
-                "text": reasoning,
-                "title": "DeepSeek Thinking"
-            })]
-        } else {
-            Vec::<Value>::new()
-        },
+        "summary": Vec::<Value>::new(),
         "content": Value::Null
     });
     if let Ok(encrypted_content) = encode_reasoning_content(config, reasoning) {
@@ -267,194 +261,6 @@ pub(crate) fn hidden_reasoning_item_sse_events(
     Bytes::from(bytes)
 }
 
-pub(crate) fn reasoning_done_sse_events(
-    config: &AppConfig,
-    response_id: &str,
-    output_index: u64,
-    item_id: &str,
-    reasoning: &str,
-    sequence: &mut u64,
-) -> (Bytes, Value) {
-    let item = reasoning_response_item_with_id(config, item_id, reasoning, true);
-    let mut bytes = sse_bytes(
-        "response.reasoning_summary_text.done",
-        json!({
-            "type": "response.reasoning_summary_text.done",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "summary_index": 0,
-            "text": reasoning,
-            "sequence_number": next_sequence(sequence)
-        }),
-    )
-    .to_vec();
-    bytes.extend_from_slice(&sse_bytes(
-        "response.reasoning_summary_part.done",
-        json!({
-            "type": "response.reasoning_summary_part.done",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "summary_index": 0,
-            "part": { "type": "summary_text", "text": reasoning },
-            "sequence_number": next_sequence(sequence)
-        }),
-    ));
-    bytes.extend_from_slice(&sse_bytes(
-        "response.output_item.done",
-        json!({
-            "type": "response.output_item.done",
-            "response_id": response_id,
-            "output_index": output_index,
-            "item": item,
-            "sequence_number": next_sequence(sequence)
-        }),
-    ));
-    (Bytes::from(bytes), item)
-}
-
-pub(crate) fn thinking_display_added_sse_events(
-    response_id: &str,
-    output_index: u64,
-    item_id: &str,
-    prefix: &str,
-    sequence: &mut u64,
-) -> Bytes {
-    let item = thinking_display_stream_item(item_id, "");
-    let mut added_item = item.clone();
-    added_item["status"] = Value::String("in_progress".to_owned());
-    added_item["content"] = Value::Array(Vec::new());
-    let mut bytes = sse_bytes(
-        "response.output_item.added",
-        json!({
-            "type": "response.output_item.added",
-            "response_id": response_id,
-            "output_index": output_index,
-            "item": added_item,
-            "sequence_number": next_sequence(sequence)
-        }),
-    )
-    .to_vec();
-    bytes.extend_from_slice(&sse_bytes(
-        "response.content_part.added",
-        json!({
-            "type": "response.content_part.added",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": 0,
-            "part": { "type": "output_text", "text": "", "annotations": [] },
-            "sequence_number": next_sequence(sequence)
-        }),
-    ));
-    if !prefix.is_empty() {
-        bytes.extend_from_slice(&sse_bytes(
-            "response.output_text.delta",
-            json!({
-                "type": "response.output_text.delta",
-                "response_id": response_id,
-                "item_id": item_id,
-                "output_index": output_index,
-                "content_index": 0,
-                "delta": prefix,
-                "sequence_number": next_sequence(sequence)
-            }),
-        ));
-    }
-    Bytes::from(bytes)
-}
-
-pub(crate) fn thinking_display_prefix() -> &'static str {
-    "**DeepSeek Thinking**\n"
-}
-
-pub(crate) fn thinking_display_delta_sse_event(
-    response_id: &str,
-    output_index: u64,
-    item_id: &str,
-    delta: &str,
-    sequence: &mut u64,
-) -> Bytes {
-    sse_bytes(
-        "response.output_text.delta",
-        json!({
-            "type": "response.output_text.delta",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": 0,
-            "delta": delta,
-            "sequence_number": next_sequence(sequence)
-        }),
-    )
-}
-
-pub(crate) fn thinking_display_done_sse_events(
-    response_id: &str,
-    output_index: u64,
-    item_id: &str,
-    text: &str,
-    sequence: &mut u64,
-) -> (Bytes, Value) {
-    let item = thinking_display_stream_item(item_id, text);
-    let part = item
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|content| content.first())
-        .cloned()
-        .unwrap_or_else(|| json!({ "type": "output_text", "text": text, "annotations": [] }));
-    let mut bytes = sse_bytes(
-        "response.output_text.done",
-        json!({
-            "type": "response.output_text.done",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": 0,
-            "text": text,
-            "sequence_number": next_sequence(sequence)
-        }),
-    )
-    .to_vec();
-    bytes.extend_from_slice(&sse_bytes(
-        "response.content_part.done",
-        json!({
-            "type": "response.content_part.done",
-            "response_id": response_id,
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": 0,
-            "part": part,
-            "sequence_number": next_sequence(sequence)
-        }),
-    ));
-    bytes.extend_from_slice(&sse_bytes(
-        "response.output_item.done",
-        json!({
-            "type": "response.output_item.done",
-            "response_id": response_id,
-            "output_index": output_index,
-            "item": item,
-            "sequence_number": next_sequence(sequence)
-        }),
-    ));
-    (Bytes::from(bytes), item)
-}
-
-pub(crate) fn thinking_display_stream_item(item_id: &str, text: &str) -> Value {
-    json!({
-        "id": item_id,
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "phase": "commentary",
-        "content": [{ "type": "output_text", "text": text, "annotations": [] }],
-        "codeseex_display_only": "thinking_markdown",
-        "metadata": { "codeseex_display_only": true, "kind": "thinking_markdown" }
-    })
-}
-
 pub(crate) fn streaming_message_done_sse_events(
     response_id: &str,
     output_index: u64,
@@ -507,22 +313,6 @@ pub(crate) fn streaming_message_done_sse_events(
         }),
     ));
     (Bytes::from(bytes), item)
-}
-
-pub(crate) fn quote_thinking_delta(delta: &str, at_line_start: &mut bool) -> String {
-    let source = delta.replace("\r\n", "\n").replace('\r', "\n");
-    let mut output = String::new();
-    for ch in source.chars() {
-        if *at_line_start {
-            output.push_str("> ");
-            *at_line_start = false;
-        }
-        output.push(ch);
-        if ch == '\n' {
-            *at_line_start = true;
-        }
-    }
-    output
 }
 
 pub(crate) fn generic_output_item_sse_events(

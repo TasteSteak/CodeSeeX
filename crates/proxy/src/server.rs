@@ -11,10 +11,8 @@ use crate::http_utils::{io_result, now_seconds};
 use crate::manager_api::ensure_catalog;
 use crate::response_sse::{
     generic_output_item_sse_events, hidden_reasoning_item_sse_events, message_item_sse_events,
-    next_sequence, proxy_tool_call_sse_events, quote_thinking_delta, reasoning_done_sse_events,
-    reasoning_response_item, sse_bytes, sse_data, stream_failed_event,
-    streaming_message_done_sse_events, take_sse_frame, thinking_display_added_sse_events,
-    thinking_display_delta_sse_event, thinking_display_done_sse_events, thinking_display_prefix,
+    next_sequence, proxy_tool_call_sse_events, reasoning_response_item, sse_bytes, sse_data,
+    stream_failed_event, streaming_message_done_sse_events, take_sse_frame,
     web_search_call_sse_events,
 };
 use crate::responses::compaction::build_compaction_item;
@@ -24,7 +22,6 @@ use crate::responses::context::{
 };
 use crate::responses::conversion::{
     chat_completion_to_response, chat_completion_tool_calls_to_response, final_chat_turn_message,
-    text_is_thinking_display_markdown,
 };
 use crate::responses::stream_tool_calls::{
     collect_streaming_tool_call_deltas, insert_streaming_tool_calls, streaming_tool_calls,
@@ -103,8 +100,8 @@ use response_helpers::{
     native_apply_patch_client_tool_sse_events, prepend_response_output_items,
     record_apply_patch_input_micro_repair_diagnostic,
     record_apply_patch_input_micro_repair_diagnostics, record_client_tool_handoff_guard_stop,
-    request_completed_detail, response_id_from_input, show_thinking_enabled,
-    upstream_body_read_error_detail, upstream_error_detail, upstream_json_parse_error_detail,
+    request_completed_detail, response_id_from_input, upstream_body_read_error_detail,
+    upstream_error_detail, upstream_json_parse_error_detail,
 };
 #[cfg(test)]
 pub(crate) use response_lifecycle::resolve_compact_threshold;
@@ -1449,13 +1446,8 @@ async fn responses(
                                         );
                                     }
                                 }
-                                let mut response = chat_completion_to_response(
-                                    &config,
-                                    &id,
-                                    &model,
-                                    result.chat,
-                                    show_thinking_enabled(&config),
-                                );
+                                let mut response =
+                                    chat_completion_to_response(&config, &id, &model, result.chat);
                                 response["usage"] = result.usage;
                                 prepend_response_output_items(&mut response, result.response_items);
                                 response
@@ -1481,7 +1473,6 @@ async fn responses(
                                     result.chat,
                                     &community_tools,
                                     &external_tool_context,
-                                    show_thinking_enabled(&config),
                                 );
                                 response["usage"] = result.usage;
                                 prepend_response_output_items(&mut response, result.response_items);
@@ -1776,12 +1767,10 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 "sequence_number": next_sequence(&mut sequence)
             }));
 
-            let visible_thinking_enabled = show_thinking_enabled(&config);
             let adapt_deepseek_tool_protocol =
                 should_adapt_tool_protocol(&config.upstream, &model);
             let mut completed_tool_iterations = 0_u32;
             let mut tool_loop_diagnostics = ToolLoopDiagnostics::default();
-            let mut thinking_title_emitted = false;
             while let Some(response) = next_response.take() {
                 stop_if_cancelled!("response cancelled before streaming iteration");
                 let iteration = completed_tool_iterations;
@@ -1791,16 +1780,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 let mut turn_output_closed = false;
                 let mut turn_text = String::new();
                 let mut turn_reasoning = String::new();
-                let reasoning_item_id = format!("rs_{}", Uuid::new_v4().simple());
-                let mut reasoning_output_index = None;
-                let mut reasoning_open = false;
                 let mut reasoning_closed = false;
-                let thinking_item_id = format!("msg_{}", Uuid::new_v4().simple());
-                let mut thinking_output_index = None;
-                let mut thinking_open = false;
-                let mut thinking_closed = false;
-                let mut thinking_text = String::new();
-                let mut thinking_at_line_start = true;
                 let mut buffer = String::new();
                 let mut output_done = false;
                 let mut last_tool_index = 0_u64;
@@ -1816,45 +1796,16 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                 macro_rules! close_reasoning_if_needed {
                     () => {{
                         if !reasoning_closed && !turn_reasoning.is_empty() {
-                            if reasoning_open {
-                                if let Some(current_output_index) = reasoning_output_index {
-                                    let (bytes, item) = reasoning_done_sse_events(
-                                        &config,
-                                        &response_id,
-                                        current_output_index,
-                                        &reasoning_item_id,
-                                        &turn_reasoning,
-                                        &mut sequence,
-                                    );
-                                    yield bytes;
-                                    output.push(item);
-                                }
-                            } else {
-                                let item = reasoning_response_item(&config, &turn_reasoning, false);
-                                let current_output_index = output_index;
-                                output_index += 1;
-                                yield hidden_reasoning_item_sse_events(
-                                    &response_id,
-                                    current_output_index,
-                                    &item,
-                                    &mut sequence,
-                                );
-                                output.push(item);
-                            }
-                            if thinking_open && !thinking_closed {
-                                if let Some(current_output_index) = thinking_output_index {
-                                    let (bytes, item) = thinking_display_done_sse_events(
-                                        &response_id,
-                                        current_output_index,
-                                        &thinking_item_id,
-                                        &thinking_text,
-                                        &mut sequence,
-                                    );
-                                    yield bytes;
-                                    output.push(item);
-                                }
-                                thinking_closed = true;
-                            }
+                            let item = reasoning_response_item(&config, &turn_reasoning);
+                            let current_output_index = output_index;
+                            output_index += 1;
+                            yield hidden_reasoning_item_sse_events(
+                                &response_id,
+                                current_output_index,
+                                &item,
+                                &mut sequence,
+                            );
+                            output.push(item);
                             reasoning_closed = true;
                         }
                     }};
@@ -1932,80 +1883,7 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                     ($reasoning:expr) => {{
                         let reasoning = $reasoning;
                         if !reasoning.is_empty() && !reasoning_closed {
-                            if !reasoning_open && !reasoning_closed && visible_thinking_enabled {
-                                reasoning_open = true;
-                                let current_output_index = output_index;
-                                reasoning_output_index = Some(current_output_index);
-                                output_index += 1;
-                                yield sse_bytes("response.output_item.added", json!({
-                                    "type": "response.output_item.added",
-                                    "response_id": response_id,
-                                    "output_index": current_output_index,
-                                    "item": {
-                                        "id": reasoning_item_id,
-                                        "type": "reasoning",
-                                        "status": "in_progress",
-                                        "summary": []
-                                    },
-                                    "sequence_number": next_sequence(&mut sequence)
-                                }));
-                                yield sse_bytes("response.reasoning_summary_part.added", json!({
-                                    "type": "response.reasoning_summary_part.added",
-                                    "response_id": response_id,
-                                    "item_id": reasoning_item_id,
-                                    "output_index": current_output_index,
-                                    "summary_index": 0,
-                                    "part": { "type": "summary_text", "text": "" },
-                                    "sequence_number": next_sequence(&mut sequence)
-                                }));
-                            }
-                            if !thinking_open && !thinking_closed && visible_thinking_enabled {
-                                thinking_open = true;
-                                let current_output_index = output_index;
-                                thinking_output_index = Some(current_output_index);
-                                output_index += 1;
-                                let thinking_prefix = if thinking_title_emitted {
-                                    ""
-                                } else {
-                                    thinking_title_emitted = true;
-                                    thinking_display_prefix()
-                                };
-                                thinking_text.push_str(thinking_prefix);
-                                yield thinking_display_added_sse_events(
-                                    &response_id,
-                                    current_output_index,
-                                    &thinking_item_id,
-                                    thinking_prefix,
-                                    &mut sequence,
-                                );
-                            }
                             turn_reasoning.push_str(reasoning);
-                            if let Some(current_output_index) = reasoning_output_index {
-                                yield sse_bytes("response.reasoning_summary_text.delta", json!({
-                                    "type": "response.reasoning_summary_text.delta",
-                                    "response_id": response_id,
-                                    "item_id": reasoning_item_id,
-                                    "output_index": current_output_index,
-                                    "summary_index": 0,
-                                    "delta": reasoning,
-                                    "sequence_number": next_sequence(&mut sequence)
-                                }));
-                            }
-                            if thinking_open && !thinking_closed {
-                                if let Some(current_output_index) = thinking_output_index {
-                                    let quoted = quote_thinking_delta(reasoning, &mut thinking_at_line_start);
-                                    if !quoted.is_empty() {
-                                        thinking_text.push_str(&quoted);
-                                        yield thinking_display_delta_sse_event(
-                                            &response_id,
-                                            current_output_index,
-                                            &thinking_item_id,
-                                            &quoted,
-                                            &mut sequence,
-                                        );
-                                    }
-                                }
-                            }
                         }
                     }};
                 }
@@ -2317,13 +2195,11 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
 
                 close_reasoning_if_needed!();
                 close_content_if_needed!(message_phase);
-                let _ = (reasoning_closed, thinking_closed, turn_output_closed);
+                let _ = (reasoning_closed, turn_output_closed);
 
                 if tool_calls.is_empty() {
                     stop_if_cancelled!("response cancelled before final response persistence");
-                    if (!turn_text.trim().is_empty() || !turn_reasoning.trim().is_empty())
-                        && !text_is_thinking_display_markdown(&turn_text)
-                    {
+                    if !turn_text.trim().is_empty() || !turn_reasoning.trim().is_empty() {
                         let mut message = json!({
                             "role": "assistant",
                             "content": turn_text

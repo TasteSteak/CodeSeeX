@@ -127,7 +127,6 @@ const els = {
   releaseNotesSubtitle: byId("releaseNotesSubtitle"),
   restartRequiredBadge: byId("restartRequiredBadge"),
   running: byId("running"),
-  showThinking: byId("SHOW_THINKING"),
   startButton: byId("startButton"),
   startButtonIcon: byId("startButtonIcon"),
   statusPill: byId("statusPill"),
@@ -401,7 +400,7 @@ function bind() {
     els.toolConfigList.addEventListener("change", handleConfigInput);
     els.toolConfigList.addEventListener("focusout", handleConfigInput);
   }
-  [els.showThinking, els.autoStart, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
+  [els.autoStart, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
@@ -1453,7 +1452,6 @@ function renderConfig(config) {
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
   const nextTheme = config.UI_THEME || "system";
   setRadioValue("UI_THEME", nextTheme);
-  els.showThinking.checked = !/^(0|false|no|off|disabled)$/i.test(String(config.SHOW_THINKING || "true"));
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
   if (els.codexAppModelListInjection) els.codexAppModelListInjection.checked = config.CODEX_APP_MODEL_LIST_INJECTION !== "false";
   if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
@@ -4392,7 +4390,6 @@ function buildConfigPayload() {
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
-    SHOW_THINKING: els.showThinking && els.showThinking.checked ? "true" : "false",
     UI_THEME: getRadioValue("UI_THEME") || "system",
     UI_CLOSE_BEHAVIOR: normalizeCloseBehavior(getRadioValue("UI_CLOSE_BEHAVIOR")),
     UI_LANGUAGE: els.uiLanguage ? normalizeConfiguredLanguageId(els.uiLanguage.value) : DEFAULT_LANGUAGE,

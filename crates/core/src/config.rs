@@ -230,7 +230,6 @@ pub struct UserNetworkConfig {
 pub struct UserUiConfig {
     pub theme: Option<String>,
     pub language: Option<String>,
-    pub show_thinking: Option<bool>,
     pub auto_start: Option<bool>,
     pub codex_app_model_list_injection: Option<bool>,
     pub close_behavior: Option<String>,

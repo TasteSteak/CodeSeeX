@@ -222,7 +222,6 @@
   "running": "Proxy running",
   "runtimeEvent": "Runtime event.",
   "runtimeStats": "Runtime stats",
-  "showThinking": "Show thinking",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "View source",
   "sourceUnavailable": "No source repository URL is configured for this version.",

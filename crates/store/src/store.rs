@@ -2196,9 +2196,6 @@ fn event_risk_flags(event: &EventRecord, object: Option<&Map<String, Value>>) ->
     if nested_u64(object, "context", "truncated_tool_output_items").unwrap_or(0) > 0 {
         push_unique_flag(&mut flags, "tool_output_truncated");
     }
-    if nested_u64(object, "context", "display_only_thinking_items").unwrap_or(0) > 0 {
-        push_unique_flag(&mut flags, "display_thinking_dropped");
-    }
     if nested_u64(object, "usage", "cache_miss_input_tokens").unwrap_or(0) >= 20_000 {
         push_unique_flag(&mut flags, "high_cache_miss");
     }
@@ -2246,7 +2243,6 @@ fn event_metrics(object: Option<&Map<String, Value>>) -> Value {
                 "input_items",
                 "message_items",
                 "tool_result_items",
-                "display_only_thinking_items",
                 "tool_output_chars",
                 "estimated_chars",
             ][..],
@@ -2407,8 +2403,6 @@ fn context_summary(object: Option<&Map<String, Value>>) -> String {
             nested_u64(object, "context", "message_items").map(|value| format!("messages={value}")),
             nested_u64(object, "context", "tool_result_items")
                 .map(|value| format!("tool_results={value}")),
-            nested_u64(object, "context", "display_only_thinking_items")
-                .map(|value| format!("thinking_dropped={value}")),
             nested_u64(object, "context", "estimated_chars").map(|value| format!("chars={value}")),
             token_triplet_summary(object),
         ]
@@ -2684,9 +2678,6 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                             "message_items",
                             "tool_result_items",
                             "verified_fact_items",
-                            "display_only_items",
-                            "display_only_thinking_items",
-                            "display_only_chars",
                             "tool_output_chars",
                             "truncated_tool_output_items",
                             "unsupported_items",
@@ -2792,9 +2783,6 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                             "message_items",
                             "tool_result_items",
                             "verified_fact_items",
-                            "display_only_items",
-                            "display_only_thinking_items",
-                            "display_only_chars",
                             "tool_output_chars",
                             "truncated_tool_output_items",
                             "unsupported_items",
@@ -7829,7 +7817,6 @@ mod tests {
                     "context": {
                         "message_items": 8,
                         "tool_result_items": 2,
-                        "display_only_thinking_items": 1,
                         "tool_output_chars": 524288,
                         "unsafe_prompt": "do not keep me".repeat(1_000)
                     },
@@ -7900,7 +7887,6 @@ mod tests {
                         "input_items": 128,
                         "message_items": 10,
                         "tool_result_items": 2,
-                        "display_only_thinking_items": 1,
                         "estimated_chars": 240000,
                         "unsafe_prompt": "do not expose"
                     }
