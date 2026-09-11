@@ -116,3 +116,30 @@
       grid-template-columns: 1fr; 
     }
   }
+
+  /* 页面内容容器：宽屏下限制内容宽度并居中，避免随窗口过度拉伸 */
+  :root {
+    --page-max-width: 1040px;
+  }
+
+  .page-container {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+  }
+
+  /* 除日志台外，所有页面统一用外容器限宽居中；默认 1280×720 下不受影响 */
+  .workspace .page-container {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+
+  /* 日志台保持全宽，避免日志行被压缩 */
+  .workspace.view-logs .page-container {
+    max-width: none;
+    margin: 0;
+  }
+

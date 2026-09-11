@@ -39,6 +39,14 @@
       <div class="status-indicator" id="statusPill">
         <span class="status-dot"></span>
         <span class="status-text" id="running">Connecting...</span>
+        <span class="status-actions">
+          <button class="btn-icon-only" id="startButton" type="button" aria-label="Start" title="Start">
+            <span class="btn-icon btn-icon-play" id="startButtonIcon" aria-hidden="true"></span>
+          </button>
+          <button class="btn-icon-only is-danger" id="stopButton" type="button" aria-label="Stop" title="Stop">
+            <span class="btn-icon btn-icon-stop" aria-hidden="true"></span>
+          </button>
+        </span>
       </div>
 
       <nav class="nav-menu">
@@ -55,15 +63,11 @@
     </aside>
 
     <main class="workspace view-console" id="workspace">
+      <div class="page-container">
       <header class="page-header">
         <div class="header-titles">
           <h1 id="pageTitle">Dashboard</h1>
           <p id="pageSubtitle">Monitor proxy status, core gateway routing, and performance metrics.</p>
-        </div>
-        <div class="header-actions">
-          <button class="btn btn-primary" id="startButton" type="button" data-i18n="start">Start</button>
-          <button class="btn btn-secondary" id="restartButton" type="button" data-i18n="restart">Restart</button>
-          <button class="btn btn-danger" id="stopButton" type="button" data-i18n="stop">Stop</button>
         </div>
       </header>
 
@@ -447,53 +451,21 @@
                 </div>
                 <div class="setting-divider"></div>
 
-                <h3 class="config-section-title" data-i18n="usageDisplay">Usage display</h3>
-                <div class="setting-item">
-                  <span>
-                    <span data-i18n="billingPeakValleyMode">Peak / off-peak billing</span>
-                    <small class="muted" data-i18n="billingPeakValleyHint">Use Beijing-time peak pricing for cost estimates.</small>
-                  </span>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="BILLING_PEAK_VALLEY_ENABLED" checked>
-                    <span class="slider"></span>
-                  </label>
-                </div>
-                <div class="setting-divider"></div>
-                <div class="setting-item setting-item-block">
-                  <span>
-                    <span data-i18n="billingMode">Billing rates</span>
-                    <small class="muted" data-i18n="billingUnit">Unit: CNY / 1M tokens</small>
-                  </span>
-
-                  <div class="billing-rate-grid mt-12" id="billingRateGrid"></div>
-                  <div class="billing-peak-grid mt-12">
-                    <div class="billing-field">
-                      <span class="billing-prefix" data-i18n="billingPeakMultiplier">Peak multiplier</span>
-                      <input type="number" id="BILLING_PEAK_MULTIPLIER" step="0.1" min="1">
-                    </div>
-                    <div class="billing-field">
-                      <span class="billing-prefix" data-i18n="billingTimezone">Timezone</span>
-                      <input type="text" id="BILLING_TIMEZONE" placeholder="Asia/Shanghai">
-                    </div>
-                    <div class="billing-field">
-                      <span class="billing-prefix" data-i18n="billingPeakWindows">Peak windows</span>
-                      <input type="text" id="BILLING_PEAK_WINDOWS" placeholder="09:00-12:00, 14:00-18:00">
-                    </div>
+                <div class="billing-split mt-12">
+                  <div class="billing-catalog">
+                    <button type="button" class="btn btn-secondary btn-icon-label" id="catalogRefreshButton">
+                      <svg class="btn-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2.6 8a5.4 5.4 0 0 1 9.2-3.8L13.4 5.6"/>
+                        <path d="M13.4 2.4v3.2h-3.2"/>
+                        <path d="M13.4 8a5.4 5.4 0 0 1-9.2 3.8L2.6 10.4"/>
+                        <path d="M2.6 13.6v-3.2h3.2"/>
+                      </svg>
+                      <span id="catalogRefreshLabel" data-i18n="catalogFetchModels">Update model list</span>
+                    </button>
+                    <div class="billing-model-list" id="billingModelList"></div>
                   </div>
+                  <div class="billing-card-panel" id="billingCardPanel"></div>
                 </div>
-                <div class="setting-divider"></div>
-                <div class="setting-item setting-item-block">
-                  <span>
-                    <span data-i18n="catalogSection">Model catalog</span>
-                    <small class="muted" id="catalogStatusText" data-i18n="catalogStatusHint">Source, revision, and remote refresh</small>
-                  </span>
-                  <div class="catalog-toolbar mt-12">
-                    <button type="button" class="secondary-button" id="catalogRefreshButton" data-i18n="catalogRefresh">Update now</button>
-                    <button type="button" class="secondary-button" id="upstreamTestButton" data-i18n="catalogUpstreamTest">Test upstream</button>
-                  </div>
-                  <pre class="catalog-status-pre" id="catalogStatusJson"></pre>
-                </div>
-                <div class="setting-divider"></div>
 
               </div>
 
@@ -635,6 +607,7 @@
           </section>
         </div>
       </section>
+      </div>
     </main>
   </div>
 

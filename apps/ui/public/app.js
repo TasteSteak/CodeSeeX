@@ -65,6 +65,12 @@ const catalogState = {
   status: {},
 };
 let currentBillingRatesSignature = "";
+const VISIBLE_MODEL_CARDS = 4;
+const MODEL_CARD_GAP = 8;
+const CATALOG_LABEL_FLASH_MS = 1600;
+let selectedCatalogModel = "";
+let modelListHeightTimer = null;
+const catalogLabelTimers = new Map();
 const SYSTEM_LANGUAGE = "system";
 const FALLBACK_LANGUAGE = "en_us";
 const DEFAULT_LANGUAGE = SYSTEM_LANGUAGE;
@@ -84,15 +90,10 @@ const els = {
   balanceStatus: byId("balanceStatus"),
   balanceToppedUp: byId("balanceToppedUp"),
   balanceTotal: byId("balanceTotal"),
-  billingPeakMultiplier: byId("BILLING_PEAK_MULTIPLIER"),
-  billingPeakValleyEnabled: byId("BILLING_PEAK_VALLEY_ENABLED"),
-  billingPeakWindows: byId("BILLING_PEAK_WINDOWS"),
-  billingRateGrid: byId("billingRateGrid"),
-  billingTimezone: byId("BILLING_TIMEZONE"),
+  billingCardPanel: byId("billingCardPanel"),
+  billingModelList: byId("billingModelList"),
   catalogRefreshButton: byId("catalogRefreshButton"),
-  catalogStatusJson: byId("catalogStatusJson"),
-  catalogStatusText: byId("catalogStatusText"),
-  upstreamTestButton: byId("upstreamTestButton"),
+  catalogRefreshLabel: byId("catalogRefreshLabel"),
   completedTurns: byId("completedTurns"),
   autoStart: byId("AUTO_START"),
   catalogNotice: byId("catalogNotice"),
@@ -126,8 +127,6 @@ const els = {
   proxyPort: byId("PROXY_PORT"),
   rechargeBalanceButton: byId("rechargeBalanceButton"),
   refreshBalanceButton: byId("refreshBalanceButton"),
-  restartButton: byId("restartButton"),
-  restartRequiredBadge: byId("restartRequiredBadge"),
   releaseNotesBody: byId("releaseNotesBody"),
   releaseNotesClose: byId("releaseNotesClose"),
   releaseNotesModal: byId("releaseNotesModal"),
@@ -137,6 +136,7 @@ const els = {
   running: byId("running"),
   showThinking: byId("SHOW_THINKING"),
   startButton: byId("startButton"),
+  startButtonIcon: byId("startButtonIcon"),
   statusPill: byId("statusPill"),
   stopButton: byId("stopButton"),
   stagePortCheck: byId("stagePortCheck"),
@@ -344,11 +344,12 @@ async function loadI18n(targetLanguage) {
 }
 
 function bind() {
-  els.startButton.addEventListener("click", () => actionPost("/api/start", t("startingTitle"), t("startingDetail")));
-  els.restartButton.addEventListener("click", () => actionPost("/api/restart", t("restartingTitle"), t("restartingDetail")));
+  els.startButton.addEventListener("click", () => (latestRunning
+    ? actionPost("/api/restart", t("restartingTitle"), t("restartingDetail"))
+    : actionPost("/api/start", t("startingTitle"), t("startingDetail"))));
   els.stopButton.addEventListener("click", () => actionPost("/api/stop", t("stoppingTitle"), t("stoppingDetail")));
   if (els.catalogRefreshButton) els.catalogRefreshButton.addEventListener("click", refreshCatalogDocument);
-  if (els.upstreamTestButton) els.upstreamTestButton.addEventListener("click", testUpstreamCredential);
+  if (els.billingModelList) els.billingModelList.addEventListener("click", selectBillingModel);
   if (els.refreshBalanceButton) els.refreshBalanceButton.addEventListener("click", refreshBalance);
   if (els.rechargeBalanceButton) els.rechargeBalanceButton.addEventListener("click", openRechargePage);
   if (els.copyTomlButton) els.copyTomlButton.addEventListener("click", copyConfigToml);
@@ -392,6 +393,7 @@ function bind() {
     hideUsageTraceTooltip();
   }, true);
   window.addEventListener("resize", hideUsageTraceTooltip);
+  window.addEventListener("resize", scheduleModelListHeightSync);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && els.ccsKeyModal && !els.ccsKeyModal.hidden) closeCcsKeyModal("");
     if (event.key === "Escape" && els.troubleshootModal && !els.troubleshootModal.hidden) closeTroubleshootModal();
@@ -406,8 +408,7 @@ function bind() {
     els.toolConfigList.addEventListener("change", handleConfigInput);
     els.toolConfigList.addEventListener("focusout", handleConfigInput);
   }
-
-  [els.showThinking, els.autoStart, els.billingPeakValleyEnabled, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
+  [els.showThinking, els.autoStart, els.uiLanguage, els.deepseekBaseUrl, els.proxyPort, ...billingInputs()].forEach((input) => {
     if (!input) return;
     input.addEventListener("input", handleConfigInput);
     input.addEventListener("change", handleConfigInput);
@@ -586,42 +587,37 @@ function setRadioValue(name, value) {
 }
 
 async function refreshCatalogDocument() {
-  if (!els.catalogRefreshButton) return;
-  els.catalogRefreshButton.disabled = true;
+  const button = els.catalogRefreshButton;
+  if (!button || button.disabled) return;
+  const knownSlugs = new Set(catalogModels().map((model) => model.slug));
+  button.disabled = true;
+  if (els.catalogRefreshLabel) els.catalogRefreshLabel.textContent = t("catalogFetching");
   try {
-    const response = await apiFetch("/api/catalog/refresh", { method: "POST", cache: "no-store" });
-    const data = await response.json();
-    applyCatalogPayload(data.document || {}, data);
-    if (els.catalogStatusJson) {
-      els.catalogStatusJson.textContent = JSON.stringify(data, null, 2);
-    }
+    const data = await apiJson("/api/catalog/refresh", { method: "POST", cache: "no-store" });
+    if (data && data.ok === false) throw new Error(String(data.error || "catalog_refresh_failed"));
+    const config = await loadConfig({ render: false }).catch(() => null);
+    if (config) applyCatalogPayload(config.CATALOG, config.CATALOG_STATUS);
+    const added = catalogModels().filter((model) => !knownSlugs.has(model.slug)).length;
     currentBillingRatesSignature = "";
-    renderBillingRateGrid();
+    renderBillingCatalog();
+    flashCatalogLabel(els.catalogRefreshLabel, "catalogFetchModels", added > 0 ? `${t("catalogFetchAdded")} +${added}` : t("catalogFetchUpToDate"));
   } catch (error) {
-    if (els.catalogStatusJson) {
-      els.catalogStatusJson.textContent = String(error && error.message ? error.message : error);
-    }
+    flashCatalogLabel(els.catalogRefreshLabel, "catalogFetchModels", t("catalogFetchFailed"));
   } finally {
-    els.catalogRefreshButton.disabled = false;
+    button.disabled = false;
   }
 }
 
-async function testUpstreamCredential() {
-  if (!els.upstreamTestButton) return;
-  els.upstreamTestButton.disabled = true;
-  try {
-    const response = await apiFetch("/api/upstream/test", { method: "POST", cache: "no-store" });
-    const data = await response.json();
-    if (els.catalogStatusJson) {
-      els.catalogStatusJson.textContent = JSON.stringify(data, null, 2);
-    }
-  } catch (error) {
-    if (els.catalogStatusJson) {
-      els.catalogStatusJson.textContent = String(error && error.message ? error.message : error);
-    }
-  } finally {
-    els.upstreamTestButton.disabled = false;
-  }
+/// Briefly replaces a button label, then restores its localized text.
+function flashCatalogLabel(label, key, text) {
+  if (!label) return;
+  const pending = catalogLabelTimers.get(label);
+  if (pending) clearTimeout(pending);
+  label.textContent = text;
+  catalogLabelTimers.set(label, setTimeout(() => {
+    catalogLabelTimers.delete(label);
+    label.textContent = t(key);
+  }, CATALOG_LABEL_FLASH_MS));
 }
 
 async function actionPost(url, title, detail) {
@@ -1428,13 +1424,22 @@ function setStageState(row, label, options) {
 }
 
 function renderButtons() {
-  els.startButton.disabled = busy || latestRunning || latestStarting;
-  els.restartButton.disabled = busy || !latestRunning;
+  els.startButton.disabled = busy || latestStarting;
   els.stopButton.disabled = busy || (!latestRunning && !latestStarting);
   if (els.launchCodexButton) els.launchCodexButton.disabled = busy || !latestRunning;
-  els.startButton.textContent = latestRunning ? t("started") : t("start");
-  els.restartButton.textContent = t("restart");
-  els.stopButton.textContent = t("stop");
+  if (els.startButtonIcon) {
+    els.startButtonIcon.classList.toggle("btn-icon-play", !latestRunning);
+    els.startButtonIcon.classList.toggle("btn-icon-refresh", latestRunning);
+  }
+  setIconButtonLabel(els.startButton, latestRunning ? t("restart") : t("start"));
+  setIconButtonLabel(els.stopButton, t("stop"));
+}
+
+/// 纯图标按钮没有可见文字，用 title / aria-label 承载可访问名称。
+function setIconButtonLabel(button, label) {
+  if (!button) return;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
 }
 
 function renderConfig(config) {
@@ -2786,6 +2791,8 @@ function setConfigTab(value) {
     panel.classList.toggle("active", panel.dataset.configPanel === currentConfigTab);
   });
   if (currentConfigTab === "tools") ensureToolsLoaded();
+  /* 模型列表的行高只在可见时才能测量 */
+  if (currentConfigTab === "proxy") requestAnimationFrame(updateBillingModelListHeight);
 }
 
 function sanitizeDomId(value) {
@@ -4030,6 +4037,7 @@ function setView(viewName) {
   els.pageSubtitle.textContent = t("view" + name + "Subtitle");
   if (view === "usage") refreshUsage({ force: true }).catch(() => {});
   if (view === "logs") refreshLatestLogs({ force: true }).catch(() => {});
+  if (view === "config") requestAnimationFrame(updateBillingModelListHeight);
 }
 
 function handleAboutAction(action) {
@@ -4663,26 +4671,16 @@ function t(key) {
 }
 
 function billingInputs() {
-  return [
-    els.billingPeakMultiplier,
-    els.billingPeakWindows,
-    els.billingTimezone,
-    ...billingRateInputs(),
-  ];
+  return billingRateInputs();
 }
 
 function billingRateInputs() {
-  if (!els.billingRateGrid) return [];
-  return Array.from(els.billingRateGrid.querySelectorAll("input"));
+  if (!els.billingCardPanel) return [];
+  return Array.from(els.billingCardPanel.querySelectorAll("input[data-model][data-rate]"));
 }
 
-function setBillingInputValues(config = {}) {
-  if (els.billingPeakValleyEnabled) els.billingPeakValleyEnabled.checked = config.BILLING_PEAK_VALLEY_ENABLED !== "false";
-  const peak = catalogPeakValley();
-  setTextInputValue(els.billingPeakMultiplier, String(peak.multiplier));
-  setTextInputValue(els.billingTimezone, peak.timezone);
-  setTextInputValue(els.billingPeakWindows, peak.windows.map((window) => `${minuteToHhmm(window.from)}-${minuteToHhmm(window.to)}`).join(", "));
-  renderBillingRateGrid();
+function setBillingInputValues() {
+  renderBillingCatalog();
 }
 
 function setTextInputValue(input, value) {
@@ -4695,73 +4693,198 @@ function setInputValue(input, value, fallback) {
   input.value = String(normalizeRateInput(value, fallback));
 }
 
-/// Renders one editable rate row per catalog model. Unknown models are shown as
+/// Renders the fetched model list next to the billing card of the selected
+/// model. Prices come from the catalog document; a model without a rate stays
 /// unpriced instead of silently inheriting another model's price.
-function renderBillingRateGrid() {
-  const grid = els.billingRateGrid;
-  if (!grid) return;
-  const active = document.activeElement;
+function renderBillingCatalog() {
+  const panel = els.billingCardPanel;
+  if (!panel) return;
   const models = catalogModels();
+  if (!models.some((model) => model.slug === selectedCatalogModel)) {
+    const preferred = models.find((model) => model.slug === catalogState.defaultModel) || models[0];
+    selectedCatalogModel = preferred ? preferred.slug : "";
+  }
   const signature = stableStringify({
-    models: models.map((model) => model.slug),
+    models: models.map((model) => [model.slug, model.display_name, model.short_display_name, model.description]),
+    selected: selectedCatalogModel,
     revision: catalogState.revision,
     currency: catalogState.currency,
   });
-  if (signature === currentBillingRatesSignature && grid.childElementCount) return;
+  if (signature === currentBillingRatesSignature && panel.childElementCount) return;
   currentBillingRatesSignature = signature;
-  grid.textContent = "";
+  renderBillingModelList(models);
+  renderBillingCard(models.find((model) => model.slug === selectedCatalogModel) || null);
+  requestAnimationFrame(updateBillingModelListHeight);
+}
+
+function renderBillingModelList(models) {
+  const list = els.billingModelList;
+  if (!list) return;
+  list.textContent = "";
+  if (models.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "billing-model-empty";
+    const title = document.createElement("span");
+    title.setAttribute("data-i18n", "catalogEmpty");
+    title.textContent = t("catalogEmpty");
+    const hint = document.createElement("small");
+    hint.setAttribute("data-i18n", "catalogEmptyHint");
+    hint.textContent = t("catalogEmptyHint");
+    empty.append(title, hint);
+    list.append(empty);
+    return;
+  }
   for (const model of models) {
-    const rate = catalogRateFor(model.slug);
-    const card = document.createElement("div");
-    card.className = "billing-rate-card";
+    const selected = model.slug === selectedCatalogModel;
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = selected ? "billing-model-card is-selected" : "billing-model-card";
     card.dataset.model = model.slug;
-    const header = document.createElement("div");
-    header.className = "billing-card-header";
-    const meta = document.createElement("div");
-    meta.className = "billing-model-meta";
-    const title = document.createElement("strong");
-    title.textContent = model.short_display_name || model.display_name || model.slug;
+    card.setAttribute("aria-pressed", selected ? "true" : "false");
+    const head = document.createElement("span");
+    head.className = "billing-model-head";
+    const name = document.createElement("span");
+    name.className = "billing-model-name";
+    name.textContent = model.display_name || model.slug;
+    head.append(name);
+    const badge = catalogModelBadge(model);
+    if (badge) {
+      const badgeEl = document.createElement("span");
+      badgeEl.className = "billing-model-badge";
+      badgeEl.textContent = badge;
+      head.append(badgeEl);
+    }
+    card.append(head);
+    const slug = String(model.slug || "").trim();
+    if (slug) {
+      const desc = document.createElement("span");
+      desc.className = "billing-model-desc";
+      desc.textContent = slug;
+      card.append(desc);
+    }
+    list.append(card);
+  }
+}
+
+function renderBillingCard(model) {
+  const panel = els.billingCardPanel;
+  if (!panel) return;
+  panel.textContent = "";
+  if (!model) return;
+  const rate = catalogRateFor(model.slug);
+  const card = document.createElement("div");
+  card.className = "billing-rate-card";
+  card.dataset.model = model.slug;
+  const header = document.createElement("div");
+  header.className = "billing-card-header";
+  const meta = document.createElement("div");
+  meta.className = "billing-model-meta";
+  const title = document.createElement("strong");
+  title.textContent = model.display_name || model.slug;
+  meta.append(title);
+  const unit = String(t("billingUnit") || "").trim();
+  if (unit) {
     const hint = document.createElement("small");
     hint.className = "muted";
-    hint.textContent = model.slug;
-    meta.append(title, hint);
-    const badge = document.createElement("span");
-    badge.className = "billing-model-badge";
-    badge.textContent = rate ? (rate.source === "group" ? t("billingGroupPriced") : "") : t("billingUnpriced");
-    header.append(meta, badge);
-    card.append(header);
-    const row = document.createElement("div");
-    row.className = "billing-row";
-    for (const [key, labelKey] of [["cached_input", "billingCachedInput"], ["cache_miss_input", "billingCacheMissInput"], ["output", "billingOutput"]]) {
-      const field = document.createElement("div");
-      field.className = "billing-field";
-      const label = document.createElement("span");
-      label.className = "billing-prefix";
-      label.setAttribute("data-i18n", labelKey);
-      label.textContent = t(labelKey);
-      const input = document.createElement("input");
-      input.type = "number";
-      input.step = "0.001";
-      input.min = "0";
-      input.dataset.model = model.slug;
-      input.dataset.rate = key;
-      input.value = rate ? String(rate[key]) : "";
-      input.placeholder = t("billingUnpriced");
-      if (active && active.dataset && active.dataset.model === model.slug && active.dataset.rate === key) {
-        input.value = active.value;
-      }
-      const suffix = document.createElement("span");
-      suffix.className = "billing-suffix";
-      suffix.textContent = catalogState.currency || "CNY";
-      input.addEventListener("input", handleConfigInput);
-      input.addEventListener("change", handleConfigInput);
-      input.addEventListener("focusout", handleConfigInput);
-      field.append(label, input, suffix);
-      row.append(field);
-    }
-    card.append(row);
-    grid.append(card);
+    hint.setAttribute("data-i18n", "billingUnit");
+    hint.textContent = unit;
+    meta.append(hint);
   }
+  header.append(meta);
+  const badges = document.createElement("span");
+  badges.className = "billing-card-badges";
+  const modelBadge = catalogModelBadge(model);
+  if (modelBadge) {
+    const badgeEl = document.createElement("span");
+    badgeEl.className = "billing-model-badge";
+    badgeEl.textContent = modelBadge;
+    badges.append(badgeEl);
+  }
+  const pricingBadge = catalogPricingBadge(rate);
+  if (pricingBadge) {
+    const badgeEl = document.createElement("span");
+    badgeEl.className = pricingBadge.warn ? "billing-model-badge is-warn" : "billing-model-badge";
+    badgeEl.textContent = pricingBadge.text;
+    badges.append(badgeEl);
+  }
+  if (badges.childElementCount > 0) header.append(badges);
+  card.append(header);
+  const row = document.createElement("div");
+  row.className = "billing-row";
+  for (const [key, labelKey] of [["cached_input", "billingCachedInput"], ["cache_miss_input", "billingCacheMissInput"], ["output", "billingOutput"]]) {
+    const field = document.createElement("div");
+    field.className = "billing-field";
+    const label = document.createElement("span");
+    label.className = "billing-prefix";
+    label.setAttribute("data-i18n", labelKey);
+    label.textContent = t(labelKey);
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "0.001";
+    input.min = "0";
+    input.dataset.model = model.slug;
+    input.dataset.rate = key;
+    input.value = rate ? String(rate[key]) : "";
+    input.setAttribute("data-i18n-placeholder", "billingUnpriced");
+    input.placeholder = t("billingUnpriced");
+    input.addEventListener("input", handleConfigInput);
+    input.addEventListener("change", handleConfigInput);
+    input.addEventListener("focusout", handleConfigInput);
+    const suffix = document.createElement("span");
+    suffix.className = "billing-suffix";
+    suffix.textContent = catalogState.currency || "CNY";
+    field.append(label, input, suffix);
+    row.append(field);
+  }
+  card.append(row);
+  panel.append(card);
+}
+
+function catalogModelBadge(model) {
+  return String((model && model.short_display_name) || "").trim();
+}
+
+/// Marks group-priced and unpriced models instead of letting them look like a
+/// regular catalog rate.
+function catalogPricingBadge(rate) {
+  if (!rate) return { text: t("billingUnpriced"), warn: true };
+  if (rate.source === "group") return { text: t("billingGroupPriced"), warn: true };
+  return null;
+}
+
+function selectBillingModel(event) {
+  const card = event.target && event.target.closest ? event.target.closest(".billing-model-card") : null;
+  if (!card) return;
+  const slug = card.dataset ? card.dataset.model : "";
+  if (!slug || slug === selectedCatalogModel) return;
+  selectedCatalogModel = slug;
+  renderBillingCatalog();
+}
+
+/// Keeps exactly VISIBLE_MODEL_CARDS model card rows in view; the rest scrolls.
+function updateBillingModelListHeight() {
+  const list = els.billingModelList;
+  if (!list) return;
+  const cards = list.querySelectorAll(".billing-model-card");
+  if (cards.length === 0) {
+    list.style.maxHeight = "";
+    return;
+  }
+  if (cards.length <= VISIBLE_MODEL_CARDS) {
+    list.style.maxHeight = "none";
+    return;
+  }
+  const cardHeight = cards[0].offsetHeight;
+  if (cardHeight <= 0) return;
+  list.style.maxHeight = `${cardHeight * VISIBLE_MODEL_CARDS + MODEL_CARD_GAP * (VISIBLE_MODEL_CARDS - 1)}px`;
+}
+
+function scheduleModelListHeightSync() {
+  if (modelListHeightTimer) clearTimeout(modelListHeightTimer);
+  modelListHeightTimer = setTimeout(() => {
+    modelListHeightTimer = null;
+    updateBillingModelListHeight();
+  }, 120);
 }
 
 function catalogRateOverrides() {
@@ -4785,40 +4908,11 @@ function catalogRateOverrides() {
 
 function catalogPeakPricingPayload() {
   const payload = {};
-  if (els.billingPeakValleyEnabled) payload.peak_valley_enabled = els.billingPeakValleyEnabled.checked !== false;
-  const multiplier = Number(els.billingPeakMultiplier ? els.billingPeakMultiplier.value : "");
-  if (Number.isFinite(multiplier) && multiplier >= 1) payload.peak_multiplier = multiplier;
-  const timezone = String(els.billingTimezone ? els.billingTimezone.value : "").trim();
-  if (timezone) payload.timezone = timezone;
-  const windows = parsePeakWindowList(els.billingPeakWindows ? els.billingPeakWindows.value : "");
-  if (windows) payload.peak_windows = windows;
   const rates = catalogRateOverrides();
   if (Object.keys(rates).length) payload.rates = rates;
   payload.currency = catalogState.currency || "CNY";
   payload.unit = catalogState.unit || "per_1m_tokens";
   return payload;
-}
-
-function parsePeakWindowList(value) {
-  const text = String(value || "").trim();
-  if (!text) return null;
-  const windows = [];
-  for (const part of text.split(",")) {
-    const [from, to] = String(part).trim().split("-");
-    if (!isHhmm(from) || !isHhmm(to)) return null;
-    if (to <= from) return null;
-    windows.push(`${from}-${to}`);
-  }
-  return windows.length ? windows : null;
-}
-
-function isHhmm(value) {
-  return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(String(value || "").trim());
-}
-
-function minuteToHhmm(minute) {
-  const value = Math.max(0, Math.min(24 * 60, Math.floor(Number(minute) || 0)));
-  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 }
 
 function currentBillingSignature() {
@@ -4830,7 +4924,6 @@ function currentBillingSignature() {
 }
 
 function currentPeakValleyBillingEnabled() {
-  if (els.billingPeakValleyEnabled) return els.billingPeakValleyEnabled.checked !== false;
   return catalogPeakValley().enabled;
 }
 
@@ -4850,24 +4943,6 @@ function applyCatalogPayload(catalog, status = {}) {
   catalogState.currency = String((catalog && catalog.pricing && catalog.pricing.currency) || "CNY");
   catalogState.unit = String((catalog && catalog.pricing && catalog.pricing.unit) || "per_1m_tokens");
   catalogState.status = status || {};
-  renderCatalogStatus();
-}
-
-function renderCatalogStatus() {
-  if (els.catalogStatusText) {
-    const parts = [t("catalogSourceLabel"), catalogState.source || "builtin"];
-    if (catalogState.revision) parts.push(`${t("catalogRevisionLabel")} ${catalogState.revision}`);
-    els.catalogStatusText.textContent = parts.join(" · ");
-  }
-  if (els.catalogStatusJson) {
-    els.catalogStatusJson.textContent = JSON.stringify({
-      revision: catalogState.revision,
-      source: catalogState.source,
-      credential_source: catalogState.status && catalogState.status.credential_source,
-      upstream_key_configured: catalogState.status && catalogState.status.upstream_key_configured,
-      models: catalogModels().map((model) => ({ slug: model.slug, upstream_status: model.upstream_status })),
-    }, null, 2);
-  }
 }
 
 function catalogModels() {

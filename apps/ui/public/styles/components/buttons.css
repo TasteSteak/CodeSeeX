@@ -15,7 +15,20 @@
 .btn-icon-heartbeat { -webkit-mask: url("/assets/icons/heartbeat.svg") center / contain no-repeat; mask: url("/assets/icons/heartbeat.svg") center / contain no-repeat; }
 .btn-icon-link { -webkit-mask: url("/assets/icons/link.svg") center / contain no-repeat; mask: url("/assets/icons/link.svg") center / contain no-repeat; }
 .btn-icon-update { -webkit-mask: url("/assets/icons/update.svg") center / contain no-repeat; mask: url("/assets/icons/update.svg") center / contain no-repeat; }
+.btn-icon-play { -webkit-mask: url("/assets/icons/play.svg") center / contain no-repeat; mask: url("/assets/icons/play.svg") center / contain no-repeat; }
+.btn-icon-refresh { -webkit-mask: url("/assets/icons/refresh.svg") center / contain no-repeat; mask: url("/assets/icons/refresh.svg") center / contain no-repeat; }
+.btn-icon-stop { -webkit-mask: url("/assets/icons/stop.svg") center / contain no-repeat; mask: url("/assets/icons/stop.svg") center / contain no-repeat; }
 
 .update-button { position: relative; }
 .update-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--danger); display: inline-block; flex: none; }
 .update-dot[hidden] { display: none; }
+
+/* 内联 SVG 图标：随 currentColor 描边，替代 mask 预设图标 */
+.btn-svg { width: 14px; height: 14px; flex: none; display: block; }
+
+/* 纯图标按钮：药丸内联操作，无外框，背景取当前状态色 */
+.btn-icon-only { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: var(--radius-sm); background: color-mix(in srgb, currentColor 12%, transparent); color: inherit; cursor: pointer; transition: var(--theme-transition), opacity var(--theme-duration) var(--theme-easing); }
+.btn-icon-only:hover:not(:disabled) { background: color-mix(in srgb, currentColor 24%, transparent); }
+.btn-icon-only:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+.btn-icon-only:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-icon-only.is-danger { color: var(--danger); }

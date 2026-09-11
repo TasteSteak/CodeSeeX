@@ -5,7 +5,9 @@
 .brand-text .title { font-weight: 600; font-size: 15px; }
 .brand-text .subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; transition: var(--theme-transition); }
 
-.status-indicator { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: var(--radius-sm); background: var(--danger-bg); color: var(--danger); font-size: 13px; font-weight: 500; margin-bottom: 24px; transition: var(--theme-transition); }
+.status-indicator { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 24px; padding: 7px 8px 7px 12px; border-radius: var(--radius-sm); background: var(--danger-bg); color: var(--danger); font-size: 12.5px; font-weight: 500; transition: var(--theme-transition); }
+.status-indicator .status-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-actions { display: flex; align-items: center; gap: 2px; flex: none; margin-left: auto; }
 .status-indicator.running { background: var(--success-bg); color: var(--success); }
 .status-indicator.starting { background: var(--warn-badge-bg); color: var(--warn); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; transition: var(--theme-transition); }

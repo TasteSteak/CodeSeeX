@@ -1,10 +1,34 @@
-.billing-rate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: 100%; }
+/* ==========================================================================
+   计费模式费率设置：模型列表（拉取）+ 选中模型费率卡 (billing.css)
+   ========================================================================== */
+
+/* 左栏：拉取按钮 + 模型列表；右栏：选中模型的费率卡 */
+.billing-split { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 20px; align-items: stretch; width: 100%; }
+.billing-catalog { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.billing-catalog > .btn { width: 100%; min-height: 34px; padding: 8px 14px; font-size: 13px; }
+.billing-model-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
+.billing-model-card { display: flex; flex-direction: column; gap: 3px; flex: none; min-width: 0; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--hover-bg); color: inherit; font: inherit; text-align: left; cursor: pointer; box-shadow: var(--shadow-sm); transition: var(--theme-transition); }
+.billing-model-card:hover { border-color: var(--text-muted); box-shadow: var(--shadow-md); }
+.billing-model-card:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+.billing-model-card.is-selected { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.07); }
+.billing-model-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.billing-model-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: var(--theme-transition); }
+.billing-model-desc { font-size: 11.5px; line-height: 1.4; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: var(--theme-transition); }
+.billing-model-card.is-selected .billing-model-badge { color: var(--primary-text); background: var(--primary); border-color: var(--primary); }
+.billing-model-empty { padding: 40px 16px; border: 1px dashed var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+.billing-model-empty small { display: block; margin-top: 4px; }
+.billing-card-panel { display: flex; min-width: 0; }
+.billing-card-panel > .billing-rate-card { flex: 1; }
+
+/* 费率卡与费率字段（复用既有组件类） */
 .billing-rate-card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-panel); transition: var(--theme-transition); }
 .billing-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
 .billing-model-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .billing-model-meta strong { font-size: 14px; line-height: 1.2; color: var(--text-main); }
 .billing-model-meta .muted { font-size: 12px; line-height: 1.35; }
 .billing-model-badge { flex: none; display: inline-flex; align-items: center; min-height: 24px; padding: 3px 9px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--hover-bg); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; transition: var(--theme-transition); }
+.billing-model-badge.is-warn { color: var(--warn); background: var(--warn-badge-bg); border-color: transparent; }
+.billing-card-badges { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .billing-row { display: grid; grid-template-columns: 1fr; gap: 8px; width: 100%; }
 .billing-field { display: grid; grid-template-columns: minmax(112px, 1fr) minmax(76px, 88px) auto; align-items: center; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); overflow: hidden; transition: var(--theme-transition); }
 .billing-field:focus-within { border-color: var(--info); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1); }
@@ -15,14 +39,8 @@
 .billing-field input[type="number"]::-webkit-inner-spin-button, .billing-field input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .billing-field input[type="number"] { -moz-appearance: textfield; }
 
-@media (max-width: 1024px) {
-  .billing-rate-grid { grid-template-columns: 1fr; }
-}
-
-.billing-peak-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; width: 100%; }
-.catalog-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
-.catalog-status-pre { margin-top: 12px; padding: 10px 12px; max-height: 220px; overflow: auto; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); color: var(--text-secondary); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-
-@media (max-width: 1024px) {
-  .billing-peak-grid { grid-template-columns: 1fr; }
+@media (max-width: 860px) {
+  .billing-split { grid-template-columns: 1fr; gap: 16px; }
+  /* 单列堆叠时不裁剪模型列表（覆盖 JS 写入的行内 max-height） */
+  .billing-model-list { max-height: none !important; }
 }
