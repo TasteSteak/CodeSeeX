@@ -8,13 +8,18 @@
 //! copy remains authoritative for tool continuations.
 
 use codeseex_core::config::WebSearchBackend;
+use crate::response_sse::{quote_thinking_delta, thinking_display_prefix};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 const MAX_INSPECTED_SSE_FRAME_BYTES: usize = 256 * 1024;
 const MAX_RETAINED_NATIVE_OUTPUT_ITEMS: usize = 128;
 const MAX_RETAINED_NATIVE_OUTPUT_BYTES: usize = 1_048_576;
+/// Output indices for the display-only thinking message CodeSeeX adds. Provider
+/// items keep their own indices, so the display starts far above them.
+const DISPLAY_OUTPUT_INDEX_BASE: u64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeToolPlan {
@@ -1003,6 +1008,7 @@ pub(crate) struct NativeResponseSseRelay {
     present_reasoning_summary: bool,
     sequence_offset: u64,
     reasoning: ReasoningSummaryMirror,
+    display: DisplayThinkingMessage,
 }
 
 impl NativeResponseSseRelay {
@@ -1015,6 +1021,7 @@ impl NativeResponseSseRelay {
             present_reasoning_summary: false,
             sequence_offset: 0,
             reasoning: ReasoningSummaryMirror::default(),
+            display: DisplayThinkingMessage::default(),
         }
     }
 
@@ -1235,6 +1242,7 @@ impl NativeResponseSseRelay {
                 if self.reasoning.provider_writes_summary(&item_id) {
                     return;
                 }
+                self.display.open(&response_id, injected);
                 if !self.reasoning.part_announced {
                     self.reasoning.part_announced = true;
                     injected.push(reasoning_summary_part_added(
@@ -1261,6 +1269,7 @@ impl NativeResponseSseRelay {
                     return;
                 }
                 self.reasoning.push_delta(&item_id, delta);
+                self.display.push_delta(&response_id, delta, injected);
                 if !self.reasoning.part_announced {
                     self.reasoning.part_announced = true;
                     injected.push(reasoning_summary_part_added(
@@ -1291,6 +1300,7 @@ impl NativeResponseSseRelay {
                     return;
                 }
                 self.finish_reasoning_summary(&response_id, &item_id, output_index, injected);
+                self.display.close(&response_id, injected);
             }
             "response.output_item.done" => {
                 let item_id = payload
@@ -1323,6 +1333,7 @@ impl NativeResponseSseRelay {
                     return;
                 };
                 self.finish_reasoning_summary(&response_id, &item_id, output_index, injected);
+                self.display.close(&response_id, injected);
                 payload["item"]["summary"] = Value::Array(vec![reasoning_summary_part(&text)]);
                 payload["item"]["content"] = Value::Null;
                 self.reasoning.finish_item(&item_id);
@@ -1359,6 +1370,14 @@ impl NativeResponseSseRelay {
                     };
                     item["summary"] = Value::Array(vec![reasoning_summary_part(text)]);
                     item["content"] = Value::Null;
+                }
+                // The display-only thinking message belongs to the persisted
+                // turn, so Codex can show it after the stream is long gone.
+                let display_items = self.display.completed.clone();
+                if !display_items.is_empty() {
+                    let mut combined = display_items;
+                    combined.append(items);
+                    *items = combined;
                 }
             }
             _ => {}
@@ -1493,6 +1512,136 @@ impl ReasoningSummaryMirror {
     fn provider_writes_summary(&self, item_id: &str) -> bool {
         self.provider_summary_items.contains(item_id)
     }
+}
+
+/// The readable thinking Codex shows next to the answer.
+///
+/// The reasoning summary above drives Codex's collapsible reasoning block; this
+/// is the quoted, plain-text view CodeSeeX has always shown. It is a normal
+/// assistant message marked `codeseex_display_only`, so the request boundary
+/// drops it again and the provider never sees it.
+#[derive(Debug, Default)]
+struct DisplayThinkingMessage {
+    counter: u64,
+    item_id: Option<String>,
+    output_index: u64,
+    text: String,
+    open: bool,
+    at_line_start: bool,
+    completed: Vec<Value>,
+}
+
+impl DisplayThinkingMessage {
+    const MAX_COMPLETED: usize = 4;
+
+    fn open(&mut self, response_id: &str, events: &mut Vec<Value>) {
+        if self.open {
+            return;
+        }
+        let index = self.counter;
+        self.counter += 1;
+        self.output_index = DISPLAY_OUTPUT_INDEX_BASE + index;
+        let item_id = format!("msg_{}", Uuid::new_v4().simple());
+        self.item_id = Some(item_id.clone());
+        self.text.clear();
+        self.at_line_start = true;
+        self.open = true;
+
+        let mut added = display_thinking_item(&item_id, "");
+        added["status"] = Value::String("in_progress".to_owned());
+        added["content"] = Value::Array(Vec::new());
+        events.push(json!({
+            "type": "response.output_item.added",
+            "response_id": response_id,
+            "output_index": self.output_index,
+            "item": added
+        }));
+        events.push(json!({
+            "type": "response.content_part.added",
+            "response_id": response_id,
+            "item_id": item_id,
+            "output_index": self.output_index,
+            "content_index": 0,
+            "part": { "type": "output_text", "text": "", "annotations": [] }
+        }));
+        if index == 0 {
+            let prefix = thinking_display_prefix();
+            self.text.push_str(prefix);
+            events.push(self.delta_event(response_id, prefix));
+        }
+    }
+
+    fn push_delta(&mut self, response_id: &str, delta: &str, events: &mut Vec<Value>) {
+        if !self.open {
+            self.open(response_id, events);
+        }
+        let quoted = quote_thinking_delta(delta, &mut self.at_line_start);
+        if quoted.is_empty() {
+            return;
+        }
+        self.text.push_str(&quoted);
+        events.push(self.delta_event(response_id, &quoted));
+    }
+
+    fn close(&mut self, response_id: &str, events: &mut Vec<Value>) {
+        if !self.open {
+            return;
+        }
+        self.open = false;
+        let item_id = self.item_id.take().unwrap_or_default();
+        let item = display_thinking_item(&item_id, &self.text);
+        events.push(json!({
+            "type": "response.output_text.done",
+            "response_id": response_id,
+            "item_id": item_id,
+            "output_index": self.output_index,
+            "content_index": 0,
+            "text": self.text
+        }));
+        events.push(json!({
+            "type": "response.content_part.done",
+            "response_id": response_id,
+            "item_id": item_id,
+            "output_index": self.output_index,
+            "content_index": 0,
+            "part": { "type": "output_text", "text": self.text, "annotations": [] }
+        }));
+        events.push(json!({
+            "type": "response.output_item.done",
+            "response_id": response_id,
+            "output_index": self.output_index,
+            "item": item
+        }));
+        self.completed.push(item);
+        while self.completed.len() > Self::MAX_COMPLETED {
+            self.completed.remove(0);
+        }
+    }
+
+    fn delta_event(&self, response_id: &str, delta: &str) -> Value {
+        json!({
+            "type": "response.output_text.delta",
+            "response_id": response_id,
+            "item_id": self.item_id.clone().unwrap_or_default(),
+            "output_index": self.output_index,
+            "content_index": 0,
+            "delta": delta
+        })
+    }
+}
+
+/// The display-only thinking message, in the shape the Chat transport used.
+fn display_thinking_item(item_id: &str, text: &str) -> Value {
+    json!({
+        "id": item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "phase": "commentary",
+        "content": [{ "type": "output_text", "text": text, "annotations": [] }],
+        "codeseex_display_only": "thinking_markdown",
+        "metadata": { "codeseex_display_only": true, "kind": "thinking_markdown" }
+    })
 }
 
 fn reasoning_summary_part(text: &str) -> Value {
@@ -2732,16 +2881,34 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
 
         let item_done = bodies
             .iter()
-            .find(|body| body.contains("event: response.output_item.done"))
-            .expect("item done frame");
+            .find(|body| {
+                body.contains("event: response.output_item.done")
+                    && body.contains("\"type\":\"reasoning\"")
+            })
+            .expect("reasoning item done frame");
         assert!(item_done.contains("\"summary\":[{\"text\":\"think\",\"type\":\"summary_text\"}]"));
         assert!(item_done.contains("\"content\":null"));
+        // The readable thinking block CodeSeeX has always shown rides along as
+        // a display-only message.
+        assert!(joined.contains("DeepSeek Thinking"));
+        assert!(joined.contains("codeseex_display_only"));
+        assert!(joined.contains("event: response.output_text.delta"));
+        assert!(joined.contains("\"delta\":\"> think\""));
+        let display_done = bodies
+            .iter()
+            .find(|body| {
+                body.contains("event: response.output_item.done")
+                    && body.contains("codeseex_display_only")
+            })
+            .expect("display-only thinking item done frame");
+        assert!(display_done.contains("\"text\":\"**DeepSeek Thinking**\\n> think\""));
         let completed = bodies
             .iter()
             .find(|body| body.contains("event: response.completed"))
             .expect("completed frame");
         assert!(completed.contains("\"summary\":[{\"text\":\"think\",\"type\":\"summary_text\"}]"));
         assert!(completed.contains("\"content\":null"));
+        assert!(completed.contains("codeseex_display_only"));
 
         let sequences = sequence_numbers(&bodies);
         assert!(

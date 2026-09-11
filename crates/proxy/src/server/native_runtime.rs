@@ -10,7 +10,8 @@
 
 use super::*;
 use crate::native_coordinator::{
-    NativeInjectedItems, NativePendingContinuation, NativePendingError, PendingNativeToolGroup,
+    is_display_only_item, NativeInjectedItems, NativePendingContinuation, NativePendingError,
+    PendingNativeToolGroup,
 };
 use crate::native_responses::{
     append_complete_native_tool_group, native_stream_finalization,
@@ -1236,12 +1237,15 @@ fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, 
 /// without the provider item id.
 fn native_upstream_payload(payload: &Value, restore_reasoning_text: bool) -> Value {
     let mut payload = payload.clone();
-    if !restore_reasoning_text {
-        return payload;
-    }
     let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
         return payload;
     };
+    // Display-only artifacts exist for the conversation view only; they are
+    // never part of the provider's conversation, for any upstream.
+    items.retain(|item| !is_display_only_item(item));
+    if !restore_reasoning_text {
+        return payload;
+    }
     for item in items.iter_mut() {
         restore_reasoning_text_field(item);
     }
@@ -2566,10 +2570,19 @@ mod tests {
             .contains("\"summary\":[{\"text\":\"step one step two\",\"type\":\"summary_text\"}]"));
         assert!(!stream.contains("[DONE]"));
 
-        // Codex replays the item as a summary on the following turn.
+        // Codex replays the item as a summary on the following turn, preceded
+        // by the readable thinking message CodeSeeX added. Codex cannot carry
+        // the display-only marker on a `message`, so only the text is left.
         let mut replay = request("resp_native_reasoning_second", true, json!([]));
         replay["input"] = json!([
             { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "again" }] },
+            {
+                "type": "message",
+                "id": "msg_display",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> step one step two" }]
+            },
             {
                 "type": "reasoning",
                 "id": "rs_provider",
@@ -2611,6 +2624,14 @@ mod tests {
             json!("step one step two")
         );
         assert_eq!(replayed_reasoning["encrypted_content"], json!("blob"));
+        assert!(
+            !forwarded["input"]
+                .as_array()
+                .expect("forwarded input array")
+                .iter()
+                .any(is_display_only_item),
+            "the display-only thinking message must never reach upstream"
+        );
         drop(requests);
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -3124,6 +3145,137 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
+
+    #[tokio::test]
+    async fn codex_replay_of_the_readable_thinking_message_does_not_break_the_retained_group() {
+        // Live regression: with the readable thinking chain enabled, CodeSeeX
+        // adds `**DeepSeek Thinking**` as an assistant message before the
+        // provider's reasoning item. Codex cannot carry the display-only marker
+        // on a `message`, so by the time it replays history the text is the only
+        // trace left. That replay must still continue the retained tool group
+        // instead of failing closed.
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_response))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("display-thinking-continuation");
+        let config = config_for_fake(data_dir.clone(), address);
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let tool = json!({
+            "type": "function",
+            "name": "exec_command",
+            "parameters": { "type": "object", "properties": {} }
+        });
+        let first_input = request("resp_native_thinking_first", false, json!([tool.clone()]));
+        let provider_reasoning = json!({
+            "type": "reasoning",
+            "id": "81779b52-d903-4292-8403-deb482a70054",
+            "summary": [{ "type": "summary_text", "text": "thinking" }],
+            "content": null,
+            "encrypted_content": "blob"
+        });
+        let provider_call = json!({
+            "type": "function_call",
+            "id": "b137f544-a01b-4919-b44d-2e5518bf7b7c",
+            "call_id": "call_00_TmpU4u8YPxrcsHPS2Ef48629",
+            "name": "exec_command",
+            "arguments": "{\"cmd\":\"pwsh\"}",
+            "status": "completed"
+        });
+        state
+            .native_pending_tool_groups
+            .register(PendingNativeToolGroup::new(
+                "resp_native_thinking_first",
+                &first_input,
+                first_input["input"].as_array().unwrap().clone(),
+                Vec::new(),
+                vec![provider_reasoning.clone(), provider_call.clone()],
+                vec![provider_reasoning, provider_call],
+                Vec::new(),
+                vec![NativeToolCall {
+                    call_id: "call_00_TmpU4u8YPxrcsHPS2Ef48629".to_owned(),
+                    name: "exec_command".to_owned(),
+                    input: "{\"cmd\":\"pwsh\"}".to_owned(),
+                    kind: NativeToolCallKind::Function,
+                }],
+            ))
+            .unwrap();
+        let mut continuation = request("resp_native_thinking_second", false, json!([tool]));
+        continuation["previous_response_id"] = json!("resp_native_thinking_first");
+        continuation["input"] = json!([
+            first_input["input"][0].clone(),
+            {
+                "type": "message",
+                "id": "msg_66203fd4de464138bae5f9d119e4ed72",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "**DeepSeek Thinking**\n> thinking"
+                }]
+            },
+            {
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "thinking" }],
+                "content": null,
+                "encrypted_content": "blob"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_00_TmpU4u8YPxrcsHPS2Ef48629",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwsh\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_00_TmpU4u8YPxrcsHPS2Ef48629",
+                "output": "done"
+            }
+        ]);
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &continuation,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the replay of the readable thinking message must still continue");
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            0,
+            "a dispatched continuation settles the retained group"
+        );
+        let requests = capture.requests.lock().expect("capture lock");
+        let sent = requests
+            .last()
+            .expect("the continuation reached the provider");
+        let items = sent["input"].as_array().expect("forwarded input");
+        assert!(
+            !items.iter().any(is_display_only_item),
+            "the readable thinking message must never reach upstream"
+        );
+        assert!(
+            items.iter().any(|item| {
+                item.get("id").and_then(Value::as_str)
+                    == Some("81779b52-d903-4292-8403-deb482a70054")
+            }),
+            "upstream must keep CodeSeeX's stored reasoning item"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     #[tokio::test]
     async fn hosted_local_search_stays_on_native_and_never_defers_to_chat_compat() {
         let data_dir = temp_data_dir("local-hosted-native");
@@ -3930,6 +4082,11 @@ mod tests {
                     "summary": [{ "type": "summary_text", "text": "same" }],
                     "content": [{ "type": "reasoning_text", "text": "same" }]
                 },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**" }]
+                },
                 { "type": "message", "role": "user", "content": "hi" }
             ]
         });
@@ -3954,6 +4111,11 @@ mod tests {
         assert_eq!(upstream["input"][2]["summary"], json!([]));
         assert_eq!(upstream["input"][2]["content"][0]["text"], json!("same"));
         assert_eq!(upstream["input"][3]["content"], json!("hi"));
+        assert_eq!(
+            upstream["input"].as_array().unwrap().len(),
+            4,
+            "the display-only thinking message is dropped before upstream"
+        );
         // The client-visible copy keeps the presentation.
         assert_eq!(
             client_payload["input"][0]["summary"][0]["text"],

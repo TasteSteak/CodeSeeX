@@ -1,4 +1,5 @@
 use crate::native_responses::{NativeToolCall, NativeToolCallKind};
+use crate::response_sse::thinking_display_prefix;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -459,6 +460,15 @@ fn collect_client_outputs(
     // A provider tool group and its outputs are an ordered protocol unit.
     // Do not use a map to "fix" an out-of-order client replay: that would
     // turn a malformed or divergent replay into a different request.
+    //
+    // Display-only items CodeSeeX added for the conversation view are dropped
+    // first: they are never sent upstream, so they cannot own a tool output.
+    let input = input
+        .iter()
+        .filter(|item| !is_display_only_item(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    let input = input.as_slice();
     let mut outputs = Vec::with_capacity(calls.len());
     for (index, call) in calls.iter().enumerate() {
         let Some(item) = input.get(index) else {
@@ -576,6 +586,46 @@ fn is_display_only_reasoning(item: &Value) -> bool {
     matches!(item.get("type").and_then(Value::as_str), Some("reasoning"))
 }
 
+/// Plain text of a message item, whether the client sent the content as a
+/// string or as an array of parts.
+fn message_text(item: &Value) -> Option<String> {
+    let content = item.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_owned());
+    }
+    let mut text = String::new();
+    for part in content.as_array()? {
+        let Some(part) = part.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(part);
+    }
+    Some(text)
+}
+
+/// Whether an item is the readable thinking message CodeSeeX adds for the
+/// conversation view, as it comes back from the client.
+///
+/// CodeSeeX marks that artifact with `codeseex_display_only`, but Codex
+/// re-serializes history through its own item types before a request and a
+/// `message` item cannot carry the marker, so only the text survives. The Chat
+/// transport has always recognized the artifact by that text prefix; the native
+/// path has to use the same signal, because the marker is gone by the time the
+/// item is replayed.
+fn is_thinking_display_message(item: &Value) -> bool {
+    item_type(item) == "message"
+        && item.get("role").and_then(Value::as_str) == Some("assistant")
+        && message_text(item)
+            .map(|text| {
+                text.trim_start()
+                    .starts_with(thinking_display_prefix().trim_end())
+            })
+            .unwrap_or(false)
+}
+
 /// Compact identity used only for diagnostics: the same provider item must keep
 /// the same type and id, so a mismatch can be read straight off the log.
 fn compact_item_identity(item: &Value) -> String {
@@ -670,11 +720,11 @@ fn after_visible_group<'a>(input: &'a [Value], stored: &[Value]) -> Option<&'a [
     let mut stored_index = 0;
     let mut input_index = 0;
     while stored_index < stored.len() && input_index < input.len() {
-        if is_display_only_reasoning(&stored[stored_index]) {
+        if is_group_invisible(&stored[stored_index]) {
             stored_index += 1;
             continue;
         }
-        if is_display_only_reasoning(&input[input_index]) {
+        if is_group_invisible(&input[input_index]) {
             input_index += 1;
             continue;
         }
@@ -686,8 +736,32 @@ fn after_visible_group<'a>(input: &'a [Value], stored: &[Value]) -> Option<&'a [
     }
     stored[stored_index..]
         .iter()
-        .all(is_display_only_reasoning)
+        .all(is_group_invisible)
         .then(|| &input[input_index..])
+}
+
+/// Items that never belong to the provider's own conversation: the thinking
+/// Codex replays in its own shape, and the display-only artifacts CodeSeeX
+/// adds for the conversation view. Both are dropped before anything reaches
+/// upstream, so neither can answer a tool call.
+fn is_group_invisible(item: &Value) -> bool {
+    is_display_only_reasoning(item) || is_display_only_item(item)
+}
+
+/// Whether an item exists only for the client's conversation view.
+///
+/// CodeSeeX marks the artifacts it adds itself; they are removed again by the
+/// upstream boundary, so they must not shift the tool group a continuation
+/// answers. The marker only survives until Codex rewrites its own history, so
+/// the thinking message is also recognized by the text it was given.
+pub(crate) fn is_display_only_item(item: &Value) -> bool {
+    item.get("codeseex_display_only").is_some()
+        || item
+            .get("metadata")
+            .and_then(|metadata| metadata.get("codeseex_display_only"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        || is_thinking_display_message(item)
 }
 fn strip_prefix<'a>(input: &'a [Value], prefix: &[Value]) -> Option<&'a [Value]> {
     input
@@ -1521,6 +1595,145 @@ mod tests {
 
         assert!(groups.continuation_for(&child).unwrap().is_none());
         assert_eq!(groups.pending_count(), 1);
+    }
+
+    #[test]
+    fn display_only_thinking_never_shifts_the_tool_group_it_precedes() {
+        // The shape Codex actually replays: CodeSeeX's readable thinking message
+        // arrives before the provider's own reasoning item, and Codex has
+        // dropped `codeseex_display_only` because its `message` item cannot
+        // carry it. The message is still stripped before anything reaches
+        // upstream, so it must not shift the group a continuation answers.
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![
+            json!({
+                "type": "reasoning",
+                "id": "rs_provider",
+                "summary": [{ "type": "summary_text", "text": "step" }],
+                "content": null,
+                "encrypted_content": "blob"
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_shell",
+                "name": "shell_command",
+                "arguments": "{}",
+                "status": "completed"
+            }),
+        ];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+
+        let mut replay = request(vec![
+            authoritative[0].clone(),
+            json!({
+                "type": "message",
+                "id": "msg_display",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> step" }]
+            }),
+            provider[0].clone(),
+            provider[1].clone(),
+            json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+        ]);
+        replay["previous_response_id"] = Value::Null;
+
+        let continuation = groups
+            .continuation_for(&replay)
+            .unwrap()
+            .expect("the group is still answered");
+        assert_eq!(continuation.client_output_count, 1);
+        assert!(
+            !continuation
+                .merged_input
+                .iter()
+                .any(is_display_only_item),
+            "display-only thinking must not be forwarded"
+        );
+        assert_eq!(
+            continuation.merged_input.len(),
+            authoritative.len() + provider.len() + 1,
+            "the replayed group is rebuilt from the stored copy, not the client's"
+        );
+    }
+
+    #[test]
+    fn a_display_message_codex_edited_away_from_the_prefix_still_fails_closed() {
+        // Only the artifact CodeSeeX actually wrote is tolerated. Any other
+        // assistant message the client adds inside the group is a divergence.
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_shell",
+            "name": "shell_command",
+            "arguments": "{}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+
+        let mut replay = request(vec![
+            authoritative[0].clone(),
+            json!({
+                "type": "message",
+                "id": "msg_edited",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{ "type": "output_text", "text": "an unrelated aside" }]
+            }),
+            provider[0].clone(),
+            json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+        ]);
+        replay["previous_response_id"] = Value::Null;
+
+        assert!(matches!(
+            groups.continuation_for(&replay),
+            Err(NativePendingError::VisibleProviderOutputMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn display_only_detection_covers_marked_and_markerless_thinking_messages() {
+        assert!(is_display_only_item(&json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> step" }],
+            "codeseex_display_only": "thinking_markdown"
+        })));
+        assert!(is_display_only_item(&json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "**DeepSeek Thinking**\n> step" }]
+        })));
+        // A user could write the same words, and a normal answer is not an
+        // artifact: neither may be dropped from the provider's conversation.
+        assert!(!is_display_only_item(&json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "**DeepSeek Thinking**\n> step" }]
+        })));
+        assert!(!is_display_only_item(&json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "the answer" }]
+        })));
     }
 
     #[test]
