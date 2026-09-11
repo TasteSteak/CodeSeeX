@@ -49,6 +49,10 @@ pub(crate) struct NativePendingContinuation {
 #[derive(Clone, Default)]
 pub(crate) struct NativePendingToolGroups {
     groups: Arc<Mutex<BTreeMap<String, PendingNativeToolGroup>>>,
+    /// Response ids dropped by the TTL or the capacity bound, waiting to be
+    /// reported. Eviction is normal housekeeping, but it must never be silent:
+    /// a dropped round is a hosted round the provider will not see again.
+    evicted: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Clone)]
@@ -69,9 +73,13 @@ impl NativePendingToolGroups {
             .groups
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        prune_expired(&mut groups);
+        let mut evicted = self
+            .evicted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        prune_expired(&mut groups, &mut evicted);
         groups.insert(group.response_id.clone(), group);
-        trim_to_capacity(&mut groups);
+        trim_to_capacity(&mut groups, &mut evicted);
     }
 
     /// The rounds this request has to replay, if any. `None` means the request
@@ -81,7 +89,11 @@ impl NativePendingToolGroups {
             .groups
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        prune_expired(&mut groups);
+        let mut evicted = self
+            .evicted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        prune_expired(&mut groups, &mut evicted);
         let group = matching_group(&groups, request)?;
         let input = request.get("input").and_then(Value::as_array)?;
         Some(group.continuation(input))
@@ -105,18 +117,27 @@ impl NativePendingToolGroups {
             .len()
     }
 
-    /// Whether a retained round belongs to this request's session anchor. Used
-    /// only to explain a request that arrived without its round: the client's
-    /// request is never changed either way.
-    pub(crate) fn has_round_for(&self, request: &Value) -> bool {
-        let Some(anchor) = request_anchor(request) else {
-            return false;
-        };
+    /// Response ids dropped by the TTL or the capacity bound since the last
+    /// call. The caller records them so an evicted round leaves a trace.
+    pub(crate) fn take_evictions(&self) -> Vec<String> {
+        let mut evicted = self
+            .evicted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *evicted)
+    }
+
+    /// The hash of a retained round that belongs to this request's session
+    /// anchor, if any. Used only to explain a request that arrived without its
+    /// round: the client's request is never changed either way.
+    pub(crate) fn has_round_for(&self, request: &Value) -> Option<String> {
+        let anchor = request_anchor(request)?;
         self.groups
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .values()
-            .any(|group| group.request_anchor.as_deref() == Some(anchor.as_str()))
+            .find(|group| group.request_anchor.as_deref() == Some(anchor.as_str()))
+            .map(|group| short_hash(&group.response_id))
     }
 }
 
@@ -247,12 +268,29 @@ fn short_hash(value: &str) -> String {
         .collect()
 }
 
-fn prune_expired(groups: &mut BTreeMap<String, PendingNativeToolGroup>) {
-    let now = Instant::now();
-    groups.retain(|_, group| now.duration_since(group.created_at) < PENDING_NATIVE_GROUP_TTL);
+/// A short, loggable identity for one retained round.
+pub(crate) fn round_hash(response_id: &str) -> String {
+    short_hash(response_id)
 }
 
-fn trim_to_capacity(groups: &mut BTreeMap<String, PendingNativeToolGroup>) {
+fn prune_expired(
+    groups: &mut BTreeMap<String, PendingNativeToolGroup>,
+    evicted: &mut Vec<String>,
+) {
+    let now = Instant::now();
+    groups.retain(|response_id, group| {
+        if now.duration_since(group.created_at) < PENDING_NATIVE_GROUP_TTL {
+            return true;
+        }
+        evicted.push(response_id.clone());
+        false
+    });
+}
+
+fn trim_to_capacity(
+    groups: &mut BTreeMap<String, PendingNativeToolGroup>,
+    evicted: &mut Vec<String>,
+) {
     while groups.len() > MAX_PENDING_NATIVE_GROUPS {
         let Some(oldest) = groups
             .iter()
@@ -262,6 +300,7 @@ fn trim_to_capacity(groups: &mut BTreeMap<String, PendingNativeToolGroup>) {
             return;
         };
         groups.remove(&oldest);
+        evicted.push(oldest);
     }
 }
 
@@ -416,9 +455,10 @@ mod tests {
         without_input["previous_response_id"] = json!("resp_local_1");
 
         assert!(groups.continuation_for(&without_input).is_none());
-        assert!(
+        assert_eq!(
             groups.has_round_for(&without_input),
-            "the caller can still tell that this session had a round to replay"
+            Some(round_hash("resp_local_1")),
+            "the caller can still tell which round this session had to replay"
         );
     }
 
@@ -448,6 +488,88 @@ mod tests {
         }
 
         assert_eq!(groups.pending_count(), MAX_PENDING_NATIVE_GROUPS);
-        assert!(groups.has_round_for(&request(Vec::new())));
+        assert!(groups.has_round_for(&request(Vec::new())).is_some());
+        let evicted = groups.take_evictions();
+        assert_eq!(
+            evicted.len(),
+            2,
+            "the two rounds dropped by the capacity bound are reported"
+        );
+        assert!(evicted.contains(&"resp_0".to_owned()));
+        assert!(evicted.contains(&"resp_1".to_owned()));
+        assert!(groups.take_evictions().is_empty(), "the report drains");
+    }
+
+    #[test]
+    fn multiple_injected_rounds_keep_their_order_and_offsets() {
+        let groups = NativePendingToolGroups::default();
+        let segments = vec![
+            NativeInjectedItems {
+                offset: 1,
+                items: vec![json!({
+                    "type": "function_call",
+                    "call_id": "call_hosted_1",
+                    "name": "web_search",
+                    "arguments": "{}"
+                })],
+            },
+            NativeInjectedItems {
+                offset: 3,
+                items: vec![json!({
+                    "type": "function_call",
+                    "call_id": "call_hosted_2",
+                    "name": "web_search",
+                    "arguments": "{}"
+                })],
+            },
+        ];
+        groups.register(PendingNativeToolGroup::new(
+            "resp_local_multi",
+            &request(Vec::new()),
+            segments,
+            vec!["call_client_shell".to_owned()],
+        ));
+        let replay = vec![
+            json!({ "type": "message", "role": "user", "content": "start" }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_client_shell",
+                "name": "exec_command",
+                "arguments": "{}"
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_client_shell",
+                "output": "ok"
+            }),
+            json!({ "type": "message", "role": "user", "content": "after" }),
+        ];
+
+        let continuation = groups
+            .continuation_for(&request(replay.clone()))
+            .expect("the retained rounds belong to this request");
+
+        let replay_order = continuation
+            .merged_input
+            .iter()
+            .map(|item| {
+                item.get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "message".to_owned())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replay_order,
+            vec![
+                "message",
+                "call_hosted_1",
+                "call_client_shell",
+                "call_client_shell",
+                "call_hosted_2",
+                "message",
+            ],
+            "each injected round stays at its own offset inside the client's items"
+        );
     }
 }

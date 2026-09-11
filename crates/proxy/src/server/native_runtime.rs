@@ -10,15 +10,15 @@
 
 use super::*;
 use crate::native_coordinator::{
-    NativeInjectedItems, NativePendingContinuation, PendingNativeToolGroup,
+    round_hash, NativeInjectedItems, NativePendingContinuation, PendingNativeToolGroup,
 };
 use crate::native_responses::{
     append_complete_native_tool_group, native_stream_finalization,
     native_tool_call_group_from_response, native_tool_output_item, plan_native_tools,
-    reconcile_grouped_tool_namespaces, repair_provider_tool_schemas,
-    rewrite_provider_response_identity, NativeResponseSseRelay, NativeResponseStreamInspection,
-    NativeResponseTerminal, NativeStreamFinalization, NativeToolCall, NativeToolCallGroup,
-    NativeToolPlan,
+    present_reasoning_summary_in_response, reconcile_grouped_tool_namespaces,
+    repair_provider_tool_schemas, rewrite_provider_response_identity, NativeResponseSseRelay,
+    NativeResponseStreamInspection, NativeResponseTerminal, NativeStreamFinalization,
+    NativeToolCall, NativeToolCallGroup, NativeToolPlan,
 };
 use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::WebSearchBackend;
@@ -123,21 +123,9 @@ async fn try_native_responses(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let plan = match plan_native_tools(&requested_tools, config.web_search_backend) {
-        Ok(plan) => plan,
-        Err(message) => {
-            return Some(native_incompatible(
-                state,
-                config,
-                &id,
-                requested_model,
-                model,
-                "tool_definition_incompatible",
-                message,
-            )
-            .await);
-        }
-    };
+    // Declarations CodeSeeX cannot translate are forwarded verbatim; the
+    // provider decides what it accepts, so a new Codex tool never fails a turn.
+    let plan = plan_native_tools(&requested_tools, config.web_search_backend);
 
     // CodeSeeX-hosted tools (for example local web search) are executed inside
     // the native transport itself. The native route never hands a request to
@@ -296,7 +284,7 @@ async fn try_native_responses(
             passthrough,
         },
         Some(input),
-        payload.clone(),
+        native_upstream_payload(&payload),
     )
     .await;
     let response = match upstream {
@@ -406,7 +394,8 @@ async fn buffer_native_sse(
     use futures_util::StreamExt;
 
     let mut upstream = response.bytes_stream();
-    let mut relay = NativeResponseSseRelay::new(response_id.to_owned());
+    let mut relay = NativeResponseSseRelay::new(response_id.to_owned())
+        .with_reasoning_summary_presentation(true);
     let mut buffered = Vec::new();
     while let Some(next) = upstream.next().await {
         let chunk = next?;
@@ -414,8 +403,8 @@ async fn buffer_native_sse(
             buffered.extend_from_slice(&frame);
         }
     }
-    if let Some(remainder) = relay.finish() {
-        buffered.extend_from_slice(&remainder);
+    for frame in relay.finish() {
+        buffered.extend_from_slice(&frame);
     }
     let inspection = relay.inspection().clone();
     Ok((buffered, inspection))
@@ -542,7 +531,7 @@ async fn native_hosted_tool_loop(
                 passthrough: passthrough.clone(),
             },
             Some(input),
-            payload.clone(),
+            native_upstream_payload(&payload),
         )
         .await;
         let response = match upstream {
@@ -589,14 +578,6 @@ async fn native_hosted_tool_loop(
             )
             .await;
         }
-        // The pending continuation this request consumed has now been accepted
-        // upstream, so it must not stay registered: a stale group would make the
-        // next replay ambiguous. A failed dispatch keeps it for a retry.
-        if let Some(continuation) = pending.as_ref() {
-            state
-                .native_pending_tool_groups
-                .settle(&continuation.pending_response_id);
-        }
         let is_sse = content_type
             .as_ref()
             .and_then(|value| value.to_str().ok())
@@ -605,33 +586,42 @@ async fn native_hosted_tool_loop(
             match buffer_native_sse(response, &id).await {
                 Ok((bytes, inspection)) => {
                     if inspection.output_items_incomplete {
-                        let detail = json!({
-                            "id": id,
-                            "transport": "native_responses",
-                            "tool_loop": "native_hosted",
-                            "issue": "stream_output_items_incomplete"
-                        });
+                        // The frames were forwarded, but CodeSeeX could not
+                        // inspect the whole stream as one bounded group (for
+                        // example a frame larger than the inspection limit). It
+                        // therefore executes nothing on this turn's behalf and
+                        // hands the provider turn back untouched.
                         let _ = state
                             .store
-                            .finish_request(&id, RequestStatus::Failed, None, Some(&detail))
+                            .record_event(
+                                "warn",
+                                "native_stream_uninspectable",
+                                "CodeSeeX could not inspect the whole upstream stream, so the turn was forwarded without executing hosted tools.",
+                                Some(&json!({
+                                    "id": id,
+                                    "transport": "native_responses",
+                                    "tool_loop": "native_hosted",
+                                    "issue": "stream_output_items_incomplete"
+                                })),
+                            )
                             .await;
-                        return json_error(
-                            StatusCode::BAD_GATEWAY,
-                            "native_tool_protocol_invalid",
-                            "Native Responses stream did not yield a safe complete output group."
-                                .to_owned(),
+                        let completed = matches!(
+                            inspection.terminal,
+                            Some(NativeResponseTerminal::Completed)
                         );
+                        (bytes, Vec::new(), completed, inspection.final_usage)
+                    } else {
+                        let completed = matches!(
+                            inspection.terminal,
+                            Some(NativeResponseTerminal::Completed)
+                        );
+                        (
+                            bytes,
+                            inspection.output_items,
+                            completed,
+                            inspection.final_usage,
+                        )
                     }
-                    let completed = matches!(
-                        inspection.terminal,
-                        Some(NativeResponseTerminal::Completed)
-                    );
-                    (
-                        bytes,
-                        inspection.output_items,
-                        completed,
-                        inspection.final_usage,
-                    )
                 }
                 Err(error) => {
                     let detail = upstream_body_read_error_detail(
@@ -707,6 +697,16 @@ async fn native_hosted_tool_loop(
                 .unwrap_or_default();
             (bytes.to_vec(), output_items, completed, native.get("usage").cloned())
         };
+
+        // The body is complete and well-formed, so the retained round this
+        // request consumed has now been replayed successfully upstream. Settle
+        // it here rather than on the status line: a body that fails to read or
+        // to inspect keeps the round registered for a retry.
+        if let Some(continuation) = pending.as_ref() {
+            state
+                .native_pending_tool_groups
+                .settle(&continuation.pending_response_id);
+        }
 
         let tool_group =
             match native_tool_call_group_from_response(&json!({ "output": output_items })) {
@@ -963,9 +963,9 @@ struct NativeHostedClientToolGroupParams<'a> {
 
 /// Hands one provider turn that only carries Codex-owned tool calls back to the
 /// client. The hosted loop must not execute those calls itself, so the turn is
-/// forwarded to Codex and retained in RAM: the client runs the call it owns and
-/// the retained group proves that the replay which follows is complete and in
-/// order before CodeSeeX sends it upstream.
+/// forwarded to Codex untouched. CodeSeeX retains only the hosted rounds it ran
+/// itself; the client's next request is forwarded exactly as it arrives, with
+/// those rounds spliced back in.
 async fn native_hosted_client_tool_group(
     params: NativeHostedClientToolGroupParams<'_>,
 ) -> axum::response::Response {
@@ -1067,7 +1067,11 @@ fn native_provider_turn_response(
     if let Some(provider_id) = provider_id.as_deref() {
         rewrite_provider_response_identity(&mut native, provider_id, id);
     }
-    json_response(native)
+    // The client copy presents provider `reasoning_text` as the summary Codex
+    // renders; the stored copy keeps the provider's own item shape.
+    let mut client_response = native;
+    present_reasoning_summary_in_response(&mut client_response);
+    json_response(client_response)
 }
 
 /// Codex replays `tool_search_output` items verbatim, so one namespace can
@@ -1181,6 +1185,71 @@ fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, 
         .entry("stream".to_owned())
         .or_insert(Value::Bool(false));
     Ok(Value::Object(object))
+}
+
+/// The upstream boundary for the client-facing reasoning presentation.
+///
+/// The native relay presents provider `reasoning_text` as the summary Codex
+/// renders, because that is the shape Codex's own thinking chain understands.
+/// DeepSeek's thinking mode then requires the text back in `reasoning_text` on
+/// the next call, so the presentation is undone here before a replay reaches
+/// upstream. The mapping is read from the item itself, so it holds for every
+/// replayed item, including the ones Codex re-serializes without the provider
+/// item id.
+fn native_upstream_payload(payload: &Value) -> Value {
+    let mut payload = payload.clone();
+    let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
+        return payload;
+    };
+    for item in items.iter_mut() {
+        restore_reasoning_text_field(item);
+    }
+    payload
+}
+
+/// Puts a presented summary back into the provider's own `reasoning_text`
+/// content and drops the summary CodeSeeX added, so a thinking-mode replay
+/// always carries the text DeepSeek requires.
+fn restore_reasoning_text_field(item: &mut Value) {
+    if !item.is_object() || item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return;
+    }
+    let summary_text = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().map(summary_part_text).collect::<String>())
+        .unwrap_or_default();
+    let content_text = item
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("reasoning_text"))
+                .map(summary_part_text)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if content_text.is_empty() {
+        if summary_text.is_empty() {
+            return;
+        }
+        item["content"] = json!([{ "type": "reasoning_text", "text": summary_text }]);
+        item["summary"] = Value::Array(Vec::new());
+        return;
+    }
+    // Keep a provider-authored summary when it is not the presentation CodeSeeX
+    // added; only an exact duplicate of the reasoning text is dropped.
+    if content_text == summary_text {
+        item["summary"] = Value::Array(Vec::new());
+    }
+}
+
+fn summary_part_text(part: &Value) -> String {
+    part.get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 async fn native_upstream_status_failure(
@@ -1442,7 +1511,8 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         async_stream::try_stream! {
             let _stream_guard = guard;
             let mut upstream = response.bytes_stream();
-            let mut relay = NativeResponseSseRelay::new(response_id.clone());
+            let mut relay = NativeResponseSseRelay::new(response_id.clone())
+                .with_reasoning_summary_presentation(true);
             loop {
                 tokio::select! {
                     _ = cancelled.cancelled() => {
@@ -1492,8 +1562,8 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                     }
                 }
             }
-            if let Some(remainder) = relay.finish() {
-                yield Bytes::from(remainder);
+            for frame in relay.finish() {
+                yield Bytes::from(frame);
             }
             let inspection = relay.inspection().clone();
             let mut finalization = native_stream_finalization(&inspection, streaming_response_cancelled(&cancelled));
@@ -1501,11 +1571,22 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
             let mut tool_group_issue = None;
             if finalization == NativeStreamFinalization::Completed {
                 if inspection.output_items_incomplete {
-                    finalization = NativeStreamFinalization::Failed;
-                    tool_group_issue = Some(
-                        "Native Responses stream output items could not be retained as one bounded group."
-                            .to_owned(),
-                    );
+                    // Incomplete accounting is not a client-facing failure: the
+                    // provider frames were forwarded as they arrived. Record it
+                    // and keep going instead of turning the user's turn into an
+                    // error CodeSeeX invented.
+                    let _ = state
+                        .store
+                        .record_event(
+                            "warn",
+                            "native_stream_uninspectable",
+                            "CodeSeeX could not inspect the whole upstream stream; the response was forwarded as it arrived.",
+                            Some(&json!({
+                                "id": response_id,
+                                "issue": "stream_output_items_incomplete"
+                            })),
+                        )
+                        .await;
                 } else {
                     let native_output = json!({ "output": inspection.output_items.clone() });
                     match native_tool_call_group_from_response(&native_output) {
@@ -1639,22 +1720,42 @@ async fn resolve_native_pending_input(
 ) -> Option<NativePendingContinuation> {
     match state.native_pending_tool_groups.continuation_for(input) {
         None => {
-            if !state.native_pending_tool_groups.has_round_for(input) {
-                return None;
-            }
+            let pending_hash = state.native_pending_tool_groups.has_round_for(input)?;
             let _ = state
                 .store
                 .record_event(
                     "warn",
                     "native_pending_round_not_replayed",
                     "CodeSeeX retained a hosted tool round for this session, but this request does not continue it. The request was forwarded unchanged, so the provider does not see that round again.",
-                    Some(&json!({ "id": id })),
+                    Some(&json!({
+                        "id": id,
+                        "pending_response_id_hash": pending_hash
+                    })),
                 )
                 .await;
             None
         }
         Some(continuation) => {
             payload["input"] = Value::Array(continuation.merged_input.clone());
+            let evicted = state.native_pending_tool_groups.take_evictions();
+            if !evicted.is_empty() {
+                let hashes = evicted
+                    .iter()
+                    .map(|response_id| round_hash(response_id))
+                    .collect::<Vec<_>>();
+                let _ = state
+                    .store
+                    .record_event(
+                        "warn",
+                        "native_pending_round_evicted",
+                        "CodeSeeX dropped retained hosted tool rounds because they expired or exceeded the retention bound; the provider will not see those rounds again.",
+                        Some(&json!({
+                            "id": id,
+                            "evicted_rounds": hashes
+                        })),
+                    )
+                    .await;
+            }
             let _ = state
                 .store
                 .record_event(

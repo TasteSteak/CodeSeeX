@@ -1,10 +1,11 @@
-//! Read-only observation of a native DeepSeek Responses SSE stream.
+//! Observation and boundary mapping of a native DeepSeek Responses SSE stream.
 //!
-//! Native transport must not synthesize Chat-style events, renumber sequence
-//! numbers, or append a `[DONE]` sentinel. This module deliberately observes
-//! bytes without changing them. It provides only the terminal facts needed for
-//! local lifecycle accounting; the future native route remains responsible for
-//! any narrowly-scoped response-id mapping.
+//! Native transport must not borrow Chat compatibility, must not append a
+//! `[DONE]` sentinel, and must never rewrite the provider's own tool protocol.
+//! Two boundaries are mapped here, and both stay client-facing only:
+//! response identity, and the reasoning presentation Codex renders. The
+//! inspector always observes the untouched upstream frames, so the provider
+//! copy remains authoritative for tool continuations.
 
 use codeseex_core::config::WebSearchBackend;
 use serde_json::{json, Map, Value};
@@ -12,6 +13,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_INSPECTED_SSE_FRAME_BYTES: usize = 256 * 1024;
+/// A frame too large to inspect is still the provider's own frame, so it is
+/// forwarded as it arrived rather than dropped. Past this hard cap the relay
+/// stops buffering a frame that never terminated, so a truncated or hostile
+/// stream cannot grow without bound.
+const MAX_RELAYED_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RETAINED_NATIVE_OUTPUT_ITEMS: usize = 128;
 const MAX_RETAINED_NATIVE_OUTPUT_BYTES: usize = 1_048_576;
 
@@ -149,7 +155,10 @@ fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCa
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "Native tool call did not contain a tool name.".to_owned())?;
     if kind == NativeToolCallKind::Custom && name != "apply_patch" {
-        return Err("Native Responses returned an unsupported custom tool call.".to_owned());
+        // A custom grammar CodeSeeX does not coordinate (for example a tool a
+        // newer Codex declares) stays provider-owned: the item is forwarded to
+        // the client untouched and CodeSeeX claims no output for it.
+        return Ok(None);
     }
     if item.get("status").and_then(Value::as_str) != Some("completed") {
         return Err("Native tool call was not completed in the provider response.".to_owned());
@@ -175,10 +184,17 @@ fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCa
 /// grouping and echoes the namespace back on the call item, so flattening or
 /// rebuilding those declarations would change the tool identity the Codex
 /// client resolves. Unknown shapes still fail closed.
+/// Plans the tool list for one native request.
+///
+/// CodeSeeX translates the declarations it owns (CodeSeeX-hosted search,
+/// `apply_patch`, plain functions) and forwards everything else exactly as the
+/// client sent it. It never rejects a turn because it does not recognise a
+/// declaration: the provider is the one that decides what it accepts, and a
+/// newer Codex must not be able to break the transport by adding a tool.
 pub(crate) fn plan_native_tools(
     chat_tool_definitions: &[Value],
     web_search_backend: WebSearchBackend,
-) -> Result<NativeToolPlan, String> {
+) -> NativeToolPlan {
     let mut tools = Vec::new();
     let mut names = BTreeSet::new();
     let mut requires_local_execution = false;
@@ -201,12 +217,13 @@ pub(crate) fn plan_native_tools(
             // missing local function instead of silently switching backend.
             continue;
         }
-        let name = tool_name(definition)
-            .or_else(|| provider_native_identity(definition))
-            .ok_or_else(|| {
-                "A native Responses tool definition is missing a callable name; CodeSeeX did not silently drop it."
-                    .to_owned()
-            })?;
+        let Some(name) = tool_name(definition).or_else(|| provider_native_identity(definition))
+        else {
+            // A declaration CodeSeeX cannot even name is still the client's own
+            // declaration. Forward it untouched instead of failing the turn.
+            tools.push(definition.clone());
+            continue;
+        };
         if matches!(name, "web_search" | "web_search_preview") {
             saw_local_web_search = true;
             if web_search_backend == WebSearchBackend::Official {
@@ -221,7 +238,7 @@ pub(crate) fn plan_native_tools(
             // client itself, so a native request keeps them in the provider
             // tool list instead of falling back to Chat compatibility.
         }
-        let native = native_definition_from_chat(definition, name)?;
+        let native = native_definition_from_chat(definition, name);
         if names.insert(tool_identity(&native).to_owned()) {
             tools.push(native);
         }
@@ -243,11 +260,11 @@ pub(crate) fn plan_native_tools(
         requires_local_execution = true;
     }
 
-    Ok(NativeToolPlan {
+    NativeToolPlan {
         tools,
         requires_local_execution,
         uses_official_web_search,
-    })
+    }
 }
 
 /// A grouped declaration is a named entry that owns nested tools: the
@@ -606,67 +623,12 @@ fn is_provider_native_grouped_type(declared_type: &str) -> bool {
     matches!(declared_type, "namespace" | "tool_search")
 }
 
-/// Validates a provider-native grouped declaration without rewriting it. The
-/// nested names are the callable identities the client already resolves, so
-/// CodeSeeX only proves the declaration is complete enough to forward.
-fn native_grouped_definition(
-    definition: &Value,
-    name: &str,
-    declared_type: &str,
-) -> Result<Value, String> {
-    if declared_type == "namespace" {
-        let tools = definition
-            .get("tools")
-            .and_then(Value::as_array)
-            .filter(|tools| !tools.is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "Native Responses namespace tool '{name}' did not declare a non-empty nested tool list."
-                )
-            })?;
-        for nested in tools {
-            let nested_type = nested
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !matches!(nested_type, "function" | "custom") {
-                return Err(format!(
-                    "Native Responses namespace tool '{name}' contains an unsupported nested tool type '{nested_type}'."
-                ));
-            }
-            if nested
-                .get("name")
-                .and_then(Value::as_str)
-                .is_none_or(|value| value.trim().is_empty())
-            {
-                return Err(format!(
-                    "Native Responses namespace tool '{name}' contains a nested tool without a callable name."
-                ));
-            }
-        }
-    }
-
-    if declared_type == "tool_search" {
-        if definition
-            .get("execution")
-            .and_then(Value::as_str)
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(format!(
-                "Native Responses tool_search declaration '{name}' did not declare its execution mode."
-            ));
-        }
-        if !definition.get("parameters").is_some_and(Value::is_object) {
-            return Err(format!(
-                "Native Responses tool_search declaration '{name}' did not declare its parameters schema."
-            ));
-        }
-    }
-
-    Ok(definition.clone())
-}
-
-fn native_definition_from_chat(definition: &Value, name: &str) -> Result<Value, String> {
+/// The provider-facing declaration for one client tool.
+///
+/// Declarations CodeSeeX owns are translated; anything else (including a grouped
+/// namespace, an unknown type, or a custom grammar CodeSeeX does not know) is
+/// forwarded verbatim so the provider decides whether it is acceptable.
+fn native_definition_from_chat(definition: &Value, name: &str) -> Value {
     let declared_type = definition
         .get("type")
         .and_then(Value::as_str)
@@ -674,19 +636,13 @@ fn native_definition_from_chat(definition: &Value, name: &str) -> Result<Value, 
 
     // Grouped declarations are provider-owned and forwarded verbatim.
     if is_provider_native_grouped_type(declared_type) {
-        return native_grouped_definition(definition, name, declared_type);
+        return definition.clone();
     }
 
     // An already-native custom declaration carries the grammar the provider
     // needs, so it is forwarded verbatim instead of being rebuilt without it.
-    // `apply_patch` is the only custom tool the call coordinator has verified.
     if declared_type == "custom" {
-        if name != "apply_patch" {
-            return Err(format!(
-                "Native Responses cannot safely translate tool '{name}' with type '{declared_type}'."
-            ));
-        }
-        return Ok(definition.clone());
+        return definition.clone();
     }
 
     if name == "apply_patch" {
@@ -695,20 +651,19 @@ fn native_definition_from_chat(definition: &Value, name: &str) -> Result<Value, 
             .or_else(|| definition.get("description"))
             .and_then(Value::as_str)
             .unwrap_or("Apply one complete native apply_patch document.");
-        return Ok(json!({
+        return json!({
             "type": "custom",
             "name": "apply_patch",
             "description": description
-        }));
+        });
     }
 
     if matches!(declared_type, "web_search" | "web_search_2025_08_26") {
-        return Ok(json!({ "type": "web_search" }));
+        return json!({ "type": "web_search" });
     }
     if declared_type != "function" {
-        return Err(format!(
-            "Native Responses cannot safely translate tool '{name}' with type '{declared_type}'."
-        ));
+        // Unknown declaration type: pass it through and let the provider rule.
+        return definition.clone();
     }
     let function = definition.get("function").unwrap_or(definition);
     let description = function
@@ -736,7 +691,7 @@ fn native_definition_from_chat(definition: &Value, name: &str) -> Result<Value, 
     {
         native["strict"] = Value::Bool(strict);
     }
-    Ok(native)
+    native
 }
 
 fn is_provider_web_search_definition(definition: &Value) -> bool {
@@ -805,8 +760,8 @@ pub(crate) struct NativeResponseStreamInspection {
     pub(crate) saw_done_sentinel: bool,
     pub(crate) oversized_frame_ignored: bool,
     /// Raw provider output items are retained only in RAM until the stream
-    /// ends. They are needed to register an exact client-tool continuation;
-    /// no item content is put into diagnostics.
+    /// ends. They are used to recognise CodeSeeX-hosted calls and to count the
+    /// provider's tool calls; no item content is put into diagnostics.
     pub(crate) output_items: Vec<Value>,
     pub(crate) output_items_bytes: usize,
     pub(crate) output_items_incomplete: bool,
@@ -836,6 +791,13 @@ pub(crate) struct NativeResponseSseInspector {
 }
 
 impl NativeResponseSseInspector {
+    /// Records that one frame could not be inspected. The frame itself is still
+    /// forwarded; only CodeSeeX's own accounting is incomplete.
+    pub(crate) fn mark_uninspectable_frame(&mut self) {
+        self.inspection.oversized_frame_ignored = true;
+        self.inspection.output_items_incomplete = true;
+    }
+
     pub(crate) fn observe_bytes(&mut self, bytes: &[u8]) {
         if self.inspection.oversized_frame_ignored {
             return;
@@ -844,8 +806,7 @@ impl NativeResponseSseInspector {
         while let Some((index, delimiter_len)) = find_sse_frame_delimiter(&self.buffer) {
             if index > MAX_INSPECTED_SSE_FRAME_BYTES {
                 self.buffer.drain(..index + delimiter_len);
-                self.inspection.oversized_frame_ignored = true;
-                self.inspection.output_items_incomplete = true;
+                self.mark_uninspectable_frame();
                 self.buffer.clear();
                 break;
             }
@@ -855,8 +816,7 @@ impl NativeResponseSseInspector {
         }
         if self.buffer.len() > MAX_INSPECTED_SSE_FRAME_BYTES {
             self.buffer.clear();
-            self.inspection.oversized_frame_ignored = true;
-            self.inspection.output_items_incomplete = true;
+            self.mark_uninspectable_frame();
         }
     }
 
@@ -999,6 +959,9 @@ pub(crate) struct NativeResponseSseRelay {
     inspector: NativeResponseSseInspector,
     provider_response_id: Option<String>,
     local_response_id: String,
+    present_reasoning_summary: bool,
+    sequence_offset: u64,
+    reasoning: ReasoningSummaryMirror,
 }
 
 impl NativeResponseSseRelay {
@@ -1008,42 +971,56 @@ impl NativeResponseSseRelay {
             inspector: NativeResponseSseInspector::default(),
             provider_response_id: None,
             local_response_id: local_response_id.into(),
+            present_reasoning_summary: false,
+            sequence_offset: 0,
+            reasoning: ReasoningSummaryMirror::default(),
         }
     }
 
+    /// Presents provider `reasoning_text` as the summary Codex renders. The
+    /// provider copy of every item is still what the inspector retains and what
+    /// tool continuations are rebuilt from.
+    pub(crate) fn with_reasoning_summary_presentation(mut self, enabled: bool) -> Self {
+        self.present_reasoning_summary = enabled;
+        self
+    }
+
     pub(crate) fn relay_bytes(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        if self.inspector.inspection().oversized_frame_ignored {
-            return Vec::new();
-        }
         let mut ready = Vec::new();
         self.buffer.extend_from_slice(bytes);
         while let Some((index, delimiter_len)) = find_sse_frame_delimiter(&self.buffer) {
-            if index > MAX_INSPECTED_SSE_FRAME_BYTES {
-                self.buffer.drain(..index + delimiter_len);
-                self.inspector.inspection.oversized_frame_ignored = true;
-                self.inspector.inspection.output_items_incomplete = true;
-                self.buffer.clear();
-                break;
-            }
             let frame = self.buffer.drain(..index).collect::<Vec<_>>();
             let delimiter = self.buffer.drain(..delimiter_len).collect::<Vec<_>>();
+            if frame.len() > MAX_INSPECTED_SSE_FRAME_BYTES {
+                // Too large to inspect, but the client stream must not lose it:
+                // forward the provider frame unchanged and record that this
+                // response could not be accounted for as one bounded group.
+                self.inspector.mark_uninspectable_frame();
+                ready.push(append_delimiter(frame, &delimiter));
+                continue;
+            }
             self.inspector.observe_bytes(&frame);
             self.inspector.observe_bytes(&delimiter);
-            ready.push(self.relay_frame(frame, delimiter));
+            self.relay_frame(frame, delimiter, &mut ready);
         }
-        // Do not hold an unterminated upstream event unboundedly. It cannot be
-        // inspected or safely mapped. Drop it instead of forwarding provider
-        // response identity or an unverified tool payload to Codex.
         if self.buffer.len() > MAX_INSPECTED_SSE_FRAME_BYTES {
-            self.inspector.observe_bytes(&self.buffer);
-            self.inspector.inspection.oversized_frame_ignored = true;
-            self.inspector.inspection.output_items_incomplete = true;
-            self.buffer.clear();
+            // The frame is still incomplete, so nothing can be inspected yet.
+            // Record that this response will not be accounted for as one
+            // bounded group even though the bytes stay buffered.
+            self.inspector.mark_uninspectable_frame();
+            // Past the hard cap it can neither be inspected nor completed, and
+            // holding it would grow without bound.
+            if self.buffer.len() > MAX_RELAYED_SSE_FRAME_BYTES {
+                self.buffer.clear();
+            }
         }
         ready
     }
 
-    pub(crate) fn finish(&mut self) -> Option<Vec<u8>> {
+    /// Flushes the trailing frame, if the upstream omitted its blank line. The
+    /// presentation may add summary frames for that item, so every frame is
+    /// returned instead of only the first.
+    pub(crate) fn finish(&mut self) -> Vec<Vec<u8>> {
         let remainder = (!self.buffer.is_empty()).then(|| std::mem::take(&mut self.buffer));
         if let Some(bytes) = remainder.as_ref() {
             self.inspector.observe_bytes(bytes);
@@ -1052,16 +1029,21 @@ impl NativeResponseSseRelay {
         // A bounded terminal SSE event may omit its trailing blank line. It
         // can still carry a provider response id, so apply the same narrow
         // identity rewrite before forwarding it.
-        remainder.map(|frame| self.relay_frame(frame, Vec::new()))
+        let mut ready = Vec::new();
+        if let Some(frame) = remainder {
+            self.relay_frame(frame, Vec::new(), &mut ready);
+        }
+        ready
     }
 
     pub(crate) fn inspection(&self) -> &NativeResponseStreamInspection {
         self.inspector.inspection()
     }
 
-    fn relay_frame(&mut self, frame: Vec<u8>, delimiter: Vec<u8>) -> Vec<u8> {
+    fn relay_frame(&mut self, frame: Vec<u8>, delimiter: Vec<u8>, out: &mut Vec<Vec<u8>>) {
         let Ok(text) = std::str::from_utf8(&frame) else {
-            return append_delimiter(frame, &delimiter);
+            out.push(append_delimiter(frame, &delimiter));
+            return;
         };
         let data = text
             .lines()
@@ -1070,24 +1052,532 @@ impl NativeResponseSseRelay {
             .collect::<Vec<_>>()
             .join("\n");
         let Ok(mut payload) = serde_json::from_str::<Value>(data.trim()) else {
-            return append_delimiter(frame, &delimiter);
+            out.push(append_delimiter(frame, &delimiter));
+            return;
         };
         if self.provider_response_id.is_none() {
             self.provider_response_id = response_id_from_event(&payload).map(str::to_owned);
         }
-        let Some(provider_response_id) = self.provider_response_id.as_deref() else {
-            return append_delimiter(frame, &delimiter);
-        };
-        if !rewrite_provider_response_identity(
-            &mut payload,
-            provider_response_id,
-            &self.local_response_id,
-        ) {
-            return append_delimiter(frame, &delimiter);
+        let identity_rewritten =
+            self.provider_response_id
+                .as_deref()
+                .is_some_and(|provider_response_id| {
+                    rewrite_provider_response_identity(
+                        &mut payload,
+                        provider_response_id,
+                        &self.local_response_id,
+                    )
+                });
+        let base_sequence = payload.get("sequence_number").and_then(Value::as_u64);
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let mut injected = Vec::new();
+        if self.present_reasoning_summary {
+            if let Some(base_sequence) = base_sequence {
+                self.mirror_reasoning_event(&mut payload, base_sequence, &mut injected);
+            }
         }
-        let serialized = serde_json::to_string(&payload).unwrap_or_else(|_| data.trim().to_owned());
-        append_delimiter(rewrite_sse_data_lines(text, &serialized), &delimiter)
+        // These two carry the reasoning item itself, so the presentation edits
+        // the payload and the frame has to be re-serialized even when the
+        // response identity did not change.
+        let mutated = self.present_reasoning_summary
+            && matches!(
+                event_type.as_str(),
+                "response.output_item.added"
+                    | "response.output_item.done"
+                    | "response.completed"
+            );
+        let suppressed = self.suppress_provider_reasoning(&event_type, &payload);
+        if !identity_rewritten && injected.is_empty() && !mutated && !suppressed {
+            out.push(append_delimiter(frame, &delimiter));
+            return;
+        }
+        if !suppressed {
+            if let Some(base_sequence) = base_sequence {
+                payload["sequence_number"] = json!(base_sequence + self.sequence_offset);
+            }
+            let serialized =
+                serde_json::to_string(&payload).unwrap_or_else(|_| data.trim().to_owned());
+            out.push(append_delimiter(
+                rewrite_sse_data_lines(text, &serialized),
+                &delimiter,
+            ));
+        }
+        let injected_count = injected.len() as u64;
+        for (index, mut event) in injected.into_iter().enumerate() {
+            let Some(base_sequence) = base_sequence else {
+                continue;
+            };
+            event["sequence_number"] = json!(base_sequence + self.sequence_offset + 1 + index as u64);
+            let event_name = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            out.push(sse_frame(&event_name, &event));
+        }
+        self.sequence_offset += injected_count;
     }
+
+    /// Re-announces provider `reasoning_text` as summary parts for the client.
+    ///
+    /// DeepSeek's native stream carries thinking as `reasoning_text` content,
+    /// while Codex renders thinking from `summary_text`. The text is mirrored
+    /// instead of moved: the `reasoning_text` events still pass through, so the
+    /// client keeps the provider's own item shape, and the mirrored summary is
+    /// dropped again by the request boundary before anything reaches upstream.
+    fn mirror_reasoning_event(
+        &mut self,
+        payload: &mut Value,
+        _base_sequence: u64,
+        injected: &mut Vec<Value>,
+    ) {
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let output_index = payload
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let response_id = self.local_response_id.clone();
+        match event_type.as_str() {
+            "response.output_item.added" => {
+                if payload.pointer("/item/type").and_then(Value::as_str) != Some("reasoning") {
+                    return;
+                }
+                let Some(item_id) = payload
+                    .pointer("/item/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                self.reasoning.begin(&item_id);
+                let provider_summary = payload
+                    .pointer("/item/summary")
+                    .and_then(Value::as_array)
+                    .is_some_and(|summary| !summary.is_empty());
+                if provider_summary {
+                    self.reasoning.mark_provider_summary(&item_id);
+                    return;
+                }
+                // The client sees the thinking as a summary, never as raw
+                // reasoning content, so the announced item matches what the
+                // summary events below build up.
+                payload["item"]["content"] = Value::Null;
+            }
+            "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_summary_part.done" => {
+                // The provider writes the summary itself; leave that item alone.
+                if let Some(item_id) = payload.get("item_id").and_then(Value::as_str) {
+                    self.reasoning.mark_provider_summary(item_id);
+                }
+            }
+            "response.content_part.added" => {
+                let is_reasoning_text = payload.pointer("/part/type").and_then(Value::as_str)
+                    == Some("reasoning_text");
+                let Some(item_id) = payload
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                if !is_reasoning_text {
+                    return;
+                }
+                self.reasoning.begin(&item_id);
+                if self.reasoning.provider_writes_summary(&item_id) {
+                    return;
+                }
+                if !self.reasoning.part_announced {
+                    self.reasoning.part_announced = true;
+                    injected.push(reasoning_summary_part_added(
+                        &response_id,
+                        &item_id,
+                        output_index,
+                    ));
+                }
+            }
+            "response.reasoning_text.delta" => {
+                let Some(item_id) = payload
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                let delta = payload
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.reasoning.begin(&item_id);
+                if self.reasoning.provider_writes_summary(&item_id) {
+                    return;
+                }
+                self.reasoning.push_delta(&item_id, delta);
+                if !self.reasoning.part_announced {
+                    self.reasoning.part_announced = true;
+                    injected.push(reasoning_summary_part_added(
+                        &response_id,
+                        &item_id,
+                        output_index,
+                    ));
+                }
+                if !delta.is_empty() {
+                    injected.push(reasoning_summary_text_delta(
+                        &response_id,
+                        &item_id,
+                        output_index,
+                        delta,
+                    ));
+                }
+            }
+            "response.reasoning_text.done" => {
+                let Some(item_id) = payload
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                self.reasoning.begin(&item_id);
+                if self.reasoning.provider_writes_summary(&item_id) {
+                    return;
+                }
+                self.finish_reasoning_summary(&response_id, &item_id, output_index, injected);
+            }
+            "response.output_item.done" => {
+                let item_id = payload
+                    .pointer("/item/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let is_reasoning =
+                    payload.pointer("/item/type").and_then(Value::as_str) == Some("reasoning");
+                let Some(item_id) = item_id else {
+                    return;
+                };
+                if !is_reasoning {
+                    return;
+                }
+                if self.reasoning.provider_writes_summary(&item_id) {
+                    self.reasoning.finish_item(&item_id);
+                    return;
+                }
+                let summary_empty = payload
+                    .pointer("/item/summary")
+                    .and_then(Value::as_array)
+                    .map(Vec::is_empty)
+                    .unwrap_or(true);
+                if !summary_empty {
+                    self.reasoning.finish_item(&item_id);
+                    return;
+                }
+                let Some(text) = self.reasoning.text(&item_id).map(str::to_owned) else {
+                    self.reasoning.finish_item(&item_id);
+                    return;
+                };
+                self.finish_reasoning_summary(&response_id, &item_id, output_index, injected);
+                payload["item"]["summary"] = Value::Array(vec![reasoning_summary_part(&text)]);
+                payload["item"]["content"] = Value::Null;
+                self.reasoning.finish_item(&item_id);
+            }
+            "response.completed" => {
+                let texts = self.reasoning.texts.clone();
+                let Some(items) = payload
+                    .pointer_mut("/response/output")
+                    .and_then(Value::as_array_mut)
+                else {
+                    return;
+                };
+                for item in items.iter_mut() {
+                    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+                        continue;
+                    }
+                    let summary_empty = item
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .map(Vec::is_empty)
+                        .unwrap_or(true);
+                    if !summary_empty {
+                        continue;
+                    }
+                    let Some(item_id) = item.get("id").and_then(Value::as_str).map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    if self.reasoning.provider_writes_summary(&item_id) {
+                        continue;
+                    }
+                    let Some(text) = texts.get(&item_id).filter(|text| !text.is_empty()) else {
+                        continue;
+                    };
+                    item["summary"] = Value::Array(vec![reasoning_summary_part(text)]);
+                    item["content"] = Value::Null;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_reasoning_summary(
+        &mut self,
+        response_id: &str,
+        item_id: &str,
+        output_index: u64,
+        injected: &mut Vec<Value>,
+    ) {
+        if !self.reasoning.part_announced {
+            self.reasoning.part_announced = true;
+            injected.push(reasoning_summary_part_added(
+                response_id,
+                item_id,
+                output_index,
+            ));
+        }
+        if self.reasoning.text_done {
+            return;
+        }
+        self.reasoning.text_done = true;
+        let Some(text) = self.reasoning.text(item_id).map(str::to_owned) else {
+            return;
+        };
+        injected.push(reasoning_summary_text_done(
+            response_id,
+            item_id,
+            output_index,
+            &text,
+        ));
+        injected.push(reasoning_summary_part_done(
+            response_id,
+            item_id,
+            output_index,
+            &text,
+        ));
+    }
+
+    /// Whether the client-facing presentation replaces this provider frame.
+    ///
+    /// Only reasoning content CodeSeeX presents as a summary is dropped. A
+    /// provider that writes its own summary keeps its stream intact.
+    fn suppress_provider_reasoning(&self, event_type: &str, payload: &Value) -> bool {
+        if !self.present_reasoning_summary {
+            return false;
+        }
+        match event_type {
+            "response.content_part.added" | "response.content_part.done" => {
+                payload.pointer("/part/type").and_then(Value::as_str) == Some("reasoning_text")
+                    && payload
+                        .get("item_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|item_id| !self.reasoning.provider_writes_summary(item_id))
+            }
+            "response.reasoning_text.delta" | "response.reasoning_text.done" => payload
+                .get("item_id")
+                .and_then(Value::as_str)
+                .is_some_and(|item_id| !self.reasoning.provider_writes_summary(item_id)),
+            _ => false,
+        }
+    }
+}
+
+/// Client-facing display mirror of provider reasoning.
+///
+/// Only item ids and the mirrored text live here; provider items are never
+/// rebuilt from this state.
+#[derive(Debug, Default)]
+struct ReasoningSummaryMirror {
+    active_item_id: Option<String>,
+    part_announced: bool,
+    text_done: bool,
+    texts: BTreeMap<String, String>,
+    /// Items where the provider writes the summary itself. Those keep their own
+    /// presentation; CodeSeeX never rewrites or duplicates them.
+    provider_summary_items: BTreeSet<String>,
+}
+
+impl ReasoningSummaryMirror {
+    const MAX_TRACKED_ITEMS: usize = 8;
+
+    fn begin(&mut self, item_id: &str) {
+        if self.active_item_id.as_deref() != Some(item_id) {
+            self.active_item_id = Some(item_id.to_owned());
+            self.part_announced = false;
+            self.text_done = false;
+        }
+        self.texts.entry(item_id.to_owned()).or_default();
+        while self.texts.len() > Self::MAX_TRACKED_ITEMS {
+            let Some(oldest) = self.texts.keys().next().cloned() else {
+                break;
+            };
+            self.texts.remove(&oldest);
+        }
+    }
+
+    fn push_delta(&mut self, item_id: &str, delta: &str) {
+        if let Some(text) = self.texts.get_mut(item_id) {
+            text.push_str(delta);
+        }
+    }
+
+    fn text(&self, item_id: &str) -> Option<&str> {
+        self.texts
+            .get(item_id)
+            .map(String::as_str)
+            .filter(|text| !text.is_empty())
+    }
+
+    fn finish_item(&mut self, item_id: &str) {
+        if self.active_item_id.as_deref() == Some(item_id) {
+            self.active_item_id = None;
+            self.part_announced = false;
+            self.text_done = false;
+        }
+    }
+
+    fn mark_provider_summary(&mut self, item_id: &str) {
+        self.provider_summary_items.insert(item_id.to_owned());
+        while self.provider_summary_items.len() > Self::MAX_TRACKED_ITEMS {
+            let Some(oldest) = self.provider_summary_items.iter().next().cloned() else {
+                break;
+            };
+            self.provider_summary_items.remove(&oldest);
+        }
+    }
+
+    fn provider_writes_summary(&self, item_id: &str) -> bool {
+        self.provider_summary_items.contains(item_id)
+    }
+}
+
+fn reasoning_summary_part(text: &str) -> Value {
+    json!({ "type": "summary_text", "text": text })
+}
+
+/// Non-streaming counterpart of the relay's reasoning presentation.
+///
+/// A provider that answers without streaming carries its thinking in the same
+/// `reasoning_text` content parts, with an empty `summary`. The client copy is
+/// rewritten into the summary shape Codex renders; the request boundary puts
+/// the provider's own shape back before the item is replayed upstream.
+pub(crate) fn present_reasoning_summary_in_response(response: &mut Value) {
+    let Some(items) = response.get_mut("output").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items.iter_mut() {
+        if !item.is_object() || item.get("type").and_then(Value::as_str) != Some("reasoning") {
+            continue;
+        }
+        let summary_empty = item
+            .get("summary")
+            .and_then(Value::as_array)
+            .map(Vec::is_empty)
+            .unwrap_or(true);
+        if !summary_empty {
+            continue;
+        }
+        let text = item
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter(|part| {
+                        part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                    })
+                    .map(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        item["summary"] = Value::Array(vec![reasoning_summary_part(&text)]);
+        item["content"] = Value::Null;
+    }
+}
+
+fn reasoning_summary_part_added(response_id: &str, item_id: &str, output_index: u64) -> Value {
+    json!({
+        "type": "response.reasoning_summary_part.added",
+        "response_id": response_id,
+        "item_id": item_id,
+        "output_index": output_index,
+        "summary_index": 0,
+        "part": { "type": "summary_text", "text": "" }
+    })
+}
+
+fn reasoning_summary_text_delta(
+    response_id: &str,
+    item_id: &str,
+    output_index: u64,
+    delta: &str,
+) -> Value {
+    json!({
+        "type": "response.reasoning_summary_text.delta",
+        "response_id": response_id,
+        "item_id": item_id,
+        "output_index": output_index,
+        "summary_index": 0,
+        "delta": delta
+    })
+}
+
+fn reasoning_summary_text_done(
+    response_id: &str,
+    item_id: &str,
+    output_index: u64,
+    text: &str,
+) -> Value {
+    json!({
+        "type": "response.reasoning_summary_text.done",
+        "response_id": response_id,
+        "item_id": item_id,
+        "output_index": output_index,
+        "summary_index": 0,
+        "text": text
+    })
+}
+
+fn reasoning_summary_part_done(
+    response_id: &str,
+    item_id: &str,
+    output_index: u64,
+    text: &str,
+) -> Value {
+    json!({
+        "type": "response.reasoning_summary_part.done",
+        "response_id": response_id,
+        "item_id": item_id,
+        "output_index": output_index,
+        "summary_index": 0,
+        "part": { "type": "summary_text", "text": text }
+    })
+}
+
+/// Renders one locally mirrored SSE event. Upstream frames keep their original
+/// bytes, fields and line endings.
+fn sse_frame(event: &str, payload: &Value) -> Vec<u8> {
+    let data = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned());
+    let mut rendered = String::with_capacity(event.len() + data.len() + 16);
+    rendered.push_str("event: ");
+    rendered.push_str(event);
+    rendered.push_str("\ndata: ");
+    rendered.push_str(&data);
+    rendered.push_str("\n\n");
+    rendered.into_bytes()
 }
 
 /// Preserve every non-data SSE field byte-for-byte (`event`, `id`, `retry`,
@@ -1177,7 +1667,7 @@ mod tests {
             ],
             WebSearchBackend::Local,
         )
-        .unwrap();
+;
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -1196,7 +1686,7 @@ mod tests {
             ],
             WebSearchBackend::Official,
         )
-        .unwrap();
+;
 
         assert!(!plan.requires_local_execution);
         assert!(plan.uses_official_web_search);
@@ -1224,7 +1714,7 @@ mod tests {
             &[chat_function("web_search_preview")],
             WebSearchBackend::Official,
         )
-        .unwrap();
+;
 
         assert!(!plan.requires_local_execution);
         assert!(plan.uses_official_web_search);
@@ -1237,7 +1727,7 @@ mod tests {
             &[chat_function("workspace_search")],
             WebSearchBackend::Official,
         )
-        .unwrap();
+;
 
         assert!(!plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -1250,7 +1740,7 @@ mod tests {
             &[chat_function("web_search"), json!({ "type": "web_search" })],
             WebSearchBackend::Local,
         )
-        .unwrap();
+;
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -1267,7 +1757,7 @@ mod tests {
     #[test]
     fn provider_native_web_search_without_the_local_function_asks_for_the_hosted_executor() {
         let plan =
-            plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local).unwrap();
+            plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local);
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -1277,7 +1767,7 @@ mod tests {
     #[test]
     fn apply_patch_is_converted_to_provider_custom_schema_without_parameter_wrapper() {
         let plan =
-            plan_native_tools(&[chat_function("apply_patch")], WebSearchBackend::Local).unwrap();
+            plan_native_tools(&[chat_function("apply_patch")], WebSearchBackend::Local);
 
         assert!(!plan.requires_local_execution);
         assert_eq!(
@@ -1408,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_unsupported_native_tool_calls_fail_closed() {
+    fn malformed_calls_fail_closed_but_an_uncoordinated_custom_call_stays_provider_owned() {
         let missing_result_input = json!({
             "output": [{
                 "type": "function_call",
@@ -1419,6 +1909,9 @@ mod tests {
         });
         assert!(native_tool_call_group_from_response(&missing_result_input).is_err());
 
+        // A custom grammar CodeSeeX does not coordinate (for example a tool a
+        // newer Codex declares) is not an error: the item stays provider-owned
+        // and is forwarded to the client untouched.
         let unsupported_custom = json!({
             "output": [{
                 "type": "custom_tool_call",
@@ -1428,18 +1921,23 @@ mod tests {
                 "input": "unsafe"
             }]
         });
-        assert!(native_tool_call_group_from_response(&unsupported_custom).is_err());
+        assert_eq!(
+            native_tool_call_group_from_response(&unsupported_custom).unwrap(),
+            None
+        );
     }
 
     #[test]
-    fn unsafe_or_unknown_tool_shapes_fail_closed_instead_of_being_dropped() {
-        let error = plan_native_tools(
-            &[json!({ "type": "computer_use", "name": "computer" })],
-            WebSearchBackend::Local,
-        )
-        .unwrap_err();
+    fn unknown_tool_shapes_are_forwarded_instead_of_rejected() {
+        let declaration = json!({ "type": "computer_use", "name": "computer" });
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
 
-        assert!(error.contains("cannot safely translate"));
+        assert_eq!(
+            plan.tools,
+            vec![declaration],
+            "an unknown declaration is forwarded verbatim so the provider decides"
+        );
+        assert!(!plan.requires_local_execution);
     }
 
     #[test]
@@ -1481,7 +1979,7 @@ mod tests {
             &[chat_function("exec_command"), namespace.clone()],
             WebSearchBackend::Local,
         )
-        .unwrap();
+;
 
         assert!(!plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -1707,7 +2205,7 @@ mod tests {
             }
         });
 
-        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local).unwrap();
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
 
         assert!(!plan.requires_local_execution);
         assert_eq!(plan.tools, vec![declaration]);
@@ -1726,14 +2224,14 @@ mod tests {
             }
         });
 
-        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local).unwrap();
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
 
         assert!(!plan.requires_local_execution);
         assert_eq!(plan.tools, vec![declaration]);
     }
 
     #[test]
-    fn malformed_or_unowned_grouped_declarations_fail_closed() {
+    fn malformed_or_unowned_grouped_declarations_are_forwarded() {
         let cases = [
             (
                 json!({ "type": "namespace", "name": "mcp__node_repl" }),
@@ -1773,12 +2271,12 @@ mod tests {
             ),
         ];
 
-        for (declaration, expected) in cases {
-            let error =
-                plan_native_tools(&[declaration.clone()], WebSearchBackend::Local).unwrap_err();
-            assert!(
-                error.contains(expected),
-                "declaration {declaration} produced unexpected error: {error}"
+        for (declaration, what) in cases {
+            let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
+            assert_eq!(
+                plan.tools,
+                vec![declaration.clone()],
+                "a declaration CodeSeeX cannot translate ({what}) is forwarded verbatim"
             );
         }
     }
@@ -1940,7 +2438,11 @@ data: {"type":"response.output_text.delta","sequence_number":2,"response_id":"re
 "#,
         );
 
-        let trailing = relay.finish().expect("unterminated final SSE event");
+        let trailing = relay
+            .finish()
+            .into_iter()
+            .next()
+            .expect("unterminated final SSE event");
         assert!(trailing.starts_with(b"event: response.output_text.delta"));
         assert_eq!(relay.inspection().terminal, None);
         assert_eq!(
@@ -1984,8 +2486,14 @@ data: {"type":"response.created","response":{"id":"resp_provider"}}
 data: {"type":"response.completed","response":{"id":"resp_provider","status":"completed"}}"#,
         );
 
-        let trailing =
-            String::from_utf8(relay.finish().expect("unterminated terminal frame")).unwrap();
+        let trailing = String::from_utf8(
+            relay
+                .finish()
+                .into_iter()
+                .next()
+                .expect("unterminated terminal frame"),
+        )
+        .unwrap();
         assert!(trailing.contains("resp_local"));
         assert!(!trailing.contains("resp_provider"));
         assert_eq!(
@@ -2007,7 +2515,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
     }
 
     #[test]
-    fn relay_drops_oversized_unterminated_frame_instead_of_leaking_provider_id() {
+    fn relay_still_forwards_an_oversized_frame_that_never_terminated_below_the_hard_cap() {
         let mut relay = NativeResponseSseRelay::new("resp_local");
         let mut oversized = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_provider\"},\"padding\":\"".to_vec();
         oversized.extend(std::iter::repeat_n(
@@ -2017,18 +2525,23 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
 
         let frames = relay.relay_bytes(&oversized);
 
-        assert!(frames.is_empty());
+        assert!(
+            frames.is_empty(),
+            "an unterminated frame is buffered until it completes or the hard cap is reached"
+        );
         assert!(relay.inspection().oversized_frame_ignored);
         assert!(relay.inspection().output_items_incomplete);
-        assert!(!relay
-            .finish()
-            .unwrap_or_default()
-            .windows(b"resp_provider".len())
-            .any(|part| part == b"resp_provider"));
+
+        let trailing = relay.finish();
+        assert_eq!(
+            trailing.len(),
+            1,
+            "the buffered frame is flushed at the end of the stream instead of vanishing"
+        );
     }
 
     #[test]
-    fn relay_drops_oversized_complete_frame_before_forwarding_it() {
+    fn an_oversized_frame_is_forwarded_and_the_stream_continues() {
         let mut relay = NativeResponseSseRelay::new("resp_local");
         let prefix = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_provider\"},\"padding\":\"";
         let mut frame = prefix.to_vec();
@@ -2040,12 +2553,322 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
 
         let frames = relay.relay_bytes(&frame);
 
-        assert!(frames.is_empty());
+        assert_eq!(
+            frames.len(),
+            1,
+            "the provider frame is forwarded even though it cannot be inspected"
+        );
+        assert!(frames[0].starts_with(b"event: response.completed"));
         assert!(relay.inspection().oversized_frame_ignored);
         assert!(relay.inspection().output_items_incomplete);
         assert_eq!(relay.inspection().terminal, None);
-        assert!(relay
-            .relay_bytes(b"event: response.completed\ndata: {}\n\n")
-            .is_empty());
+        assert_eq!(
+            relay
+                .relay_bytes(b"event: response.completed\ndata: {}\n\n")
+                .len(),
+            1,
+            "later frames are still relayed instead of truncating the client stream"
+        );
+    }
+
+    fn sse_frame_text(event: &str, payload: &Value) -> String {
+        format!(
+            "event: {event}\ndata: {}\n\n",
+            serde_json::to_string(payload).unwrap()
+        )
+    }
+
+    fn sequence_numbers(frames: &[String]) -> Vec<u64> {
+        let mut numbers = Vec::new();
+        for frame in frames {
+            let mut cursor = 0_usize;
+            while let Some(offset) = frame[cursor..].find("\"sequence_number\":") {
+                let start = cursor + offset + "\"sequence_number\":".len();
+                let digits = frame[start..]
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect::<String>();
+                if let Ok(value) = digits.parse::<u64>() {
+                    numbers.push(value);
+                }
+                cursor = start + digits.len().max(1);
+                if cursor >= frame.len() {
+                    break;
+                }
+            }
+        }
+        numbers
+    }
+
+    fn reasoning_text_frames() -> String {
+        [
+            sse_frame_text(
+                "response.created",
+                &json!({
+                    "type": "response.created",
+                    "sequence_number": 1,
+                    "response": { "id": "resp_provider" }
+                }),
+            ),
+            sse_frame_text(
+                "response.output_item.added",
+                &json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": 2,
+                    "response_id": "resp_provider",
+                    "output_index": 0,
+                    "item": {
+                        "id": "rs_provider",
+                        "type": "reasoning",
+                        "status": "in_progress",
+                        "content": [],
+                        "summary": []
+                    }
+                }),
+            ),
+            sse_frame_text(
+                "response.content_part.added",
+                &json!({
+                    "type": "response.content_part.added",
+                    "sequence_number": 3,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": { "type": "reasoning_text", "text": "" }
+                }),
+            ),
+            sse_frame_text(
+                "response.reasoning_text.delta",
+                &json!({
+                    "type": "response.reasoning_text.delta",
+                    "sequence_number": 4,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "think"
+                }),
+            ),
+            sse_frame_text(
+                "response.reasoning_text.done",
+                &json!({
+                    "type": "response.reasoning_text.done",
+                    "sequence_number": 5,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "think"
+                }),
+            ),
+            sse_frame_text(
+                "response.output_item.done",
+                &json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 6,
+                    "response_id": "resp_provider",
+                    "output_index": 0,
+                    "item": {
+                        "id": "rs_provider",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "content": [{ "type": "reasoning_text", "text": "think" }],
+                        "summary": [],
+                        "encrypted_content": "blob"
+                    }
+                }),
+            ),
+            sse_frame_text(
+                "response.completed",
+                &json!({
+                    "type": "response.completed",
+                    "sequence_number": 7,
+                    "response": {
+                        "id": "resp_provider",
+                        "output": [{
+                            "id": "rs_provider",
+                            "type": "reasoning",
+                            "content": [{ "type": "reasoning_text", "text": "think" }],
+                            "summary": []
+                        }]
+                    }
+                }),
+            ),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn relay_presents_provider_reasoning_as_a_codex_summary() {
+        let mut relay = NativeResponseSseRelay::new("resp_local")
+            .with_reasoning_summary_presentation(true);
+        let ready = relay.relay_bytes(reasoning_text_frames().as_bytes());
+        let bodies = ready
+            .iter()
+            .map(|frame| String::from_utf8(frame.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let joined = bodies.concat();
+
+        // Codex only persists and renders summary_text, so the provider's raw
+        // reasoning content is presented as a summary instead of being mirrored
+        // next to it.
+        assert!(!joined.contains("\"type\":\"reasoning_text\""));
+        assert!(!joined.contains("event: response.reasoning_text.delta"));
+        assert!(joined.contains("event: response.reasoning_summary_part.added"));
+        assert!(joined.contains("event: response.reasoning_summary_text.delta"));
+        assert!(joined.contains("event: response.reasoning_summary_text.done"));
+        assert!(joined.contains("event: response.reasoning_summary_part.done"));
+        assert!(
+            joined.contains("\"part\":{\"text\":\"think\",\"type\":\"summary_text\"}"),
+            "mirrored summary parts must carry the provider text: {joined}"
+        );
+
+        let item_done = bodies
+            .iter()
+            .find(|body| body.contains("event: response.output_item.done"))
+            .expect("item done frame");
+        assert!(item_done.contains("\"summary\":[{\"text\":\"think\",\"type\":\"summary_text\"}]"));
+        assert!(item_done.contains("\"content\":null"));
+        let completed = bodies
+            .iter()
+            .find(|body| body.contains("event: response.completed"))
+            .expect("completed frame");
+        assert!(completed.contains("\"summary\":[{\"text\":\"think\",\"type\":\"summary_text\"}]"));
+        assert!(completed.contains("\"content\":null"));
+
+        let sequences = sequence_numbers(&bodies);
+        assert!(
+            sequences.windows(2).all(|pair| pair[0] < pair[1]),
+            "injected events must keep sequence numbers strictly increasing: {sequences:?}"
+        );
+        // The presentation never fabricates provider facts.
+        assert!(!joined.contains("[DONE]"));
+    }
+
+    #[test]
+    fn relay_reasoning_presentation_is_off_by_default() {
+        let mut relay = NativeResponseSseRelay::new("resp_local");
+        let ready = relay.relay_bytes(reasoning_text_frames().as_bytes());
+        let joined = ready
+            .iter()
+            .map(|frame| String::from_utf8(frame.clone()).unwrap())
+            .collect::<Vec<_>>()
+            .concat();
+
+        assert!(!joined.contains("reasoning_summary"));
+        assert!(joined.contains("\"type\":\"reasoning_text\""));
+    }
+
+    #[test]
+    fn non_streaming_reasoning_is_presented_as_a_codex_summary() {
+        let mut response = json!({
+            "id": "resp_provider",
+            "output": [
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "content": [{ "type": "reasoning_text", "text": "step one" }],
+                    "summary": []
+                },
+                {
+                    "id": "rs_2",
+                    "type": "reasoning",
+                    "content": [{ "type": "reasoning_text", "text": "other" }],
+                    "summary": [{ "type": "summary_text", "text": "provider summary" }]
+                },
+                { "id": "msg_1", "type": "message", "role": "assistant", "content": [] }
+            ]
+        });
+
+        present_reasoning_summary_in_response(&mut response);
+
+        assert_eq!(
+            response["output"][0]["summary"][0]["text"],
+            json!("step one")
+        );
+        assert_eq!(response["output"][0]["content"], Value::Null);
+        assert_eq!(
+            response["output"][1]["summary"][0]["text"],
+            json!("provider summary")
+        );
+        assert_eq!(response["output"][2]["type"], json!("message"));
+    }
+
+    #[test]
+    fn relay_never_duplicates_a_provider_supplied_reasoning_summary() {
+        let frames = [
+            sse_frame_text(
+                "response.created",
+                &json!({
+                    "type": "response.created",
+                    "sequence_number": 1,
+                    "response": { "id": "resp_provider" }
+                }),
+            ),
+            sse_frame_text(
+                "response.content_part.added",
+                &json!({
+                    "type": "response.content_part.added",
+                    "sequence_number": 2,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": { "type": "summary_text", "text": "" }
+                }),
+            ),
+            sse_frame_text(
+                "response.reasoning_summary_text.delta",
+                &json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "sequence_number": 3,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "delta": "provider summary"
+                }),
+            ),
+            sse_frame_text(
+                "response.output_item.done",
+                &json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 4,
+                    "response_id": "resp_provider",
+                    "output_index": 0,
+                    "item": {
+                        "id": "rs_provider",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "content": [],
+                        "summary": [{ "type": "summary_text", "text": "provider summary" }]
+                    }
+                }),
+            ),
+        ]
+        .concat();
+        let mut relay = NativeResponseSseRelay::new("resp_local")
+            .with_reasoning_summary_presentation(true);
+        let ready = relay.relay_bytes(frames.as_bytes());
+        let bodies = ready
+            .iter()
+            .map(|frame| String::from_utf8(frame.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let joined = bodies.concat();
+
+        assert_eq!(
+            joined
+                .matches("event: response.reasoning_summary_text.delta")
+                .count(),
+            1
+        );
+        assert_eq!(
+            joined
+                .matches("event: response.reasoning_summary_part.added")
+                .count(),
+            0
+        );
+        assert_eq!(sequence_numbers(&bodies), vec![1, 2, 3, 4]);
     }
 }
