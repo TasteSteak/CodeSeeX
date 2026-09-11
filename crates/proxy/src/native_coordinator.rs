@@ -7,6 +7,10 @@ use std::time::{Duration, Instant};
 
 const MAX_PENDING_NATIVE_GROUPS: usize = 64;
 const PENDING_NATIVE_GROUP_TTL: Duration = Duration::from_secs(30 * 60);
+/// Upper bound on item identities kept in a rejection diagnostic. A Codex
+/// replay can be very long, and an event log entry only needs enough to show
+/// which item diverged.
+const DIAGNOSTIC_IDENTITY_LIMIT: usize = 12;
 
 /// RAM-only state for a native provider group that still needs Codex-owned
 /// tool outputs. It intentionally contains no persisted transcript: after a
@@ -67,7 +71,10 @@ pub(crate) enum NativePendingError {
     AnchorMismatch,
     PreviousResponseMismatch,
     InputMissing,
-    AuthoritativePrefixMismatch,
+    AuthoritativePrefixMismatch {
+        stored: Vec<String>,
+        replayed: Vec<String>,
+    },
     VisibleProviderOutputMismatch {
         stored: Vec<String>,
         replayed: Vec<String>,
@@ -96,7 +103,7 @@ impl NativePendingError {
             Self::AnchorMismatch
             | Self::PreviousResponseMismatch
             | Self::InputMissing
-            | Self::AuthoritativePrefixMismatch
+            | Self::AuthoritativePrefixMismatch { .. }
             | Self::VisibleProviderOutputMismatch { .. } => "context_required",
             Self::InvalidPendingGroup(_)
             | Self::AmbiguousPendingGroup
@@ -125,8 +132,16 @@ impl NativePendingError {
             Self::InputMissing => {
                 "The native tool continuation did not include an input item array. CodeSeeX requires the authoritative Codex replay.".to_owned()
             }
-            Self::AuthoritativePrefixMismatch => {
-                "The native tool continuation no longer begins with the original Codex replay. CodeSeeX did not use a tail-only continuation.".to_owned()
+            Self::AuthoritativePrefixMismatch { stored, replayed } => {
+                let mut message = "The native tool continuation no longer begins with the original Codex replay. CodeSeeX did not use a tail-only continuation.".to_owned();
+                if !stored.is_empty() || !replayed.is_empty() {
+                    message.push_str(&format!(
+                        " Stored: [{}]. Replayed: [{}].",
+                        stored.join(", "),
+                        replayed.join(", ")
+                    ));
+                }
+                message
             }
             Self::VisibleProviderOutputMismatch { stored, replayed } => {
                 let mut message = "The native tool continuation did not retain the provider tool group visible to Codex.".to_owned();
@@ -170,6 +185,13 @@ impl NativePendingError {
                 "stored_provider_items": stored,
                 "replayed_items": replayed
             })),
+            Self::AuthoritativePrefixMismatch { stored, replayed } => Some(json!({
+                "stored_authoritative_items": stored,
+                "replayed_items": replayed
+            })),
+            Self::AmbiguousPendingGroup => Some(json!({
+                "reason": "more_than_one_pending_group_for_this_anchor_or_replay"
+            })),
             _ => None,
         }
     }
@@ -210,8 +232,18 @@ impl NativePendingToolGroups {
             .and_then(Value::as_array)
             .ok_or(NativePendingError::InputMissing)?;
         validate_request_anchor(group, request)?;
-        let after_authoritative = strip_prefix(input, &group.authoritative_input)
-            .ok_or(NativePendingError::AuthoritativePrefixMismatch)?;
+        let after_authoritative = match strip_prefix(input, &group.authoritative_input) {
+            Some(after) => after,
+            None => {
+                return Err(NativePendingError::AuthoritativePrefixMismatch {
+                    stored: compact_identities(
+                        &group.authoritative_input,
+                        DIAGNOSTIC_IDENTITY_LIMIT,
+                    ),
+                    replayed: compact_identities(input, DIAGNOSTIC_IDENTITY_LIMIT),
+                })
+            }
+        };
         let after_visible =
             after_visible_group(after_authoritative, &group.visible_provider_output).ok_or_else(
                 || NativePendingError::VisibleProviderOutputMismatch {
@@ -364,14 +396,47 @@ fn matching_group<'a>(
     let Some(anchor) = anchor.as_deref() else {
         return Ok(None);
     };
-    let mut matches = groups
+    let candidates = groups
         .values()
-        .filter(|group| group.request_anchor.as_deref() == Some(anchor));
-    let first = matches.next();
-    if matches.next().is_some() {
+        .filter(|group| group.request_anchor.as_deref() == Some(anchor))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let Some(input) = request.get("input").and_then(Value::as_array) else {
+        // Without an input array nothing can answer a group. Keep the previous
+        // single-candidate behaviour so the caller still reports the missing
+        // authoritative replay instead of silently ignoring the session.
+        return match candidates.len() {
+            1 => Ok(Some(candidates[0])),
+            _ => Err(NativePendingError::AmbiguousPendingGroup),
+        };
+    };
+    // A retained group only belongs to this request when the client is actually
+    // answering the tool calls it owns. Codex hands the same session anchor to
+    // sub-agent threads, so a different conversation under one anchor must read
+    // as a fresh request instead of a broken continuation.
+    let mut answering = candidates
+        .into_iter()
+        .filter(|group| group_is_answered_by_replay(group, input));
+    let Some(first) = answering.next() else {
+        return Ok(None);
+    };
+    if answering.next().is_some() {
         return Err(NativePendingError::AmbiguousPendingGroup);
     }
-    Ok(first)
+    Ok(Some(first))
+}
+
+/// Whether the incoming replay carries at least one tool call this retained
+/// group owns. Every continuation answers those calls, so a replay that
+/// mentions none of them belongs to a different conversation.
+fn group_is_answered_by_replay(group: &PendingNativeToolGroup, input: &[Value]) -> bool {
+    group.client_calls.iter().any(|call| {
+        input.iter().any(|item| {
+            item.get("call_id").and_then(Value::as_str) == Some(call.call_id.as_str())
+        })
+    })
 }
 
 fn validate_request_anchor(
@@ -536,6 +601,18 @@ fn item_type(item: &Value) -> &str {
     item.get("type")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
+}
+
+fn compact_identities(items: &[Value], limit: usize) -> Vec<String> {
+    let mut identities = items
+        .iter()
+        .take(limit)
+        .map(compact_item_identity)
+        .collect::<Vec<_>>();
+    if items.len() > limit {
+        identities.push(format!("...{} more", items.len() - limit));
+    }
+    identities
 }
 
 /// Whether a provider tool call CodeSeeX forwarded still carries the same
@@ -1408,5 +1485,83 @@ mod tests {
                 patch_output
             ])
         );
+    }
+
+    #[test]
+    fn unrelated_conversation_under_one_anchor_is_not_a_continuation() {
+        // Codex hands the parent's prompt_cache_key to sub-agent threads, so a
+        // child turn arrives under the parent's anchor while the parent's
+        // `spawn_agent` call is still pending. It answers none of that group's
+        // calls, so it is a fresh conversation and not a broken continuation.
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "parent turn" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_spawn",
+            "name": "spawn_agent",
+            "arguments": "{}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative,
+                provider.clone(),
+                provider,
+                Vec::new(),
+                vec![function_call("call_spawn", "spawn_agent")],
+            ))
+            .unwrap();
+
+        let mut child = request(vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": "child prompt"
+        })]);
+        child["previous_response_id"] = Value::Null;
+
+        assert!(groups.continuation_for(&child).unwrap().is_none());
+        assert_eq!(groups.pending_count(), 1);
+    }
+
+    #[test]
+    fn diverged_replay_that_still_answers_the_group_fails_closed() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![json!({
+            "type": "function_call",
+            "call_id": "call_shell",
+            "name": "shell_command",
+            "arguments": "{}",
+            "status": "completed"
+        })];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative,
+                provider.clone(),
+                provider,
+                Vec::new(),
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+
+        let mut replay = request(vec![
+            json!({ "type": "message", "role": "user", "content": "rewritten start" }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_shell",
+                "name": "shell_command",
+                "arguments": "{}"
+            }),
+            json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+        ]);
+        replay["previous_response_id"] = Value::Null;
+
+        let error = groups.continuation_for(&replay).unwrap_err();
+        assert!(
+            matches!(error, NativePendingError::AuthoritativePrefixMismatch { .. }),
+            "{error:?}"
+        );
+        assert!(error.diagnostic().is_some());
+        assert!(error.message().contains("Stored: ["));
     }
 }

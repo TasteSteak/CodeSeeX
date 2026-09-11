@@ -15,13 +15,14 @@ use crate::native_coordinator::{
 use crate::native_responses::{
     append_complete_native_tool_group, native_stream_finalization,
     native_tool_call_group_from_response, native_tool_output_item, plan_native_tools,
-    reconcile_grouped_tool_namespaces, repair_provider_tool_schemas,
-    rewrite_provider_response_identity, NativeResponseSseRelay, NativeResponseStreamInspection,
-    NativeResponseTerminal, NativeStreamFinalization, NativeToolCall, NativeToolCallGroup,
-    NativeToolPlan,
+    present_reasoning_summary_in_response, reconcile_grouped_tool_namespaces,
+    repair_provider_tool_schemas, rewrite_provider_response_identity, NativeResponseSseRelay,
+    NativeResponseStreamInspection, NativeResponseTerminal, NativeStreamFinalization,
+    NativeToolCall, NativeToolCallGroup, NativeToolPlan,
 };
 use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::WebSearchBackend;
+use super::response_helpers::show_thinking_enabled;
 
 pub(super) async fn dispatch_if_selected(
     state: &ProxyState,
@@ -193,18 +194,7 @@ async fn try_native_responses(
     let pending = match state.native_pending_tool_groups.continuation_for(input) {
         Ok(pending) => pending,
         Err(error) => {
-            if let Some(detail) = error.diagnostic() {
-                let message = error.message();
-                let _ = state
-                    .store
-                    .record_event(
-                        "warn",
-                        "native_pending_continuation_diagnostic",
-                        &message,
-                        Some(&detail),
-                    )
-                    .await;
-            }
+            record_native_continuation_rejection(state, &error).await;
             return Some(native_pending_error_response(error));
         }
     };
@@ -316,7 +306,7 @@ async fn try_native_responses(
             passthrough,
         },
         Some(input),
-        payload.clone(),
+        native_upstream_payload(&payload, should_adapt_tool_protocol(&config.upstream, model)),
     )
     .await;
     let response = match upstream {
@@ -382,6 +372,7 @@ async fn try_native_responses(
             content_type,
             upstream_started: started,
             web_search_backend: config.web_search_backend,
+            present_reasoning_summary: show_thinking_enabled(config),
             settle_pending_response_id: pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.clone()),
@@ -401,6 +392,7 @@ async fn try_native_responses(
             response_headers,
             started,
             config.web_search_backend,
+            show_thinking_enabled(config),
             pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.as_str()),
@@ -422,11 +414,13 @@ fn native_hosted_call_is_local(call: &NativeToolCall, config: &AppConfig) -> boo
 async fn buffer_native_sse(
     response: reqwest::Response,
     response_id: &str,
+    present_reasoning_summary: bool,
 ) -> Result<(Vec<u8>, NativeResponseStreamInspection), reqwest::Error> {
     use futures_util::StreamExt;
 
     let mut upstream = response.bytes_stream();
-    let mut relay = NativeResponseSseRelay::new(response_id.to_owned());
+    let mut relay = NativeResponseSseRelay::new(response_id.to_owned())
+        .with_reasoning_summary_presentation(present_reasoning_summary);
     let mut buffered = Vec::new();
     while let Some(next) = upstream.next().await {
         let chunk = next?;
@@ -484,18 +478,7 @@ async fn native_hosted_tool_loop(
     let pending = match state.native_pending_tool_groups.continuation_for(input) {
         Ok(pending) => pending,
         Err(error) => {
-            if let Some(detail) = error.diagnostic() {
-                let message = error.message();
-                let _ = state
-                    .store
-                    .record_event(
-                        "warn",
-                        "native_pending_continuation_diagnostic",
-                        &message,
-                        Some(&detail),
-                    )
-                    .await;
-            }
+            record_native_continuation_rejection(state, &error).await;
             return native_pending_error_response(error);
         }
     };
@@ -582,7 +565,7 @@ async fn native_hosted_tool_loop(
                 passthrough: passthrough.clone(),
             },
             Some(input),
-            payload.clone(),
+            native_upstream_payload(&payload, should_adapt_tool_protocol(&config.upstream, model)),
         )
         .await;
         let response = match upstream {
@@ -642,7 +625,7 @@ async fn native_hosted_tool_loop(
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/event-stream"));
         let (body, output_items, completed, usage) = if is_sse {
-            match buffer_native_sse(response, &id).await {
+            match buffer_native_sse(response, &id, show_thinking_enabled(config)).await {
                 Ok((bytes, inspection)) => {
                     if inspection.output_items_incomplete {
                         let detail = json!({
@@ -1243,6 +1226,75 @@ fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, 
     Ok(Value::Object(object))
 }
 
+/// The upstream boundary for the client-facing reasoning presentation.
+///
+/// The native relay presents provider `reasoning_text` as the summary Codex
+/// renders. DeepSeek's thinking mode then requires the text back in
+/// `reasoning_text` on the next call, so the presentation is undone here before
+/// a replay reaches upstream. The mapping is read from the item itself, so it
+/// holds for every replayed item, including the ones Codex re-serializes
+/// without the provider item id.
+fn native_upstream_payload(payload: &Value, restore_reasoning_text: bool) -> Value {
+    let mut payload = payload.clone();
+    if !restore_reasoning_text {
+        return payload;
+    }
+    let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
+        return payload;
+    };
+    for item in items.iter_mut() {
+        restore_reasoning_text_field(item);
+    }
+    payload
+}
+
+/// Puts a presented summary back into the provider's own `reasoning_text`
+/// content and drops the summary CodeSeeX added, so a thinking-mode replay
+/// always carries the text DeepSeek requires.
+fn restore_reasoning_text_field(item: &mut Value) {
+    if !item.is_object() || item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return;
+    }
+    let summary_text = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().map(summary_part_text).collect::<String>())
+        .unwrap_or_default();
+    let content_text = item
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                })
+                .map(summary_part_text)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if content_text.is_empty() {
+        if summary_text.is_empty() {
+            return;
+        }
+        item["content"] = json!([{ "type": "reasoning_text", "text": summary_text }]);
+        item["summary"] = Value::Array(Vec::new());
+        return;
+    }
+    // Keep a provider-authored summary when it is not the presentation CodeSeeX
+    // added; only an exact duplicate of the reasoning text is dropped.
+    if content_text == summary_text {
+        item["summary"] = Value::Array(Vec::new());
+    }
+}
+
+fn summary_part_text(part: &Value) -> String {
+    part.get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 async fn native_upstream_status_failure(
     state: &ProxyState,
     id: &str,
@@ -1324,6 +1376,7 @@ async fn native_non_streaming_response(
     response_headers: HeaderMap,
     started: std::time::Instant,
     web_search_backend: WebSearchBackend,
+    present_reasoning_summary: bool,
     settle_pending_response_id: Option<&str>,
 ) -> axum::response::Response {
     let bytes = match response.bytes().await {
@@ -1490,7 +1543,13 @@ async fn native_non_streaming_response(
             )),
         )
         .await;
-    json_response(native)
+    // Only the client copy carries the reasoning presentation: the retained
+    // group and the stored response must keep the provider's own item shape.
+    let mut client_response = native;
+    if present_reasoning_summary {
+        present_reasoning_summary_in_response(&mut client_response);
+    }
+    json_response(client_response)
 }
 
 struct NativeStreamingResponseParams {
@@ -1504,6 +1563,7 @@ struct NativeStreamingResponseParams {
     content_type: Option<HeaderValue>,
     upstream_started: std::time::Instant,
     web_search_backend: WebSearchBackend,
+    present_reasoning_summary: bool,
     settle_pending_response_id: Option<String>,
 }
 
@@ -1519,6 +1579,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         content_type,
         upstream_started,
         web_search_backend,
+        present_reasoning_summary,
         settle_pending_response_id,
     } = params;
     let cancelled = register_streaming_response(&response_id);
@@ -1528,7 +1589,8 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         async_stream::try_stream! {
             let _stream_guard = guard;
             let mut upstream = response.bytes_stream();
-            let mut relay = NativeResponseSseRelay::new(response_id.clone());
+            let mut relay = NativeResponseSseRelay::new(response_id.clone())
+                .with_reasoning_summary_presentation(present_reasoning_summary);
             loop {
                 tokio::select! {
                     _ = cancelled.cancelled() => {
@@ -1742,6 +1804,27 @@ fn native_pending_error_response(error: NativePendingError) -> axum::response::R
     json_error(StatusCode::BAD_REQUEST, error.code(), error.message())
 }
 
+/// Every rejected native continuation is recorded, not only the ones that carry
+/// a structured mismatch detail. Otherwise a client sees a bare 400 and the
+/// event log stays empty, which leaves an operator nothing to act on.
+async fn record_native_continuation_rejection(state: &ProxyState, error: &NativePendingError) {
+    let message = error.message();
+    let detail = json!({
+        "code": error.code(),
+        "message": message,
+        "diagnostic": error.diagnostic(),
+    });
+    let _ = state
+        .store
+        .record_event(
+            "warn",
+            "native_pending_continuation_rejected",
+            &message,
+            Some(&detail),
+        )
+        .await;
+}
+
 /// Registers exactly the provider output group that Codex observed, plus the
 /// hosted rounds CodeSeeX executed for it. This state stays only in RAM and is
 /// used solely to reject partial/out-of-order client tool outputs on the
@@ -1933,6 +2016,40 @@ mod tests {
             "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_stream_failed_1\"}}\n\n",
             "event: response.failed\n",
             "data: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"id\":\"provider_stream_failed_1\",\"status\":\"failed\"}}\n\n"
+        );
+        (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            bytes.to_owned(),
+        )
+            .into_response()
+    }
+
+    /// A provider turn that streams its thinking the way DeepSeek does: as
+    /// `reasoning_text` content, with an empty `summary`.
+    async fn fake_native_sse_reasoning(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> axum::response::Response {
+        capture.requests.lock().expect("capture lock").push(payload);
+        let bytes = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_reasoning_1\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"response_id\":\"provider_reasoning_1\",\"output_index\":0,\"item\":{\"id\":\"rs_provider\",\"type\":\"reasoning\",\"status\":\"in_progress\",\"content\":[],\"summary\":[]}}\n\n",
+            "event: response.content_part.added\n",
+            "data: {\"type\":\"response.content_part.added\",\"sequence_number\":3,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"reasoning_text\",\"text\":\"\"}}\n\n",
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":4,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"delta\":\"step one \"}\n\n",
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":5,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"delta\":\"step two\"}\n\n",
+            "event: response.reasoning_text.done\n",
+            "data: {\"type\":\"response.reasoning_text.done\",\"sequence_number\":6,\"response_id\":\"provider_reasoning_1\",\"item_id\":\"rs_provider\",\"output_index\":0,\"content_index\":0,\"text\":\"step one step two\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":7,\"response_id\":\"provider_reasoning_1\",\"output_index\":0,\"item\":{\"id\":\"rs_provider\",\"type\":\"reasoning\",\"status\":\"completed\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"step one step two\"}],\"summary\":[],\"encrypted_content\":\"blob\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":8,\"response_id\":\"provider_reasoning_1\",\"output_index\":1,\"item\":{\"id\":\"msg_provider\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"42\",\"annotations\":[]}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"sequence_number\":9,\"response\":{\"id\":\"provider_reasoning_1\",\"status\":\"completed\",\"output\":[{\"id\":\"rs_provider\",\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"step one step two\"}],\"summary\":[],\"encrypted_content\":\"blob\"},{\"id\":\"msg_provider\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"42\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":7,\"output_tokens\":2,\"total_tokens\":9}}}\n\n"
         );
         (
             [(header::CONTENT_TYPE, "text/event-stream")],
@@ -2404,6 +2521,163 @@ mod tests {
         assert_eq!(
             store.response_status("resp_native_stream").await.unwrap(),
             Some(RequestStatus::Completed)
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_stream_presents_reasoning_as_a_summary_and_keeps_the_provider_shape() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_sse_reasoning))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("reasoning-mirror");
+        let config = config_for_fake(data_dir.clone(), address);
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+
+        let first = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &request("resp_native_reasoning", true, json!([])),
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("native streaming response");
+        let body = axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let stream = String::from_utf8(body.to_vec()).unwrap();
+
+        // Codex receives the thinking as the summary it renders, and never as
+        // raw reasoning content it would drop.
+        assert!(stream.contains("event: response.reasoning_summary_part.added"));
+        assert!(stream.contains("event: response.reasoning_summary_text.delta"));
+        assert!(stream.contains("event: response.reasoning_summary_text.done"));
+        assert!(!stream.contains("event: response.reasoning_text.delta"));
+        assert!(!stream.contains("\"type\":\"reasoning_text\""));
+        assert!(stream
+            .contains("\"summary\":[{\"text\":\"step one step two\",\"type\":\"summary_text\"}]"));
+        assert!(!stream.contains("[DONE]"));
+
+        // Codex replays the item as a summary on the following turn.
+        let mut replay = request("resp_native_reasoning_second", true, json!([]));
+        replay["input"] = json!([
+            { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "again" }] },
+            {
+                "type": "reasoning",
+                "id": "rs_provider",
+                "summary": [{ "type": "summary_text", "text": "step one step two" }],
+                "content": null,
+                "encrypted_content": "blob"
+            }
+        ]);
+        let second = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &replay,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("second native response");
+        let _ = axum::body::to_bytes(second.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+
+        // The presentation is undone: upstream gets the provider's own shape.
+        let requests = capture.requests.lock().expect("capture lock");
+        let forwarded = requests.last().expect("second upstream request");
+        let replayed_reasoning = forwarded["input"]
+            .as_array()
+            .expect("forwarded input array")
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+            .expect("the replayed reasoning item still travels");
+        assert_eq!(replayed_reasoning["summary"], json!([]));
+        assert_eq!(
+            replayed_reasoning["content"][0]["type"],
+            json!("reasoning_text")
+        );
+        assert_eq!(
+            replayed_reasoning["content"][0]["text"],
+            json!("step one step two")
+        );
+        assert_eq!(replayed_reasoning["encrypted_content"], json!("blob"));
+        drop(requests);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn sub_agent_thread_sharing_the_parent_anchor_dispatches_as_a_new_conversation() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_sse_client_tool_group))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("sub-agent-anchor");
+        let config = config_for_fake(data_dir.clone(), address);
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let tools = json!([
+            { "type": "function", "function": { "name": "shell_command", "parameters": { "type": "object" } } },
+            { "type": "function", "function": { "name": "apply_patch", "parameters": { "type": "object" } } }
+        ]);
+
+        let parent = request("resp_parent_turn", true, tools.clone());
+        let parent_response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &parent,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("parent turn");
+        let _ = axum::body::to_bytes(parent_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(state.native_pending_tool_groups.pending_count(), 1);
+
+        // A spawned thread reuses the parent's prompt_cache_key but is its own
+        // conversation: it answers none of the parent's pending tool calls.
+        let mut child = request("resp_child_turn", true, tools);
+        child["previous_response_id"] = Value::Null;
+        child["input"] = json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "child prompt" }]
+        }]);
+        let child_response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &child,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("child turn");
+        assert_ne!(child_response.status(), StatusCode::BAD_REQUEST);
+        let _ = axum::body::to_bytes(child_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            capture.requests.lock().expect("capture lock").len(),
+            2,
+            "the sub-agent turn must reach upstream instead of failing closed"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -3630,5 +3904,68 @@ mod tests {
             "the consumed continuation must be settled"
         );
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn upstream_payload_restores_the_provider_reasoning_shape() {
+        let client_payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_presented",
+                    "summary": [{ "type": "summary_text", "text": "think" }],
+                    "content": null,
+                    "encrypted_content": "blob"
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_provider_summary",
+                    "summary": [{ "type": "summary_text", "text": "provider summary" }],
+                    "content": [{ "type": "reasoning_text", "text": "different" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_already_native",
+                    "summary": [{ "type": "summary_text", "text": "same" }],
+                    "content": [{ "type": "reasoning_text", "text": "same" }]
+                },
+                { "type": "message", "role": "user", "content": "hi" }
+            ]
+        });
+
+        let upstream = native_upstream_payload(&client_payload, true);
+
+        // A presented item goes back to the shape DeepSeek's thinking mode
+        // requires on the next call.
+        assert_eq!(upstream["input"][0]["summary"], json!([]));
+        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("think"));
+        assert_eq!(
+            upstream["input"][0]["content"][0]["type"],
+            json!("reasoning_text")
+        );
+        assert_eq!(upstream["input"][0]["encrypted_content"], json!("blob"));
+        // A provider-authored summary that is not a duplicate is left alone.
+        assert_eq!(
+            upstream["input"][1]["summary"][0]["text"],
+            json!("provider summary")
+        );
+        // An exact duplicate of the reasoning text is dropped.
+        assert_eq!(upstream["input"][2]["summary"], json!([]));
+        assert_eq!(upstream["input"][2]["content"][0]["text"], json!("same"));
+        assert_eq!(upstream["input"][3]["content"], json!("hi"));
+        // The client-visible copy keeps the presentation.
+        assert_eq!(
+            client_payload["input"][0]["summary"][0]["text"],
+            json!("think")
+        );
+
+        // A non-DeepSeek upstream is never rewritten.
+        let untouched = native_upstream_payload(&client_payload, false);
+        assert_eq!(
+            untouched["input"][0]["summary"][0]["text"],
+            json!("think")
+        );
+        assert_eq!(untouched["input"][0]["content"], Value::Null);
     }
 }
