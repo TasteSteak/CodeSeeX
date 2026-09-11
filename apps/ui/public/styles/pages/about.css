@@ -3,7 +3,7 @@
    ========================================================================== */
 
    .workspace.view-about .about-page { 
-    width: min(1040px, 100%); 
+    width: min(var(--page-max-width), 100%); 
   }
   
   .about-native-panel { 

@@ -57,9 +57,8 @@
         <a href="#" class="nav-item" data-view="about"><span class="nav-icon nav-icon-about" aria-hidden="true"></span><span class="nav-label" data-i18n="navAbout">About</span><span class="update-dot" id="aboutUpdateDot" hidden></span></a>
       </nav>
 
-      <div class="sidebar-footer" data-i18n="sidebarFooter">
-        Powered by TasteSteak<br>LICENSE AGPL-3.0-only
-      </div>
+      <div class="sidebar-footer" data-i18n="sidebarFooter">Powered by TasteSteak
+LICENSE AGPL-3.0-only</div>
     </aside>
 
     <main class="workspace view-console" id="workspace">
@@ -75,19 +74,19 @@
         <div class="dashboard-panel">
           <div class="dashboard-metrics-row">
             <div class="metric-card">
-              <span class="metric-label" id="pidLabel" data-i18n="proxyPid">Proxy PID</span>
+              <span class="metric-label" id="pidLabel" data-i18n="proxyPid">Proxy process PID</span>
               <strong class="metric-value tabular-nums" id="pid">-</strong>
             </div>
             <div class="metric-card">
-              <span class="metric-label" data-i18n="activeRequests">Active Requests</span>
+              <span class="metric-label" data-i18n="activeRequests">Active requests</span>
               <strong class="metric-value tabular-nums" id="activeRequests">0</strong>
             </div>
             <div class="metric-card">
-              <span class="metric-label" data-i18n="completedTurns">Completed Turns</span>
+              <span class="metric-label" data-i18n="completedTurns">Completed turns</span>
               <strong class="metric-value tabular-nums" id="completedTurns">0</strong>
             </div>
             <div class="metric-card">
-              <span class="metric-label" data-i18n="failedTurns">Failed Requests</span>
+              <span class="metric-label" data-i18n="failedTurns">Failed requests</span>
               <strong class="metric-value tabular-nums" id="failedTurns">0</strong>
             </div>
           </div>
@@ -95,7 +94,7 @@
           <div class="panel">
             <div class="panel-header dashboard-card-header">
               <div>
-                <h2 class="icon-heading"><span class="heading-icon heading-icon-bank-card" aria-hidden="true"></span><span data-i18n="balanceTitle">Proxy Console</span></h2>
+                <h2 class="icon-heading"><span class="heading-icon heading-icon-bank-card" aria-hidden="true"></span><span data-i18n="balanceTitle">Proxy console</span></h2>
                 <p data-i18n="dashboardBalanceSubtitle">Balance, local proxy state, and Codex connection config.</p>
               </div>
             </div>
@@ -144,7 +143,7 @@
                       <div class="compact-stage" id="stageBalanceCheck">
                         <div class="compact-stage-info">
                           <span class="stage-dot"></span>
-                          <span class="stage-name" data-i18n="balanceAvailability">Balance</span>
+                          <span class="stage-name" data-i18n="balanceAvailability">Availability</span>
                         </div>
                         <strong id="balanceStatus" class="stage-state" data-i18n="balanceUnchecked">Not checked</strong>
                       </div>
@@ -202,7 +201,7 @@
             </div>
             <div class="usage-grid-spec usage-list-header">
               <div data-i18n="usageTriggerAndSummary">Summary / time</div>
-              <div class="usage-text-right" data-i18n="elapsed">Elapsed</div>
+              <div class="usage-text-right" data-i18n="elapsed">Latency</div>
               <div class="usage-text-right" data-i18n="usageInputTotal">Input total</div>
               <div class="usage-text-right" data-i18n="usageOutputTotal">Output total</div>
               <div class="usage-text-right" data-i18n="usageCacheHitRateShort">Cache hit rate</div>
@@ -251,11 +250,11 @@
                   <option value="debug">DEBUG</option>
                 </select>
               </label>
-              <label class="log-filter-request">
+              <label>
                 <span data-i18n="logFilterRequest">Request</span>
                 <input id="logRequestFilter" type="search" autocomplete="off" data-i18n-placeholder="logFilterRequestPlaceholder" placeholder="response id">
               </label>
-              <label class="log-filter-search">
+              <label>
                 <span data-i18n="logFilterSearch">Search</span>
                 <input id="logSearchInput" type="search" autocomplete="off" data-i18n-placeholder="logFilterSearchPlaceholder" placeholder="type, summary, risk">
               </label>
@@ -295,7 +294,7 @@
                 <h3 class="config-section-title" data-i18n="personalization">Personalization</h3>
                 <div class="setting-item">
                   <label data-i18n="theme">Theme</label>
-                  <div class="segmented-control" id="ctrl-theme">
+                  <div class="segmented-control">
                     <input type="radio" name="UI_THEME" id="theme_system" value="system" checked>
                     <label for="theme_system" data-i18n="themeSystem">System</label>
                     <input type="radio" name="UI_THEME" id="theme_light" value="light">
@@ -315,9 +314,9 @@
                 <div class="setting-item">
                   <span>
                     <label data-i18n="webSearchBackend">Web Search backend</label>
-                    <small class="muted" data-i18n="webSearchBackendHint">Local keeps CodeSeeX's bounded search. Official lets DeepSeek search server-side and may use more tokens. CodeSeeX uses only the selected backend.</small>
+                    <small class="muted" data-i18n="webSearchBackendHint">Local keeps CodeSeeX's bounded search. Official lets DeepSeek search server-side and may use more tokens. CodeSeeX uses only the selected backend; a request that also needs local tools must use Local or Chat compatibility.</small>
                   </span>
-                  <div class="segmented-control compact-segmented-control" id="ctrl-web-search-backend">
+                  <div class="segmented-control compact-segmented-control">
                     <input type="radio" name="WEB_SEARCH_BACKEND" id="web_search_backend_local" value="local" checked>
                     <label for="web_search_backend_local" data-i18n="webSearchBackend_local">CodeSeeX local</label>
                     <input type="radio" name="WEB_SEARCH_BACKEND" id="web_search_backend_official" value="official">
@@ -327,9 +326,9 @@
                 <div class="setting-divider"></div>
 
                 <div class="setting-item">
-                  <span data-i18n="showThinking">Show thinking</span>
+                  <span id="showThinkingLabel" data-i18n="showThinking">Show thinking</span>
                   <label class="toggle-switch">
-                    <input type="checkbox" id="SHOW_THINKING">
+                    <input type="checkbox" id="SHOW_THINKING" aria-labelledby="showThinkingLabel">
                     <span class="slider"></span>
                   </label>
                 </div>
@@ -337,11 +336,11 @@
                 <h3 class="config-section-title" data-i18n="other">Other</h3>
                 <div class="setting-item">
                   <span>
-                    <span data-i18n="autoStart">Start at login</span>
+                    <span id="autoStartLabel" data-i18n="autoStart">Start at login</span>
                     <small class="muted" data-i18n="autoStartHint">Starts in the tray without opening the main window.</small>
                   </span>
                   <label class="toggle-switch">
-                    <input type="checkbox" id="AUTO_START">
+                    <input type="checkbox" id="AUTO_START" aria-labelledby="autoStartLabel">
                     <span class="slider"></span>
                   </label>
                 </div>
@@ -349,7 +348,7 @@
 
                 <div class="setting-item">
                   <label data-i18n="closeBehavior">Close behavior</label>
-                  <div class="segmented-control" id="ctrl-close-behavior">
+                  <div class="segmented-control">
                     <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_exit" value="exit" checked>
                     <label for="close_exit" data-i18n="closeBehaviorExit">Exit</label>
                     <input type="radio" name="UI_CLOSE_BEHAVIOR" id="close_tray" value="tray">
@@ -360,7 +359,7 @@
 
                 <div class="setting-item">
                   <label data-i18n="logRetention">Log retention</label>
-                  <div class="segmented-control" id="ctrl-log-retention">
+                  <div class="segmented-control">
                     <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_1" value="1">
                     <label for="log_retention_1" data-i18n="logRetention1d">1 day</label>
                     <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_3" value="3">
@@ -389,7 +388,7 @@
                     <label data-i18n="networkProxyMode">Outbound network proxy</label>
                     <small class="muted" data-i18n="networkProxyModeHint">Used by upstream requests, Web Search, Vision, and update checks. Restart the proxy after changing it.</small>
                   </span>
-                  <div class="segmented-control" id="ctrl-network-proxy">
+                  <div class="segmented-control">
                     <input type="radio" name="NETWORK_PROXY_MODE" id="network_proxy_system" value="system" checked>
                     <label for="network_proxy_system" data-i18n="networkProxyMode_system">Follow system</label>
                     <input type="radio" name="NETWORK_PROXY_MODE" id="network_proxy_none" value="none">
@@ -410,7 +409,7 @@
                 <h3 class="config-section-title" data-i18n="modelBehavior">Model behavior</h3>
                 <div class="setting-item">
                   <label data-i18n="upstreamModel">Upstream model</label>
-                  <div class="segmented-control" id="ctrl-upstream-model">
+                  <div class="segmented-control">
                     <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_default" value="default" checked>
                     <label for="model_default" data-i18n="modelDefault">Default</label>
                     <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_flash" value="deepseek-v4-flash">
@@ -423,7 +422,7 @@
 
                 <div class="setting-item">
                   <label data-i18n="thinkingMode">Thinking mode</label>
-                  <div class="segmented-control" id="ctrl-thinking">
+                  <div class="segmented-control">
                     <input type="radio" name="DEEPSEEK_THINKING" id="tk_auto" value="auto" checked>
                     <label for="tk_auto" data-i18n="thinkingAuto">Auto</label>
                     <input type="radio" name="DEEPSEEK_THINKING" id="tk_enabled" value="enabled">
@@ -436,7 +435,7 @@
 
                 <div class="setting-item">
                   <label data-i18n="temperaturePreset">Sampling temperature</label>
-                  <div class="segmented-control compact-segmented-control" id="ctrl-temperature-preset">
+                  <div class="segmented-control compact-segmented-control">
                     <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_default" value="default" checked>
                     <label for="temp_default" data-i18n="temperatureDefault">Default</label>
                     <input type="radio" name="DEEPSEEK_TEMPERATURE_PRESET" id="temp_strict" value="strict">
@@ -478,9 +477,9 @@
                 <div class="setting-item">
                   <span>
                     <label data-i18n="deepseekTransport">Chat API compatibility</label>
-                    <small class="muted" data-i18n="deepseekTransportHint">Official DeepSeek uses Responses by default. Select Chat compatibility for upstream recovery or when a request requires a CodeSeeX-owned local tool executor.</small>
+                    <small class="muted" data-i18n="deepseekTransportHint">Default transport for every upstream. Select Chat API compatibility when the upstream does not implement the Responses API or a request requires a CodeSeeX-owned local tool executor.</small>
                   </span>
-                  <div class="segmented-control compact-segmented-control" id="ctrl-deepseek-transport">
+                  <div class="segmented-control compact-segmented-control">
                     <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_native" value="native_responses" checked>
                     <label for="transport_native" data-i18n="deepseekTransport_native">Native Responses</label>
                     <input type="radio" name="DEEPSEEK_TRANSPORT" id="transport_chat" value="chat_compat">
@@ -490,11 +489,11 @@
                 <div class="setting-divider"></div>
                 <div class="setting-item">
                   <span>
-                    <span data-i18n="codexAppModelListInjection">Codex App model list injection</span>
-                    <small class="muted" data-i18n="codexAppModelListInjectionHint">Experimental. When enabled, Launch Codex also tries to patch the Codex App renderer model list. Leave disabled for the safest native Codex launch.</small>
+                    <span id="codexAppModelListInjectionLabel" data-i18n="codexAppModelListInjection">Codex App model list injection</span>
+                    <small class="muted" data-i18n="codexAppModelListInjectionHint">Experimental and enabled by default. Launch Codex also tries to patch the Codex App renderer model list; turn it off if Codex App compatibility changes.</small>
                   </span>
                   <label class="toggle-switch">
-                    <input type="checkbox" id="CODEX_APP_MODEL_LIST_INJECTION">
+                    <input type="checkbox" id="CODEX_APP_MODEL_LIST_INJECTION" aria-labelledby="codexAppModelListInjectionLabel">
                     <span class="slider"></span>
                   </label>
                 </div>
@@ -524,7 +523,7 @@
                     <span data-i18n="releaseNotes">Release notes</span>
                   </button>
                 </div>
-                <span id="appProductName" data-product-name hidden>CodeSeeX</span>
+                <span data-product-name hidden>CodeSeeX</span>
               </aside>
 
               <div class="about-settings-stack">
@@ -556,7 +555,7 @@
                       <b id="updateBackgroundTask">Download update package</b>
                       <span id="updateBackgroundPercent">0%</span>
                     </div>
-                    <div class="update-background-track" aria-label="Background update download progress">
+                    <div class="update-background-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Background update download progress">
                       <div class="update-background-bar" id="updateBackgroundBar"></div>
                     </div>
                   </div>
@@ -568,15 +567,15 @@
                   <div class="about-row-list">
                     <div class="about-row">
                       <span class="about-row-label" data-i18n="model">Model</span>
-                      <span class="about-row-value">deepseek-v4-pro / flash</span>
+                      <span class="about-row-value" id="aboutStatModel">-</span>
                     </div>
                     <div class="about-row">
                       <span class="about-row-label" data-i18n="codexAdapter">Codex adapter</span>
-                      <span class="about-row-value">Responses API catalog</span>
+                      <span class="about-row-value" data-i18n="aboutRuntimeAdapter">Responses API catalog</span>
                     </div>
                     <div class="about-row">
                       <span class="about-row-label" data-i18n="proxyConnection">Connection</span>
-                      <span class="about-row-value">127.0.0.1 /v1</span>
+                      <span class="about-row-value" id="aboutStatConnection">-</span>
                     </div>
                   </div>
                 </section>
@@ -597,11 +596,6 @@
 
                 <p class="about-status" id="aboutStatus" data-i18n="ready">Ready.</p>
                 <p class="about-footer-note" data-i18n="aboutFooterNote">Connect Codex to the configured model service through the local desktop manager. Use valid API credentials and follow the provider terms.</p>
-
-                <div class="about-hidden-meta" hidden>
-                  <span id="appName">-</span>
-                  <span id="aboutVersionMeta">-</span>
-                </div>
               </div>
             </div>
           </section>
@@ -612,7 +606,7 @@
   </div>
 
   <div class="overlay-layer" id="loadingOverlay" hidden>
-    <div class="overlay-card loading-card">
+    <div class="overlay-card loading-card" role="dialog" aria-modal="true">
       <div class="spinner"></div>
       <strong id="loadingTitle" data-i18n="busyTitle">Processing</strong>
       <span id="loadingDetail" data-i18n="busyDetail">Please wait...</span>
@@ -620,7 +614,7 @@
   </div>
 
   <div class="overlay-layer" id="updateModal" hidden>
-    <div class="overlay-card modal-card update-dialog" role="dialog" aria-modal="true" aria-labelledby="updateModalTitle">
+    <div class="overlay-card update-dialog" role="dialog" aria-modal="true" aria-labelledby="updateModalTitle">
       <div class="modal-header">
         <h2 id="updateModalTitle" data-i18n="updateDownloadingTitle">Downloading update</h2>
         <p id="updateModalSubtitle">CodeSeeX update package is downloading.</p>
@@ -630,7 +624,7 @@
           <span id="updateSizeText">-</span>
           <span id="updatePercentText">0%</span>
         </div>
-        <div class="update-progress-track" aria-label="Update download progress">
+        <div class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Update download progress">
           <div class="update-progress-bar" id="updateProgressBar"></div>
         </div>
         <div class="update-current">
@@ -646,7 +640,7 @@
   </div>
 
   <div class="overlay-layer" id="releaseNotesModal" hidden>
-    <div class="overlay-card modal-card release-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="releaseNotesTitle">
+    <div class="overlay-card release-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="releaseNotesTitle">
       <div class="modal-header release-notes-header">
         <div>
           <h2 id="releaseNotesTitle" data-i18n="releaseNotesTitle">Release notes</h2>
@@ -663,13 +657,13 @@
   </div>
 
   <div class="overlay-layer" id="ccsKeyModal" hidden>
-    <div class="overlay-card modal-card" role="dialog" aria-modal="true" aria-labelledby="ccsKeyTitle">
+    <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="ccsKeyTitle">
       <div class="modal-header">
         <h2 id="ccsKeyTitle" data-i18n="ccsApiKeyTitle">CCS import API key</h2>
-        <p data-i18n="ccsApiKeyHint">Enter the real API key required by CCS for this import. CodeSeeX uses it only to build this one deep link and does not save it.</p>
+        <p data-i18n="ccsApiKeyHint">Paste the real API key CCS needs for validation. CodeSeeX includes it only in this one import link and does not save it.</p>
         <p class="modal-warning" data-i18n="ccsApiKeyCatalogWarning">Copy the CodeSeeX TOML directly instead of relying on CCS import to keep the model catalog. CCS may show the catalog in preview but drop it after saving.</p>
       </div>
-      <input class="inline-control modal-input" type="password" id="ccsApiKeyInput" spellcheck="false" autocomplete="new-password" data-i18n-placeholder="ccsApiKeyPlaceholder" placeholder="sk-">
+      <input class="inline-control modal-input" type="password" id="ccsApiKeyInput" aria-labelledby="ccsKeyTitle" spellcheck="false" autocomplete="new-password" data-i18n-placeholder="ccsApiKeyPlaceholder" placeholder="sk-">
       <div class="modal-actions">
         <button class="btn btn-secondary" type="button" id="ccsKeyCancel" data-i18n="cancel">Cancel</button>
         <button class="btn btn-primary" type="button" id="ccsKeyConfirm" data-i18n="importToCcs">Import to CCS</button>
@@ -678,10 +672,10 @@
   </div>
 
   <div class="overlay-layer" id="troubleshootModal" hidden>
-    <div class="overlay-card modal-card troubleshoot-card" role="dialog" aria-modal="true" aria-labelledby="troubleshootTitle">
+    <div class="overlay-card troubleshoot-card" role="dialog" aria-modal="true" aria-labelledby="troubleshootTitle">
       <div class="modal-header">
         <h2 id="troubleshootTitle" data-i18n="troubleshootTitle">Proxy troubleshooting</h2>
-        <p data-i18n="troubleshootHint">Check the local proxy state and the next safe action.</p>
+        <p data-i18n="troubleshootHint">Review the key states; expand technical details only when you need paths or model lists.</p>
       </div>
       <div class="troubleshoot-summary" id="troubleshootSummary"></div>
       <div class="troubleshoot-action-list" id="troubleshootActions"></div>
@@ -694,7 +688,7 @@
   </div>
 
   <script>
-    const assetVersion = window.CODESEEX_ASSET_VERSION || Date.now().toString(36);
+    const assetVersion = "0.7.1";
     ["/app-utils.js", "/app.js"].forEach((src) => {
       const script = document.createElement("script");
       script.async = false;

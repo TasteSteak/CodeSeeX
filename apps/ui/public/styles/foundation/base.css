@@ -25,8 +25,8 @@ body {
 
 .selectable,
 .selectable * {
-  user-select: text !important;
-  -webkit-user-select: text !important;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .tabular-nums {

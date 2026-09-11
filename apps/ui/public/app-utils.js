@@ -20,10 +20,6 @@ function formatNumber(value) {
   }
 }
 
-function formatDateTime(value) {
-  return value && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toLocaleString(formatLocaleId(uiLanguage), { hour12: false }) : "-";
-}
-
 function formatTimeOnly(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "--:--:--" : date.toTimeString().split(" ")[0];

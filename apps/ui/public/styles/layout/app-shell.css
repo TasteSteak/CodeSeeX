@@ -43,18 +43,6 @@
     transition: var(--theme-transition); 
   }
   
-  .header-actions { 
-    display: flex; 
-    gap: 12px; 
-  }
-  
-  .panels-grid { 
-    display: grid; 
-    grid-template-columns: 1fr; 
-    flex: 1; 
-    min-height: 0; 
-  }
-  
   /* 强效隔离：默认完全隐藏所有业务视图，彻底杜绝跨文件 CSS 覆盖造成的重叠错位 */
   .dashboard-panel, .log-page, .config-page, .about-page, .usage-page { 
     display: none !important; 
@@ -111,12 +99,6 @@
     min-height: 0; 
   }
   
-  @media (max-width: 1024px) {
-    .panels-grid { 
-      grid-template-columns: 1fr; 
-    }
-  }
-
   /* 页面内容容器：宽屏下限制内容宽度并居中，避免随窗口过度拉伸 */
   :root {
     --page-max-width: 1040px;

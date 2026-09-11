@@ -145,11 +145,16 @@
   
   .usage-record[open] summary {
     border-bottom: 1px solid var(--border-color);
-    background: #f1f5f9;
+    background: var(--ctrl-bg);
   }
   
   :root[data-theme="dark"] .usage-record[open] summary {
     background: rgba(255, 255, 255, 0.03);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] .usage-record[open] summary {
+      background: rgba(255, 255, 255, 0.03);
+    }
   }
   
   .usage-title-cell {
@@ -193,10 +198,10 @@
   }
   
   /* 缓存状态色语义化打磨 */
-  .usage-cache-strong { color: #10b981; font-weight: 600; }
+  .usage-cache-strong { color: var(--success); font-weight: 600; }
   .usage-cache-good { color: #84cc16; font-weight: 600; }
-  .usage-cache-mid { color: #f59e0b; font-weight: 600; }
-  .usage-cache-low { color: #ef4444; font-weight: 600; }
+  .usage-cache-mid { color: var(--warn); font-weight: 600; }
+  .usage-cache-low { color: var(--danger); font-weight: 600; }
   .usage-cache-none { color: var(--text-main); }
   .usage-cell-value.usage-cost-normal { color: var(--success); font-weight: 650; }
   .usage-cell-value.usage-cost-peak { color: var(--warn); font-weight: 650; }
@@ -208,11 +213,16 @@
     overflow: visible;
     padding: 4px 0;
     border-bottom: 1px solid var(--border-color);
-    background: #f8fafc;
+    background: var(--hover-bg);
   }
   
   :root[data-theme="dark"] .usage-trace-pure-container {
     background: rgba(0, 0, 0, 0.15);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] .usage-trace-pure-container {
+      background: rgba(0, 0, 0, 0.15);
+    }
   }
   
   .trace-stripe-row {
@@ -227,6 +237,11 @@
   
   :root[data-theme="dark"] .trace-stripe-row:hover {
     background: rgba(255, 255, 255, 0.02);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] .trace-stripe-row:hover {
+      background: rgba(255, 255, 255, 0.02);
+    }
   }
   
   .trace-cell {
@@ -300,11 +315,16 @@
   :root[data-theme="dark"] .trace-stage {
     background: rgba(255, 255, 255, 0.06);
   }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] .trace-stage {
+      background: rgba(255, 255, 255, 0.06);
+    }
+  }
   
   .trace-stage.reply { color: #2563eb; background: rgba(37, 99, 235, 0.08); }
   .trace-stage.tool { color: #0284c7; background: rgba(2, 132, 199, 0.08); }
   .trace-stage.final { color: #16a34a; background: rgba(22, 163, 74, 0.08); }
-  .trace-stage.service { color: #7c3aed; background: rgba(124, 58, 237, 0.08); }
+  .trace-stage.service { color: var(--tool); background: rgba(124, 58, 237, 0.08); }
   .trace-stage.running { color: #d97706; background: rgba(217, 119, 6, 0.08); }
   .trace-stage.failed { color: #dc2626; background: rgba(220, 38, 38, 0.08); }
   

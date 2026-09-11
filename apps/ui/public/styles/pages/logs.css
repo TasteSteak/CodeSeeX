@@ -18,6 +18,9 @@
 }
 
 .log-panel .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 16px;
 }
 
@@ -196,10 +199,6 @@
 .log-category-tool .log-category {
   color: var(--tool);
   background: var(--tool-badge-bg);
-}
-
-.log-category-web .log-category {
-  color: var(--info);
 }
 
 .log-category-protocol .log-category,

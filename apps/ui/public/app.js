@@ -12,26 +12,19 @@ const DEEPSEEK_RECHARGE_URL = "https://platform.deepseek.com/top_up";
 const CCS_IMPORT_URL = "ccswitch://v1/import";
 const DEFAULT_CCS_ENDPOINT = "http://127.0.0.1:8787/v1";
 const DEFAULT_CCS_MODEL = "deepseek-v4-pro";
-const DEFAULT_CCS_MODEL_CATALOG = Object.freeze([
-  Object.freeze({ model: "deepseek-v4-pro", displayName: "DeepSeek V4 Pro", contextWindow: 1000000 }),
-  Object.freeze({ model: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", contextWindow: 1000000 }),
-]);
+const DEFAULT_CCS_CONTEXT_WINDOW = 1000000;
 const CODEX_CONFIG_PATH_UNIX = "~/.codex/config.toml";
 const CODEX_CONFIG_PATH_WINDOWS = "%USERPROFILE%\\.codex\\config.toml";
 const REFRESH_RUNNING_MS = 2000;
 const REFRESH_IDLE_MS = 5000;
 const REFRESH_HIDDEN_MS = 10000;
 const SLOW_RENDER_MS = 80;
-const LANGUAGE_LOAD_TIMEOUT_MS = 1200;
 const CONFIG_CHANGED_EVENT = "codeseex-config-changed";
 const UPDATE_PROGRESS_EVENT = "codeseex-update-progress";
 const RUNTIME_STATUS_STARTING = "starting";
 const RUNTIME_STATUS_STOPPING = "stopping";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
 const DEFAULT_TEMPERATURE_PRESET = "default";
-// Last resort only: the settings UI is normally populated from the catalog
-// document downloaded from the backend, so no model or price is hardcoded.
-const FALLBACK_BILLING_RATES = Object.freeze({ cached: 0, cacheMiss: 0, output: 0 });
 const FALLBACK_PEAK_VALLEY = Object.freeze({
   enabled: true,
   timezone: "Asia/Shanghai",
@@ -76,16 +69,15 @@ const FALLBACK_LANGUAGE = "en_us";
 const DEFAULT_LANGUAGE = SYSTEM_LANGUAGE;
 
 const els = {
+  aboutStatConnection: byId("aboutStatConnection"),
+  aboutStatModel: byId("aboutStatModel"),
   aboutStatus: byId("aboutStatus"),
   aboutUpdateDot: byId("aboutUpdateDot"),
   activeRequests: byId("activeRequests"),
   appDescription: byId("appDescription"),
   appLicense: byId("appLicense"),
-  appName: byId("appName"),
-  appProductName: byId("appProductName"),
   appVersion: byId("appVersion"),
   aboutVersion: byId("aboutVersion"),
-  aboutVersionMeta: byId("aboutVersionMeta"),
   balanceGranted: byId("balanceGranted"),
   balanceStatus: byId("balanceStatus"),
   balanceToppedUp: byId("balanceToppedUp"),
@@ -133,6 +125,7 @@ const els = {
   releaseNotesNotice: byId("releaseNotesNotice"),
   releaseNotesSource: byId("releaseNotesSource"),
   releaseNotesSubtitle: byId("releaseNotesSubtitle"),
+  restartRequiredBadge: byId("restartRequiredBadge"),
   running: byId("running"),
   showThinking: byId("SHOW_THINKING"),
   startButton: byId("startButton"),
@@ -1045,16 +1038,15 @@ function defaultApiBaseUrl() {
   return protocol === "http:" || protocol === "https:" ? "" : DEBUG_MANAGER_BASE_URL;
 }
 
-async function resolveApiBaseUrl() {
-  if (apiBaseUrl !== null) return apiBaseUrl;
-  apiBaseUrl = defaultApiBaseUrl();
+function resolveApiBaseUrl() {
+  if (apiBaseUrl === null) apiBaseUrl = defaultApiBaseUrl();
   return apiBaseUrl;
 }
 
-async function apiUrl(url) {
+function apiUrl(url) {
   const value = String(url || "");
   if (!isApiRequestUrl(value) || /^https?:\/\//i.test(value)) return value;
-  const base = await resolveApiBaseUrl();
+  const base = resolveApiBaseUrl();
   return base ? base + value : value;
 }
 
@@ -1062,7 +1054,7 @@ async function apiFetch(url, options = {}) {
   if (isTauriRuntime() && isApiRequestUrl(url)) {
     return desktopManagerFetch(url, options);
   }
-  const target = await apiUrl(url);
+  const target = apiUrl(url);
   try {
     const response = await fetch(target, options);
     response.codeseexTargetUrl = target;
@@ -1477,6 +1469,7 @@ function renderConfig(config) {
   lastUsageSignature = "";
   if (!restartRequired) renderConfigSaveState("clean");
   renderCodexAdapter(latestAdapter || {});
+  renderAboutStats();
 }
 
 function renderCodexAdapter(adapter) {
@@ -1985,7 +1978,7 @@ function escapeHtml(value) {
 function ccsImportUrl(toml, options = {}) {
   const apiKey = String(options.apiKey || "").trim();
   const endpoint = parseTomlStringValue(toml, "base_url") || DEFAULT_CCS_ENDPOINT;
-  const model = parseTomlStringValue(toml, "model") || DEFAULT_CCS_MODEL;
+  const model = parseTomlStringValue(toml, "model") || catalogState.defaultModel || DEFAULT_CCS_MODEL;
   const config = {
     auth: { OPENAI_API_KEY: apiKey },
     config: String(toml || ""),
@@ -2005,12 +1998,21 @@ function ccsImportUrl(toml, options = {}) {
 }
 
 function ccsModelCatalogModels() {
+  const known = new Map();
+  for (const entry of catalogModels()) {
+    const model = String((entry && entry.slug) || "").trim();
+    if (!model || known.has(model)) continue;
+    known.set(model, {
+      model,
+      displayName: String((entry && entry.display_name) || model),
+      contextWindow: Number(entry && entry.context_window) || DEFAULT_CCS_CONTEXT_WINDOW,
+    });
+  }
   const adapterModels = Array.isArray(latestAdapter && latestAdapter.models) ? latestAdapter.models : [];
-  const known = new Map(DEFAULT_CCS_MODEL_CATALOG.map((model) => [model.model, { ...model }]));
   for (const slug of adapterModels) {
     const model = String(slug || "").trim();
     if (!model || known.has(model)) continue;
-    known.set(model, { model, displayName: model, contextWindow: 1000000 });
+    known.set(model, { model, displayName: model, contextWindow: DEFAULT_CCS_CONTEXT_WINDOW });
   }
   return Array.from(known.values());
 }
@@ -3582,21 +3584,9 @@ function renderLogs(options = {}) {
   if (logEvents.length === 0) {
     syncKeyedChildren(els.logStream, [{
       key: "empty",
-      create: () => logEntry({
-      time: "--:--:--",
-      prefix: "SYS",
-      message: t("noLogs"),
-      detail: t("noLogsDetail"),
-      baseClass: "log-type-system",
-      }),
+      create: () => logEntry(emptyLogEntry()),
       update: (node) => {
-        const next = logEntry({
-          time: "--:--:--",
-          prefix: "SYS",
-          message: t("noLogs"),
-          detail: t("noLogsDetail"),
-          baseClass: "log-type-system",
-        });
+        const next = logEntry(emptyLogEntry());
         node.replaceWith(next);
         return next;
       },
@@ -3776,6 +3766,23 @@ function restoreScrollAnchor(scroller, anchor) {
   scroller.scrollTop += rect.top - bounds.top - anchor.offset;
 }
 
+function emptyLogEntry() {
+  return {
+    time: "--:--:--",
+    level: "info",
+    category: "system",
+    categoryLabel: t("logCategorySystem"),
+    title: t("noLogs"),
+    summary: t("noLogsDetail"),
+    requestId: "",
+    sessionHint: "",
+    riskFlags: [],
+    metrics: {},
+    detailRows: [],
+    baseClass: "log-category-system log-level-info",
+  };
+}
+
 function normalizeLogEvent(event) {
   const type = event.type || event.event_type || "event";
   const level = String(event.severity || event.level || "info").toLowerCase();
@@ -3858,9 +3865,10 @@ function userLogMessage(type, fallback) {
 }
 
 function logEntry(item) {
+  const detailRows = Array.isArray(item.detailRows) ? item.detailRows : [];
   const wrap = document.createElement("details");
   wrap.className = `log-entry ${item.baseClass || ""}`;
-  if (!item.detailRows.length) wrap.classList.add("log-entry-empty-detail");
+  if (!detailRows.length) wrap.classList.add("log-entry-empty-detail");
 
   const row = document.createElement("summary");
   row.className = "log-row";
@@ -3893,10 +3901,10 @@ function logEntry(item) {
   row.appendChild(main);
   wrap.appendChild(row);
 
-  if (item.detailRows.length) {
+  if (detailRows.length) {
     const detail = document.createElement("div");
     detail.className = "log-detail-grid selectable";
-    for (const detailRow of item.detailRows) {
+    for (const detailRow of detailRows) {
       const label = document.createElement("span");
       label.className = "log-detail-key";
       label.textContent = detailRow.key;
@@ -3989,13 +3997,20 @@ function renderAppInfo(info) {
     element.textContent = productName;
   });
   document.title = productName;
-  els.appProductName.textContent = productName;
   els.appDescription.textContent = t("aboutProductDescription");
   els.appVersion.textContent = "v" + version;
-  els.appName.textContent = productName;
   els.aboutVersion.textContent = version;
-  if (els.aboutVersionMeta) els.aboutVersionMeta.textContent = version;
   els.appLicense.textContent = info.license || t("notDeclared");
+  renderAboutStats();
+}
+
+/// About 页的运行摘要只展示真实数据：目录里的默认模型与本机端点，不再写死模型名和端口。
+function renderAboutStats() {
+  if (els.aboutStatModel) els.aboutStatModel.textContent = catalogState.defaultModel || "-";
+  if (els.aboutStatConnection) {
+    const port = (lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787";
+    els.aboutStatConnection.textContent = "127.0.0.1:" + port + "/v1";
+  }
 }
 
 function renderBalance(data) {
@@ -4256,13 +4271,6 @@ function handleAboutStatusClick(event) {
   openOrExplain(link.href, updateMessage("updateCheckFailed", latestUpdateCheck || {})).catch((error) => {
     setAboutStatus(error && error.message ? error.message : String(error), true);
   });
-}
-
-async function handleWindowAction(action) {
-  if (!["minimize", "maximize", "close"].includes(action)) return;
-  try {
-    if (isTauriRuntime()) await desktopInvoke("desktop_window_action", { action });
-  } catch {}
 }
 
 async function openOrExplain(url, fallback) {
@@ -4683,16 +4691,6 @@ function setBillingInputValues() {
   renderBillingCatalog();
 }
 
-function setTextInputValue(input, value) {
-  if (!input || document.activeElement === input) return;
-  input.value = String(value);
-}
-
-function setInputValue(input, value, fallback) {
-  if (!input || document.activeElement === input) return;
-  input.value = String(normalizeRateInput(value, fallback));
-}
-
 /// Renders the fetched model list next to the billing card of the selected
 /// model. Prices come from the catalog document; a model without a rate stays
 /// unpriced instead of silently inheriting another model's price.
@@ -4927,10 +4925,6 @@ function currentPeakValleyBillingEnabled() {
   return catalogPeakValley().enabled;
 }
 
-function currentBillingRates(model) {
-  return catalogRateFor(model);
-}
-
 /// Parses the catalog document injected by the backend. Everything the
 /// settings and usage views price with comes from here.
 function applyCatalogPayload(catalog, status = {}) {
@@ -4943,6 +4937,7 @@ function applyCatalogPayload(catalog, status = {}) {
   catalogState.currency = String((catalog && catalog.pricing && catalog.pricing.currency) || "CNY");
   catalogState.unit = String((catalog && catalog.pricing && catalog.pricing.unit) || "per_1m_tokens");
   catalogState.status = status || {};
+  renderAboutStats();
 }
 
 function catalogModels() {
@@ -5176,116 +5171,6 @@ function formatCurrencyMap(values) {
   return entries.map(([currency, value]) => currency + " " + formatDecimal(value)).join(" / ");
 }
 
-function formatDetail(detail) {
-  if (!detail || typeof detail !== "object") return String(detail || "");
-  return Object.entries(detail)
-    .filter(([, value]) => value !== "" && value !== null && value !== undefined)
-    .map(([key, value]) => key + ": " + (typeof value === "object" ? JSON.stringify(value) : String(value)))
-    .join("\n");
-}
-
-function formatLogDetail(type, detail) {
-  if (!detail || typeof detail !== "object") return String(detail || "");
-  if (type === "request_started") {
-    return [
-      detail.endpoint ? t("logApi") + ": " + formatEndpointLabel(detail.endpoint) : "",
-      modelDetailLine(detail),
-      detail.previous_response_id ? t("logPreviousResponseId") + ": " + compactLogValue(detail.previous_response_id, 80) : "",
-    ].filter(Boolean).join("\n");
-  }
-  if (type === "request_completed") {
-    return [
-      detail.status !== undefined ? t("logHttp") + ": " + detail.status : "",
-      modelDetailLine(detail),
-      detail.duration_ms !== undefined ? t("elapsed") + ": " + formatDuration(detail.duration_ms) : "",
-      detail.cost_cny !== undefined ? t("cost") + ": " + formatCost(detail.cost_cny) : "",
-    ].filter(Boolean).join("\n");
-  }
-  if (type === "request_failed") {
-    return [
-      detail.status !== undefined ? t("logHttp") + ": " + detail.status : "",
-      modelDetailLine(detail),
-      errorDetailLine(detail),
-    ].filter(Boolean).join("\n");
-  }
-  if (type === "tool_call") return toolDetailLines(detail).join("\n");
-  if (type === "tool_result") {
-    return toolDetailLines(detail).concat([
-      detail.ok !== undefined ? t("logStatus") + ": " + (detail.ok ? t("logStatusOk") : t("logStatusFailed")) : "",
-      detail.summary ? t("logSummary") + ": " + compactLogValue(detail.summary, 180) : "",
-    ]).filter(Boolean).join("\n");
-  }
-  if (type === "model_alias_applied") {
-    return [
-      modelDetailLine(detail),
-      detail.source ? t("logSource") + ": " + detail.source : "",
-    ].filter(Boolean).join("\n");
-  }
-  if (type === "context_compacted") {
-    return [
-      detail.mode ? t("mode") + ": " + detail.mode : "",
-      detail.estimated_tokens !== undefined ? t("logEstimatedTokens") + ": " + detail.estimated_tokens : "",
-      detail.threshold_tokens !== undefined ? t("logThresholdTokens") + ": " + detail.threshold_tokens : "",
-    ].filter(Boolean).join("\n");
-  }
-  return formatUserLevelDetail(detail);
-}
-
-function formatEndpointLabel(value) {
-  const endpoint = String(value || "").trim();
-  if (endpoint === "/v1/responses") return "Responses";
-  if (endpoint === "/v1/chat/completions") return "Chat completions";
-  return compactLogValue(endpoint, 100);
-}
-
-function modelDetailLine(detail) {
-  const requested = String(detail && detail.requested_model || "").trim();
-  const model = String(detail && detail.model || "").trim();
-  if (requested && model && requested !== model) return t("model") + ": " + requested + " -> " + model;
-  const value = model || requested;
-  return value ? t("model") + ": " + value : "";
-}
-
-function toolDetailLines(detail) {
-  return [
-    detail.name ? t("toolName") + ": " + compactLogValue(detail.name, 80) : "",
-    detail.scope ? t("toolScope") + ": " + compactLogValue(detail.scope, 80) : "",
-  ].filter(Boolean);
-}
-
-function errorDetailLine(detail) {
-  const upstream = detail.upstream_error;
-  const message = detail.message || detail.error
-    || (upstream && (upstream.message || upstream.error || upstream.code || upstream.type));
-  return message ? t("logError") + ": " + compactLogValue(message, 220) : "";
-}
-
-function formatUserLevelDetail(detail) {
-  const allowed = ["endpoint", "status", "model", "requested_model", "action", "mode", "path", "base_url", "host", "port", "error", "message"];
-  return allowed
-    .map((key) => detail[key] !== undefined && detail[key] !== null && detail[key] !== "" ? logDetailLabel(key) + ": " + compactLogValue(detail[key], 180) : "")
-    .filter(Boolean)
-    .join("\n");
-}
-
-function logDetailLabel(key) {
-  const labelKey = {
-    endpoint: "logEndpoint",
-    status: "logStatus",
-    model: "model",
-    requested_model: "logRequestedModel",
-    action: "logAction",
-    mode: "mode",
-    path: "logPath",
-    base_url: "logBaseUrl",
-    host: "logHost",
-    port: "logPort",
-    error: "logError",
-    message: "logMessage",
-  }[key];
-  return labelKey ? t(labelKey) : key;
-}
-
 function compactLogValue(value, limit) {
   const text = typeof value === "object" ? JSON.stringify(value) : String(value || "");
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -5326,18 +5211,10 @@ function pruneLogDividers() {
   logDividers = logDividers.filter((divider) => eventKeys.has(divider.key));
 }
 
-function oldestLogTs() {
-  return logEvents.length > 0 ? logEvents[0].ts : null;
-}
-
 function oldestLogCursor() {
   if (logEvents.length === 0) return logNextCursor;
   const oldest = logEvents[0];
   return oldest.cursor || [oldest.ts || "", oldest.id || ""].join("|") || logNextCursor;
-}
-
-function newestLogTs() {
-  return logEvents.length > 0 ? String(logEvents[logEvents.length - 1].ts || "") : "";
 }
 
 function isAtLogTop() {

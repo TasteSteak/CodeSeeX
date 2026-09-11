@@ -67,13 +67,6 @@
     transition: var(--theme-transition);
   }
 
-  /* 块级设置项（如计费费率区域） */
-  .setting-item-block {
-    align-items: flex-start;
-    flex-direction: column;
-    width: 100%;
-  }
-
   .compact-segmented-control {
     margin-left: auto;
   }

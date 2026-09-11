@@ -17,14 +17,12 @@
   --danger-bg: #fef2f2;
   --warn: #f59e0b;
   --info: #3b82f6;
-  --info-bg: #eff6ff;
   --tool: #7c3aed;
   --ctrl-bg: #f1f5f9;
   --ctrl-selected-bg: #ffffff;
   --danger-hover-bg: #fecaca;
   --warn-badge-bg: #fef3c7;
   --tool-badge-bg: #ede9fe;
-  --request-badge-bg: #dbeafe;
   --overlay-bg: rgba(17, 24, 39, 0.4);
   --theme-duration: 0.2s;
   --theme-easing: ease;
@@ -32,7 +30,6 @@
   
   --radius-sm: 6px;
   --radius-md: 10px;
-  --radius-lg: 14px;
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
 }
@@ -59,11 +56,10 @@
   --danger-hover-bg: rgba(239, 68, 68, 0.2);
   --warn-badge-bg: rgba(245, 158, 11, 0.12);
   --tool-badge-bg: rgba(139, 92, 246, 0.12);
-  --request-badge-bg: rgba(59, 130, 246, 0.12);
   --overlay-bg: rgba(0, 0, 0, 0.7);
   
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 8px 16px -4px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 8px 16px -4px rgba(0, 0, 0, 0.6);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -86,7 +82,6 @@
     --danger-hover-bg: rgba(239, 68, 68, 0.2);
     --warn-badge-bg: rgba(245, 158, 11, 0.12);
     --tool-badge-bg: rgba(139, 92, 246, 0.12);
-    --request-badge-bg: rgba(59, 130, 246, 0.12);
     --overlay-bg: rgba(0, 0, 0, 0.7);
     --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
     --shadow-md: 0 8px 16px -4px rgba(0, 0, 0, 0.6);
