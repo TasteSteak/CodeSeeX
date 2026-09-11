@@ -18,11 +18,25 @@ pub(crate) struct NativePendingToolGroups {
     groups: Arc<Mutex<BTreeMap<String, PendingNativeToolGroup>>>,
 }
 
+/// One block of upstream input that CodeSeeX itself injected: a hosted tool
+/// round it executed inside the same turn. The provider already saw these
+/// items, but Codex never did, so they are not part of the client-visible
+/// anchor. They are replayed at the offset in that anchor where CodeSeeX
+/// injected them, which keeps a nested continuation in provider order.
+#[derive(Debug, Clone)]
+pub(crate) struct NativeInjectedItems {
+    /// Index inside `PendingNativeToolGroup::authoritative_input` this block
+    /// was injected after.
+    pub(crate) offset: usize,
+    pub(crate) items: Vec<Value>,
+}
+
 #[derive(Clone)]
 pub(crate) struct PendingNativeToolGroup {
     pub(crate) response_id: String,
     pub(crate) request_anchor: Option<String>,
     pub(crate) authoritative_input: Vec<Value>,
+    pub(crate) injected_items: Vec<NativeInjectedItems>,
     pub(crate) provider_output: Vec<Value>,
     pub(crate) visible_provider_output: Vec<Value>,
     pub(crate) local_output_items: Vec<Value>,
@@ -38,6 +52,10 @@ pub(crate) struct NativePendingContinuation {
     /// current authoritative fields (model, instructions, tools, stream, ...)
     /// are never replaced by a cached earlier payload.
     pub(crate) merged_input: Vec<Value>,
+    /// Hosted rounds CodeSeeX executed itself. The next continuation must keep
+    /// replaying them, because the provider produced the retained group in a
+    /// context that already contained them.
+    pub(crate) injected_items: Vec<NativeInjectedItems>,
     pub(crate) client_output_count: usize,
     pub(crate) local_output_count: usize,
 }
@@ -210,14 +228,33 @@ impl NativePendingToolGroups {
             )?;
         let (client_outputs, suffix) = collect_client_outputs(after_visible, &group.client_calls)?;
 
+        let injected_item_count = group
+            .injected_items
+            .iter()
+            .map(|segment| segment.items.len())
+            .sum::<usize>();
         let mut merged_input = Vec::with_capacity(
             group.authoritative_input.len()
+                + injected_item_count
                 + group.provider_output.len()
                 + group.local_output_items.len()
                 + client_outputs.len()
                 + suffix.len(),
         );
-        merged_input.extend(group.authoritative_input.iter().cloned());
+        // CodeSeeX-injected hosted rounds sit at their original offset inside
+        // the client-visible anchor, so a nested continuation keeps the exact
+        // order the provider already produced them in.
+        let mut anchor_replayed = 0_usize;
+        for segment in &group.injected_items {
+            merged_input.extend(
+                group.authoritative_input[anchor_replayed..segment.offset]
+                    .iter()
+                    .cloned(),
+            );
+            merged_input.extend(segment.items.iter().cloned());
+            anchor_replayed = segment.offset;
+        }
+        merged_input.extend(group.authoritative_input[anchor_replayed..].iter().cloned());
         merged_input.extend(group.provider_output.iter().cloned());
         merged_input.extend(group.local_output_items.iter().cloned());
         merged_input.extend(client_outputs);
@@ -226,6 +263,7 @@ impl NativePendingToolGroups {
         Ok(Some(NativePendingContinuation {
             pending_response_id: group.response_id.clone(),
             merged_input,
+            injected_items: group.injected_items.clone(),
             client_output_count: group.client_calls.len(),
             local_output_count: group.local_output_items.len(),
         }))
@@ -249,10 +287,14 @@ impl NativePendingToolGroups {
 }
 
 impl PendingNativeToolGroup {
+    // The retained group is one protocol unit: identity, anchor, provider
+    // output, CodeSeeX-injected rounds and the calls Codex owns.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         response_id: impl Into<String>,
         request: &Value,
         authoritative_input: Vec<Value>,
+        injected_items: Vec<NativeInjectedItems>,
         provider_output: Vec<Value>,
         visible_provider_output: Vec<Value>,
         local_output_items: Vec<Value>,
@@ -262,6 +304,7 @@ impl PendingNativeToolGroup {
             response_id: response_id.into(),
             request_anchor: request_anchor(request),
             authoritative_input,
+            injected_items,
             provider_output,
             visible_provider_output,
             local_output_items,
@@ -276,6 +319,11 @@ impl PendingNativeToolGroup {
             "response_id_hash": short_hash(&self.response_id),
             "session_anchor": self.request_anchor.as_ref().map(|value| short_hash(value)),
             "authoritative_input_items": self.authoritative_input.len(),
+            "injected_items": self
+                .injected_items
+                .iter()
+                .map(|segment| segment.items.len())
+                .sum::<usize>(),
             "provider_output_items": self.provider_output.len(),
             "visible_provider_output_items": self.visible_provider_output.len(),
             "local_output_items": self.local_output_items.len(),
@@ -445,6 +493,15 @@ fn validate_pending_group(group: &PendingNativeToolGroup) -> Result<(), NativePe
             "client tool call ids were missing or duplicated",
         ));
     }
+    let mut injected_through = 0_usize;
+    for segment in &group.injected_items {
+        if segment.offset < injected_through || segment.offset > group.authoritative_input.len() {
+            return Err(NativePendingError::InvalidPendingGroup(
+                "injected hosted rounds did not map onto the client-visible anchor",
+            ));
+        }
+        injected_through = segment.offset;
+    }
     Ok(())
 }
 
@@ -475,6 +532,54 @@ fn compact_item_identity(item: &Value) -> String {
     }
 }
 
+fn item_type(item: &Value) -> &str {
+    item.get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+/// Whether a provider tool call CodeSeeX forwarded still carries the same
+/// identity in the client's replay. The call id and the tool payload are the
+/// protocol unit the upstream provider matches outputs against, so they must be
+/// equal; CodeSeeX's own stored copy is what reaches the model either way.
+fn replayed_visible_call_matches(stored: &Value, replayed: &Value, input_field: &str) -> bool {
+    ["call_id", "name", input_field].iter().all(|field| {
+        stored.get(*field).and_then(Value::as_str) == replayed.get(*field).and_then(Value::as_str)
+    })
+}
+
+/// Whether the client's replay of one provider item is the same protocol unit
+/// CodeSeeX forwarded.
+///
+/// Codex re-serializes history through its own item types before sending a
+/// request, so the copy that comes back is not byte-identical to the provider
+/// group CodeSeeX observed:
+/// - an item id that is not prefix-qualified (a bare provider UUID) is dropped,
+///   because `ResponseItemId::is_prefixed` only keeps ids like `msg_...`; and
+/// - anything Codex's own item shape cannot carry (such as `status` on a
+///   `function_call`) is dropped as an unknown field.
+///
+/// The continuation sent upstream is rebuilt from the coordinator's stored copy,
+/// so this comparison only has to prove that the client replayed the same
+/// protocol unit: the same item kinds in order, the same message role, and the
+/// same tool call identity. Injected, reordered, or edited calls still fail
+/// closed.
+fn replayed_visible_item_matches(stored: &Value, replayed: &Value) -> bool {
+    let kind = item_type(stored);
+    if kind != item_type(replayed) {
+        return false;
+    }
+    match kind {
+        "function_call" => replayed_visible_call_matches(stored, replayed, "arguments"),
+        "custom_tool_call" => replayed_visible_call_matches(stored, replayed, "input"),
+        "message" => {
+            stored.get("role").and_then(Value::as_str)
+                == replayed.get("role").and_then(Value::as_str)
+        }
+        _ => true,
+    }
+}
+
 /// Walks the provider output group Codex observed against the items Codex
 /// actually replayed, returning everything after that group.
 ///
@@ -482,8 +587,8 @@ fn compact_item_identity(item: &Value) -> String {
 /// different shape, because thinking is display-only for the client. Tolerating
 /// that here is safe: the continuation sent upstream is rebuilt from the
 /// coordinator's own stored copy of the group, so dropping client-side thinking cannot change
-/// what the model sees. Every other item must still match exactly and in order,
-/// so injected, reordered, or edited history still fails closed.
+/// what the model sees. Every other item must still line up in order and
+/// identity, so injected, reordered, or edited history still fails closed.
 fn after_visible_group<'a>(input: &'a [Value], stored: &[Value]) -> Option<&'a [Value]> {
     let mut stored_index = 0;
     let mut input_index = 0;
@@ -496,7 +601,7 @@ fn after_visible_group<'a>(input: &'a [Value], stored: &[Value]) -> Option<&'a [
             input_index += 1;
             continue;
         }
-        if stored[stored_index] != input[input_index] {
+        if !replayed_visible_item_matches(&stored[stored_index], &input[input_index]) {
             return None;
         }
         stored_index += 1;
@@ -605,10 +710,29 @@ mod tests {
         local_output_items: Vec<Value>,
         client_calls: Vec<NativeToolCall>,
     ) -> PendingNativeToolGroup {
+        group_with_injected(
+            authoritative_input,
+            provider_output,
+            visible_provider_output,
+            local_output_items,
+            Vec::new(),
+            client_calls,
+        )
+    }
+
+    fn group_with_injected(
+        authoritative_input: Vec<Value>,
+        provider_output: Vec<Value>,
+        visible_provider_output: Vec<Value>,
+        local_output_items: Vec<Value>,
+        injected_items: Vec<NativeInjectedItems>,
+        client_calls: Vec<NativeToolCall>,
+    ) -> PendingNativeToolGroup {
         PendingNativeToolGroup::new(
             "resp_local_1",
             &request(Vec::new()),
             authoritative_input,
+            injected_items,
             provider_output,
             visible_provider_output,
             local_output_items,
@@ -966,5 +1090,323 @@ mod tests {
             NativePendingError::PreviousResponseMismatch
         );
         assert_eq!(groups.pending_count(), 1);
+    }
+
+    #[test]
+    fn codex_normalized_replay_of_provider_items_still_continues() {
+        // Before a request Codex drops item ids that are not prefix-qualified
+        // and any provider field its own item shape cannot carry. The client
+        // still replayed the same protocol unit, so the continuation must be
+        // accepted and rebuilt from CodeSeeX's stored copy of the group.
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![
+            json!({
+                "type": "message",
+                "id": "c53e120a-544c-49fc-8314-6ebf26c2a122",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "working" }]
+            }),
+            json!({
+                "type": "function_call",
+                "id": "2997568c-4abb-4010-999b-7a914321067a",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwsh\"}",
+                "status": "completed"
+            }),
+        ];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call(
+                    "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                    "exec_command",
+                )],
+            ))
+            .unwrap();
+
+        let continuation = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "working" }]
+                }),
+                json!({
+                    "type": "function_call",
+                    "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                    "name": "exec_command",
+                    "arguments": "{\"cmd\":\"pwsh\"}"
+                }),
+                json!({
+                    "type": "function_call_output",
+                    "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                    "output": "ok"
+                }),
+            ]))
+            .unwrap()
+            .unwrap();
+
+        // Upstream keeps the stored provider copy, including the provider id and
+        // `status` the client dropped, so the model sees exactly what CodeSeeX
+        // forwarded.
+        assert_eq!(
+            Value::Array(continuation.merged_input),
+            json!([
+                { "type": "message", "role": "user", "content": "start" },
+                provider[0].clone(),
+                provider[1].clone(),
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                    "output": "ok"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn replayed_group_still_has_to_keep_the_forwarded_item_identity() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let provider = vec![
+            json!({
+                "type": "message",
+                "id": "c53e120a-544c-49fc-8314-6ebf26c2a122",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "working" }]
+            }),
+            json!({
+                "type": "function_call",
+                "id": "2997568c-4abb-4010-999b-7a914321067a",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwsh\"}",
+                "status": "completed"
+            }),
+        ];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group(
+                authoritative.clone(),
+                provider.clone(),
+                provider.clone(),
+                Vec::new(),
+                vec![function_call(
+                    "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                    "exec_command",
+                )],
+            ))
+            .unwrap();
+
+        // Dropping a forwarded item, or editing the call payload, would shift or
+        // forge the group, so the tolerant replay check must still fail closed.
+        let dropped_message = groups.continuation_for(&request(vec![
+            authoritative[0].clone(),
+            json!({
+                "type": "function_call",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwsh\"}"
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "output": "ok"
+            }),
+        ]));
+        assert!(matches!(
+            dropped_message,
+            Err(NativePendingError::VisibleProviderOutputMismatch { .. })
+        ));
+
+        let edited_arguments = groups.continuation_for(&request(vec![
+            authoritative[0].clone(),
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "working" }]
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"rm -rf /\"}"
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "output": "ok"
+            }),
+        ]));
+        assert!(matches!(
+            edited_arguments,
+            Err(NativePendingError::VisibleProviderOutputMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn executed_local_rounds_are_replayed_before_the_retained_group() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let search_call = json!({
+            "type": "function_call",
+            "id": "fc_search_1",
+            "call_id": "call_search",
+            "name": "web_search",
+            "arguments": "{\"query\":\"codeseex\"}",
+            "status": "completed"
+        });
+        let search_output = json!({
+            "type": "function_call_output",
+            "call_id": "call_search",
+            "output": "search result"
+        });
+        let client = json!({
+            "type": "function_call",
+            "id": "fc_shell_1",
+            "call_id": "call_shell",
+            "name": "shell_command",
+            "arguments": "{}",
+            "status": "completed"
+        });
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group_with_injected(
+                authoritative.clone(),
+                vec![client.clone()],
+                vec![client.clone()],
+                Vec::new(),
+                vec![NativeInjectedItems {
+                    offset: authoritative.len(),
+                    items: vec![search_call.clone(), search_output.clone()],
+                }],
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+        let continuation = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                client.clone(),
+                json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" }),
+            ]))
+            .unwrap()
+            .unwrap();
+        // The client never saw the hosted round, so only CodeSeeX can replay it,
+        // and it has to come before the group that it was executed for.
+        assert_eq!(
+            Value::Array(continuation.merged_input),
+            json!([
+                { "type": "message", "role": "user", "content": "start" },
+                search_call,
+                search_output,
+                client,
+                { "type": "function_call_output", "call_id": "call_shell", "output": "ok" }
+            ])
+        );
+        assert_eq!(continuation.injected_items.len(), 1);
+        assert_eq!(continuation.injected_items[0].offset, 1);
+    }
+
+    #[test]
+    fn injected_local_rounds_keep_their_offset_across_a_nested_continuation() {
+        let authoritative = vec![json!({ "type": "message", "role": "user", "content": "start" })];
+        let search_call = json!({
+            "type": "function_call",
+            "id": "fc_search_1",
+            "call_id": "call_search",
+            "name": "web_search",
+            "arguments": "{}",
+            "status": "completed"
+        });
+        let search_output = json!({
+            "type": "function_call_output",
+            "call_id": "call_search",
+            "output": "search result"
+        });
+        let shell_call = json!({
+            "type": "function_call",
+            "id": "fc_shell_1",
+            "call_id": "call_shell",
+            "name": "shell_command",
+            "arguments": "{}",
+            "status": "completed"
+        });
+        let shell_output =
+            json!({ "type": "function_call_output", "call_id": "call_shell", "output": "ok" });
+        let patch_call = json!({
+            "type": "function_call",
+            "id": "fc_patch_1",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "arguments": "{}",
+            "status": "completed"
+        });
+        let patch_output =
+            json!({ "type": "function_call_output", "call_id": "call_patch", "output": "Done" });
+        let injected = vec![NativeInjectedItems {
+            offset: authoritative.len(),
+            items: vec![search_call.clone(), search_output.clone()],
+        }];
+        let groups = NativePendingToolGroups::default();
+        groups
+            .register(group_with_injected(
+                authoritative.clone(),
+                vec![shell_call.clone()],
+                vec![shell_call.clone()],
+                Vec::new(),
+                injected.clone(),
+                vec![function_call("call_shell", "shell_command")],
+            ))
+            .unwrap();
+        let first = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                shell_call.clone(),
+                shell_output.clone(),
+            ]))
+            .unwrap()
+            .unwrap();
+        // The second group is retained while the hosted round is still pending;
+        // its offset stays relative to the anchor that predates it.
+        groups
+            .register(group_with_injected(
+                vec![
+                    authoritative[0].clone(),
+                    shell_call.clone(),
+                    shell_output.clone(),
+                ],
+                vec![patch_call.clone()],
+                vec![patch_call.clone()],
+                Vec::new(),
+                first.injected_items,
+                vec![function_call("call_patch", "apply_patch")],
+            ))
+            .unwrap();
+        let second = groups
+            .continuation_for(&request(vec![
+                authoritative[0].clone(),
+                shell_call.clone(),
+                shell_output.clone(),
+                patch_call.clone(),
+                patch_output.clone(),
+            ]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Value::Array(second.merged_input),
+            json!([
+                { "type": "message", "role": "user", "content": "start" },
+                search_call,
+                search_output,
+                shell_call,
+                shell_output,
+                patch_call,
+                patch_output
+            ])
+        );
     }
 }

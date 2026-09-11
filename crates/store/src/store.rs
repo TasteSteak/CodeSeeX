@@ -1954,6 +1954,8 @@ fn event_title(event: &EventRecord, object: Option<&Map<String, Value>>) -> Stri
                 .unwrap_or_default()
         ),
         "tool_exposure_diagnostic" => "Tool exposure".to_owned(),
+        "native_tool_namespace_reconciled" => "Native tool namespaces merged".to_owned(),
+        "native_tool_schema_repaired" => "Native tool schemas completed".to_owned(),
         "context_compile_diagnostic" => "Context compiled".to_owned(),
         "upstream_call_usage_breakdown" => "Upstream usage".to_owned(),
         "upstream_usage_chunk_diagnostic" => "Usage chunks merged".to_owned(),
@@ -3095,6 +3097,12 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                 "fallback",
             ],
         ),
+        "native_tool_namespace_reconciled" => {
+            copy_log_fields(object, &mut output, &["id", "merged_namespaces", "reason"])
+        }
+        "native_tool_schema_repaired" => {
+            copy_log_fields(object, &mut output, &["id", "repaired_functions", "reason"])
+        }
         "native_pending_continuation_diagnostic" => copy_log_fields(
             object,
             &mut output,

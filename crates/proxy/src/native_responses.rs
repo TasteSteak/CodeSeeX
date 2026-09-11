@@ -7,9 +7,9 @@
 //! any narrowly-scoped response-id mapping.
 
 use codeseex_core::config::WebSearchBackend;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_INSPECTED_SSE_FRAME_BYTES: usize = 256 * 1024;
 const MAX_RETAINED_NATIVE_OUTPUT_ITEMS: usize = 128;
@@ -248,6 +248,304 @@ pub(crate) fn plan_native_tools(
         requires_local_execution,
         uses_official_web_search,
     })
+}
+
+/// A grouped declaration is a named entry that owns nested tools: the
+/// `namespace` grouping Codex sends and the provider `mcp` shape.
+fn grouped_declaration_name(entry: &Value) -> Option<String> {
+    let nested = entry.get("tools").and_then(Value::as_array)?;
+    if nested.is_empty() {
+        return None;
+    }
+    entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+/// Where one grouped declaration lives inside a native request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupedToolSite {
+    /// An entry of the request top-level `tools` array.
+    Tools(usize),
+    /// An entry of one `input` item nested `tools` array.
+    Input { item: usize, tool: usize },
+}
+
+fn grouped_tool_occurrences(object: &Map<String, Value>) -> Vec<(String, GroupedToolSite)> {
+    let mut occurrences = Vec::new();
+    if let Some(tools) = object.get("tools").and_then(Value::as_array) {
+        for (index, entry) in tools.iter().enumerate() {
+            if let Some(name) = grouped_declaration_name(entry) {
+                occurrences.push((name, GroupedToolSite::Tools(index)));
+            }
+        }
+    }
+    if let Some(items) = object.get("input").and_then(Value::as_array) {
+        for (item_index, item) in items.iter().enumerate() {
+            let Some(tools) = item.get("tools").and_then(Value::as_array) else {
+                continue;
+            };
+            for (tool_index, entry) in tools.iter().enumerate() {
+                if let Some(name) = grouped_declaration_name(entry) {
+                    occurrences.push((
+                        name,
+                        GroupedToolSite::Input {
+                            item: item_index,
+                            tool: tool_index,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    occurrences
+}
+
+fn grouped_tool_entry(object: &Map<String, Value>, site: GroupedToolSite) -> Option<&Value> {
+    match site {
+        GroupedToolSite::Tools(index) => object.get("tools")?.as_array()?.get(index),
+        GroupedToolSite::Input { item, tool } => object
+            .get("input")?
+            .as_array()?
+            .get(item)?
+            .get("tools")?
+            .as_array()?
+            .get(tool),
+    }
+}
+
+fn nested_tools_of(object: &Map<String, Value>, site: GroupedToolSite) -> Vec<Value> {
+    grouped_tool_entry(object, site)
+        .and_then(|entry| entry.get("tools"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Nested tools are merged by identity so a later declaration only contributes
+/// the tools the first one did not already carry.
+fn nested_tool_identity(entry: &Value) -> String {
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    match name {
+        Some(name) => {
+            let kind = entry
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("function");
+            format!("{kind}\u{1f}{name}")
+        }
+        // An entry without a callable name cannot be compared by name; keep it
+        // intact and only collapse byte-identical duplicates.
+        None => entry.to_string(),
+    }
+}
+
+fn merge_nested_tools(canonical: &mut Vec<Value>, additional: Vec<Value>) {
+    let mut seen = canonical
+        .iter()
+        .map(nested_tool_identity)
+        .collect::<BTreeSet<_>>();
+    for entry in additional {
+        if seen.insert(nested_tool_identity(&entry)) {
+            canonical.push(entry);
+        }
+    }
+}
+
+fn set_grouped_tools(object: &mut Map<String, Value>, site: GroupedToolSite, tools: Vec<Value>) {
+    let entry = match site {
+        GroupedToolSite::Tools(index) => object
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .and_then(|tools| tools.get_mut(index)),
+        GroupedToolSite::Input { item, tool } => object
+            .get_mut("input")
+            .and_then(Value::as_array_mut)
+            .and_then(|items| items.get_mut(item))
+            .and_then(|item| item.get_mut("tools"))
+            .and_then(Value::as_array_mut)
+            .and_then(|tools| tools.get_mut(tool)),
+    };
+    if let Some(entry) = entry.and_then(Value::as_object_mut) {
+        entry.insert("tools".to_owned(), Value::Array(tools));
+    }
+}
+
+fn remove_grouped_entries(
+    object: &mut Map<String, Value>,
+    top_level: Vec<usize>,
+    per_item: BTreeMap<usize, Vec<usize>>,
+) {
+    if !top_level.is_empty() {
+        if let Some(tools) = object.get_mut("tools").and_then(Value::as_array_mut) {
+            // Deepest index first so the remaining indexes stay valid.
+            for index in top_level.into_iter().rev() {
+                if index < tools.len() {
+                    tools.remove(index);
+                }
+            }
+        }
+    }
+    for (item_index, mut nested_indexes) in per_item {
+        nested_indexes.sort_unstable();
+        let tools = object
+            .get_mut("input")
+            .and_then(Value::as_array_mut)
+            .and_then(|items| items.get_mut(item_index))
+            .and_then(|item| item.get_mut("tools"))
+            .and_then(Value::as_array_mut);
+        let Some(tools) = tools else {
+            continue;
+        };
+        for index in nested_indexes.into_iter().rev() {
+            if index < tools.len() {
+                tools.remove(index);
+            }
+        }
+    }
+}
+
+/// Restores the one-declaration-per-name rule the verified endpoint enforces.
+///
+/// The provider rejects a repeated grouped tool name with
+/// `Duplicate namespace name '<name>' in input[<n>].tools[0]. Namespace names must be unique.`
+/// Codex replays the thread `tool_search_output` items verbatim, so a namespace
+/// discovered in an earlier turn is declared again next to the namespace this
+/// turn `tools` already carry, and the two declarations can disagree because
+/// the app dynamic tool list changes between restarts.
+///
+/// The first declaration stays authoritative and every later nested tool is
+/// folded into it before the repeated entry is removed, so the request keeps
+/// every callable tool and only the repeated name disappears. A request without
+/// a repeated name is forwarded byte-for-byte.
+pub(crate) fn reconcile_grouped_tool_namespaces(payload: &mut Value) -> Vec<String> {
+    let Some(object) = payload.as_object_mut() else {
+        return Vec::new();
+    };
+    let occurrences = grouped_tool_occurrences(object);
+    if occurrences.len() < 2 {
+        return Vec::new();
+    }
+    let mut first_site: BTreeMap<String, GroupedToolSite> = BTreeMap::new();
+    let mut merged_tools: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut merged_names: Vec<String> = Vec::new();
+    let mut repeated: Vec<GroupedToolSite> = Vec::new();
+    for (name, site) in occurrences {
+        if let Some(canonical) = merged_tools.get_mut(&name) {
+            merge_nested_tools(canonical, nested_tools_of(object, site));
+            if !merged_names.contains(&name) {
+                merged_names.push(name);
+            }
+            repeated.push(site);
+            continue;
+        }
+        first_site.insert(name.clone(), site);
+        merged_tools.insert(name, nested_tools_of(object, site));
+    }
+    if merged_names.is_empty() {
+        return Vec::new();
+    }
+    for name in &merged_names {
+        let (Some(site), Some(tools)) = (first_site.get(name).copied(), merged_tools.get(name))
+        else {
+            continue;
+        };
+        set_grouped_tools(object, site, tools.clone());
+    }
+    let mut top_level = Vec::new();
+    let mut per_item: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for site in repeated {
+        match site {
+            GroupedToolSite::Tools(index) => top_level.push(index),
+            GroupedToolSite::Input { item, tool } => per_item.entry(item).or_default().push(tool),
+        }
+    }
+    remove_grouped_entries(object, top_level, per_item);
+    merged_names
+}
+
+/// The provider requires every forwarded function declaration to carry a
+/// parameter schema of `type: "object"`. Codex's deferred app tools can declare
+/// a top-level `oneOf` union with no `type` at all, which is valid JSON Schema
+/// but is rejected with `Invalid schema for function ... got 'type: null'`.
+/// Every branch of such a union is an object schema, so declaring the object type
+/// keeps the union intact instead of replacing the tool's contract, and the
+/// declaration is repaired in both places the provider validates: the `tools`
+/// this turn declares and the `tool_search_output` declarations Codex replays.
+///
+/// A schema whose `type` is present is never rewritten. Returns the names whose
+/// schema had to be completed.
+pub(crate) fn repair_provider_tool_schemas(payload: &mut Value) -> Vec<String> {
+    let mut repaired = BTreeSet::new();
+    if let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) {
+        repair_tool_declarations(tools, &mut repaired);
+    }
+    if let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) {
+        for item in items {
+            if let Some(tools) = item.get_mut("tools").and_then(Value::as_array_mut) {
+                repair_tool_declarations(tools, &mut repaired);
+            }
+        }
+    }
+    repaired.into_iter().collect()
+}
+
+fn repair_tool_declarations(tools: &mut [Value], repaired: &mut BTreeSet<String>) {
+    for tool in tools {
+        if let Some(nested) = tool.get_mut("tools").and_then(Value::as_array_mut) {
+            repair_tool_declarations(nested, repaired);
+        }
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            continue;
+        }
+        let has_parameters = tool.get("parameters").is_some();
+        let has_input_schema = tool.get("input_schema").is_some();
+        let mut changed = false;
+        if has_parameters {
+            changed |= repair_object_schema(tool.get_mut("parameters"));
+        }
+        if has_input_schema {
+            changed |= repair_object_schema(tool.get_mut("input_schema"));
+        }
+        if !has_parameters && !has_input_schema {
+            // A function without any declared schema takes no arguments; the
+            // provider refuses to infer that on its own.
+            if let Some(object) = tool.as_object_mut() {
+                object.insert(
+                    "parameters".to_owned(),
+                    json!({ "type": "object", "properties": {} }),
+                );
+            }
+            changed = true;
+        }
+        if changed {
+            if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                repaired.insert(name.to_owned());
+            }
+        }
+    }
+}
+
+fn repair_object_schema(schema: Option<&mut Value>) -> bool {
+    let Some(schema) = schema else {
+        return false;
+    };
+    let Some(object) = schema.as_object_mut() else {
+        *schema = json!({ "type": "object", "properties": {} });
+        return true;
+    };
+    if object.get("type").is_some_and(|value| !value.is_null()) {
+        return false;
+    }
+    object.insert("type".to_owned(), Value::String("object".to_owned()));
+    true
 }
 
 /// Rewrites only the provider response identity at the local lifecycle
@@ -1192,6 +1490,207 @@ mod tests {
         assert_eq!(plan.tools[1], namespace);
         assert_eq!(plan.tools[1]["tools"][0]["strict"], json!(false));
         assert_eq!(plan.tools[1]["tools"][1]["format"]["syntax"], json!("lark"));
+    }
+
+    #[test]
+    fn repeated_namespace_declarations_merge_into_the_first_one() {
+        let namespace = |tools: Value| {
+            json!({
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "Tools provided by the Codex app.",
+                "tools": tools
+            })
+        };
+        let mut payload = json!({
+            "tools": [namespace(json!([
+                { "type": "function", "name": "fork_thread", "parameters": { "type": "object" } }
+            ]))],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "replayed namespace" }]
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_discovered",
+                    "tools": [namespace(json!([
+                        { "type": "function", "name": "fork_thread", "parameters": { "type": "object" } },
+                        { "type": "function", "name": "read_thread", "parameters": { "type": "object" } }
+                    ]))]
+                }
+            ]
+        });
+
+        let merged = reconcile_grouped_tool_namespaces(&mut payload);
+
+        assert_eq!(merged, vec!["codex_app".to_owned()]);
+        let declared = payload["tools"][0]["tools"].as_array().unwrap();
+        assert_eq!(declared.len(), 2);
+        assert_eq!(declared[0]["name"], "fork_thread");
+        assert_eq!(declared[1]["name"], "read_thread");
+        assert_eq!(payload["input"][1]["tools"], json!([]));
+        assert_eq!(payload["input"][0]["type"], "message");
+    }
+
+    #[test]
+    fn repeated_namespaces_inside_input_items_merge_without_losing_flat_tools() {
+        let namespace = |tools: Value| {
+            json!({
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "Tools provided by the Codex app.",
+                "tools": tools
+            })
+        };
+        let mut payload = json!({
+            "input": [
+                { "type": "message", "role": "user", "content": [] },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_one",
+                    "tools": [namespace(json!([
+                        { "type": "function", "name": "fork_thread", "parameters": { "type": "object" } }
+                    ]))]
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_two",
+                    "tools": [
+                        namespace(json!([
+                            { "type": "function", "name": "fork_thread", "parameters": { "type": "object" } },
+                            { "type": "function", "name": "read_thread", "parameters": { "type": "object" } }
+                        ])),
+                        { "type": "function", "name": "exec_command", "parameters": { "type": "object" } }
+                    ]
+                }
+            ]
+        });
+
+        let merged = reconcile_grouped_tool_namespaces(&mut payload);
+
+        assert_eq!(merged, vec!["codex_app".to_owned()]);
+        let first = payload["input"][1]["tools"][0]["tools"].as_array().unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1]["name"], "read_thread");
+        let second = payload["input"][2]["tools"].as_array().unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0]["name"], "exec_command");
+    }
+
+    #[test]
+    fn tool_schema_repair_completes_a_union_parameters_schema() {
+        let mut payload = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "Tools provided by the Codex app.",
+                "tools": [{
+                    "type": "function",
+                    "name": "automation_update",
+                    "parameters": {
+                        "oneOf": [{ "$ref": "#/$defs/__schema0" }],
+                        "$defs": { "__schema0": { "type": "object", "properties": {} } }
+                    }
+                }]
+            }]
+        });
+
+        let repaired = repair_provider_tool_schemas(&mut payload);
+
+        assert_eq!(repaired, vec!["automation_update".to_owned()]);
+        let parameters = &payload["tools"][0]["tools"][0]["parameters"];
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(parameters["oneOf"][0]["$ref"], "#/$defs/__schema0");
+        assert_eq!(parameters["$defs"]["__schema0"]["type"], "object");
+    }
+
+    #[test]
+    fn tool_schema_repair_leaves_declared_types_alone() {
+        let payload = json!({
+            "tools": [
+                { "type": "function", "name": "shell_command", "parameters": { "type": "object", "properties": {} } },
+                { "type": "function", "name": "odd_tool", "parameters": { "type": "string" } },
+                { "type": "custom", "name": "apply_patch", "format": { "type": "grammar" } }
+            ]
+        });
+        let mut forwarded = payload.clone();
+
+        assert!(repair_provider_tool_schemas(&mut forwarded).is_empty());
+        assert_eq!(forwarded, payload);
+    }
+
+    #[test]
+    fn tool_schema_repair_covers_replayed_declarations_and_missing_schemas() {
+        let mut payload = json!({
+            "input": [
+                { "type": "message", "role": "user", "content": [] },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_discovered",
+                    "tools": [
+                        { "type": "function", "name": "automation_update", "parameters": { "oneOf": [] } },
+                        { "type": "function", "name": "null_schema_tool", "parameters": null },
+                        { "type": "function", "name": "no_schema_tool" }
+                    ]
+                }
+            ]
+        });
+
+        let repaired = repair_provider_tool_schemas(&mut payload);
+
+        assert_eq!(
+            repaired,
+            vec![
+                "automation_update".to_owned(),
+                "no_schema_tool".to_owned(),
+                "null_schema_tool".to_owned()
+            ]
+        );
+        let tools = payload["input"][1]["tools"].as_array().unwrap();
+        assert_eq!(
+            tools[0]["parameters"],
+            json!({ "oneOf": [], "type": "object" })
+        );
+        assert_eq!(
+            tools[1]["parameters"],
+            json!({ "type": "object", "properties": {} })
+        );
+        assert_eq!(
+            tools[2]["parameters"],
+            json!({ "type": "object", "properties": {} })
+        );
+        assert_eq!(payload["input"][0]["type"], "message");
+    }
+
+    #[test]
+    fn distinct_grouped_declarations_are_forwarded_byte_for_byte() {
+        let payload = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "Tools provided by the Codex app.",
+                "tools": [{ "type": "function", "name": "fork_thread", "parameters": { "type": "object" } }]
+            }],
+            "input": [
+                { "type": "message", "role": "user", "content": [] },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_discovered",
+                    "tools": [{
+                        "type": "namespace",
+                        "name": "mcp__node_repl",
+                        "description": "Tools provided by the node_repl server.",
+                        "tools": [{ "type": "function", "name": "js", "parameters": { "type": "object" } }]
+                    }]
+                }
+            ]
+        });
+        let mut forwarded = payload.clone();
+
+        assert!(reconcile_grouped_tool_namespaces(&mut forwarded).is_empty());
+        assert_eq!(forwarded, payload);
     }
 
     #[test]

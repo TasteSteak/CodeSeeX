@@ -10,11 +10,12 @@
 
 use super::*;
 use crate::native_coordinator::{
-    NativePendingContinuation, NativePendingError, PendingNativeToolGroup,
+    NativeInjectedItems, NativePendingContinuation, NativePendingError, PendingNativeToolGroup,
 };
 use crate::native_responses::{
     append_complete_native_tool_group, native_stream_finalization,
     native_tool_call_group_from_response, native_tool_output_item, plan_native_tools,
+    reconcile_grouped_tool_namespaces, repair_provider_tool_schemas,
     rewrite_provider_response_identity, NativeResponseSseRelay, NativeResponseStreamInspection,
     NativeResponseTerminal, NativeStreamFinalization, NativeToolCall, NativeToolCallGroup,
     NativeToolPlan,
@@ -210,6 +211,10 @@ async fn try_native_responses(
     if let Some(continuation) = pending.as_ref() {
         payload["input"] = Value::Array(continuation.merged_input.clone());
     }
+    let reconciled_namespaces = reconcile_grouped_tool_namespaces(&mut payload);
+    record_namespace_reconciliation(state, &id, &reconciled_namespaces).await;
+    let repaired_schemas = repair_provider_tool_schemas(&mut payload);
+    record_tool_schema_repair(state, &id, &repaired_schemas).await;
 
     if let Err(error) = state
         .store
@@ -497,6 +502,10 @@ async fn native_hosted_tool_loop(
     if let Some(continuation) = pending.as_ref() {
         payload["input"] = Value::Array(continuation.merged_input.clone());
     }
+    let reconciled_namespaces = reconcile_grouped_tool_namespaces(&mut payload);
+    record_namespace_reconciliation(state, &id, &reconciled_namespaces).await;
+    let repaired_schemas = repair_provider_tool_schemas(&mut payload);
+    record_tool_schema_repair(state, &id, &repaired_schemas).await;
     if let Err(error) = state
         .store
         .checkpoint_request(&id, previous, Some(model), input)
@@ -544,6 +553,18 @@ async fn native_hosted_tool_loop(
         .get("input")
         .and_then(Value::as_array)
         .cloned()
+        .unwrap_or_default();
+    // Codex never sees a hosted round CodeSeeX executes itself, so the rounds
+    // are kept apart from the client-visible anchor. They are replayed at the
+    // offset in that anchor where CodeSeeX injected them.
+    let client_input_len = input
+        .get("input")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let mut injected_items: Vec<NativeInjectedItems> = pending
+        .as_ref()
+        .map(|continuation| continuation.injected_items.clone())
         .unwrap_or_default();
 
     let max_iterations = crate::tools::diagnostics::MAX_TOOL_LOOP_ITERATIONS;
@@ -607,6 +628,14 @@ async fn native_hosted_tool_loop(
                 pending.as_ref(),
             )
             .await;
+        }
+        // The pending continuation this request consumed has now been accepted
+        // upstream, so it must not stay registered: a stale group would make the
+        // next replay ambiguous. A failed dispatch keeps it for a retry.
+        if let Some(continuation) = pending.as_ref() {
+            state
+                .native_pending_tool_groups
+                .settle(&continuation.pending_response_id);
         }
         let is_sse = content_type
             .as_ref()
@@ -775,38 +804,44 @@ async fn native_hosted_tool_loop(
                 .store
                 .finish_request(&id, status_to_store, None, Some(&detail))
                 .await;
-            if is_sse {
-                return response_from_bytes(
-                    reqwest::StatusCode::OK,
-                    Some(HeaderValue::from_static("text/event-stream")),
-                    body,
-                );
-            }
-            let mut native = match serde_json::from_slice::<Value>(&body) {
-                Ok(value) => value,
-                Err(_) => {
-                    return response_from_bytes(
-                        reqwest::StatusCode::OK,
-                        response_content_type_json(),
-                        body,
-                    );
-                }
-            };
-            let provider_id = native.get("id").and_then(Value::as_str).map(str::to_owned);
-            if let Some(provider_id) = provider_id.as_deref() {
-                rewrite_provider_response_identity(&mut native, provider_id, &id);
-            }
-            return json_response(native);
+            return native_provider_turn_response(body, is_sse, &id);
         };
 
+        // Codex always declares its local web search tool, so a request that
+        // selected the CodeSeeX-hosted backend enters this loop even when the
+        // provider only asks for Codex-owned tools. A group without a single
+        // CodeSeeX hosted call belongs to the client: the provider turn is
+        // forwarded unchanged and retained for the continuation check, exactly
+        // as the non-hosted native path forwards it. CodeSeeX never executes a
+        // client-owned tool itself.
+        let hosted_calls = group
+            .calls
+            .iter()
+            .filter(|call| native_hosted_call_is_local(call, config))
+            .count();
+        if hosted_calls == 0 {
+            return native_hosted_client_tool_group(NativeHostedClientToolGroupParams {
+                state,
+                config,
+                id: &id,
+                group: &group,
+                input,
+                payload: &payload,
+                body,
+                is_sse,
+                completed,
+                usage: usage.as_ref(),
+                iteration,
+                started,
+                injected_items,
+                pending: pending.as_ref(),
+            })
+            .await;
+        }
         // A group that mixes hosted and client-owned calls has no single owner.
         // The native transport fails closed instead of handing either side to
         // the other transport.
-        let all_hosted = group
-            .calls
-            .iter()
-            .all(|call| native_hosted_call_is_local(call, config));
-        if !all_hosted {
+        if hosted_calls != group.calls.len() {
             let hosted = group
                 .calls
                 .iter()
@@ -936,7 +971,212 @@ async fn native_hosted_tool_loop(
             };
         authoritative_input = next_input.clone();
         payload["input"] = Value::Array(next_input);
+        let mut executed_round = group.provider_output.clone();
+        executed_round.extend(outputs.iter().cloned());
+        injected_items.push(NativeInjectedItems {
+            offset: client_input_len,
+            items: executed_round,
+        });
     }
+}
+
+struct NativeHostedClientToolGroupParams<'a> {
+    state: &'a ProxyState,
+    config: &'a AppConfig,
+    id: &'a str,
+    group: &'a NativeToolCallGroup,
+    input: &'a Value,
+    payload: &'a Value,
+    body: Vec<u8>,
+    is_sse: bool,
+    completed: bool,
+    usage: Option<&'a Value>,
+    iteration: u32,
+    started: std::time::Instant,
+    /// Hosted rounds this loop already executed before it handed the retained
+    /// provider group back to Codex. Codex never saw them, so the coordinator
+    /// replays them from the offset inside the client-visible anchor where they
+    /// were injected.
+    injected_items: Vec<NativeInjectedItems>,
+    pending: Option<&'a NativePendingContinuation>,
+}
+
+/// Hands one provider turn that only carries Codex-owned tool calls back to the
+/// client. The hosted loop must not execute those calls itself, so the turn is
+/// forwarded to Codex and retained in RAM: the client runs the call it owns and
+/// the retained group proves that the replay which follows is complete and in
+/// order before CodeSeeX sends it upstream.
+async fn native_hosted_client_tool_group(
+    params: NativeHostedClientToolGroupParams<'_>,
+) -> axum::response::Response {
+    let NativeHostedClientToolGroupParams {
+        state,
+        config,
+        id,
+        group,
+        input,
+        payload,
+        body,
+        is_sse,
+        completed,
+        usage,
+        iteration,
+        started,
+        injected_items,
+        pending,
+    } = params;
+    if completed {
+        // The client only ever saw this turn, so the retained group is anchored
+        // on the client-visible input. Items CodeSeeX injected earlier in this
+        // same hosted loop stay out of that anchor: the client cannot replay
+        // what it never received.
+        let authoritative_input = input
+            .get("input")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if let Err(error) = retain_native_pending_tool_group(
+            state,
+            id,
+            input,
+            &authoritative_input,
+            injected_items,
+            group,
+        )
+        .await
+        {
+            let detail = json!({ "id": id, "error": error.message() });
+            let _ = state
+                .store
+                .finish_request(id, RequestStatus::Failed, None, Some(&detail))
+                .await;
+            return native_pending_error_response(error);
+        }
+        if let Some(continuation) = pending {
+            state
+                .native_pending_tool_groups
+                .settle(&continuation.pending_response_id);
+        }
+    }
+    let status_to_store = if completed {
+        RequestStatus::Completed
+    } else {
+        RequestStatus::Failed
+    };
+    let detail = json!({
+        "transport": "native_responses",
+        "tool_loop": "native_hosted",
+        "client_tool_group": group
+            .calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect::<Vec<_>>(),
+        "web_search_backend": web_search_backend_label(config.web_search_backend),
+        "provider_tool_calls": group.calls.len()
+    });
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "upstream_call_usage_breakdown",
+            "CodeSeeX upstream call usage breakdown.",
+            Some(&upstream_call_usage_breakdown_event(
+                id,
+                "native_hosted_loop",
+                iteration,
+                input,
+                payload,
+                usage,
+                Some(started.elapsed().as_millis() as u64),
+                false,
+            )),
+        )
+        .await;
+    let _ = state
+        .store
+        .finish_request(id, status_to_store, None, Some(&detail))
+        .await;
+    native_provider_turn_response(body, is_sse, id)
+}
+
+/// Returns one buffered provider turn to the client. The native transport
+/// forwards the provider body and only narrows the response identity it exposes.
+fn native_provider_turn_response(
+    body: Vec<u8>,
+    is_sse: bool,
+    id: &str,
+) -> axum::response::Response {
+    if is_sse {
+        return response_from_bytes(
+            reqwest::StatusCode::OK,
+            Some(HeaderValue::from_static("text/event-stream")),
+            body,
+        );
+    }
+    let mut native = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return response_from_bytes(
+                reqwest::StatusCode::OK,
+                response_content_type_json(),
+                body,
+            );
+        }
+    };
+    let provider_id = native.get("id").and_then(Value::as_str).map(str::to_owned);
+    if let Some(provider_id) = provider_id.as_deref() {
+        rewrite_provider_response_identity(&mut native, provider_id, id);
+    }
+    json_response(native)
+}
+
+/// Codex replays `tool_search_output` items verbatim, so one namespace can
+/// arrive twice with a different nested tool list. The provider rejects a
+/// repeated namespace name with `Duplicate namespace name`, and the native
+/// transport now merges the repetition instead of failing the whole turn. The
+/// event keeps that repair visible in the log.
+async fn record_namespace_reconciliation(state: &ProxyState, id: &str, merged: &[String]) {
+    if merged.is_empty() {
+        return;
+    }
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "native_tool_namespace_reconciled",
+            "CodeSeeX merged repeated tool namespaces so the provider accepts the replayed tool list.",
+            Some(&json!({
+                "id": id,
+                "transport": "native_responses",
+                "merged_namespaces": merged,
+                "reason": "provider_requires_unique_namespace_names"
+            })),
+        )
+        .await;
+}
+
+/// The provider validates every forwarded declaration, so a function whose
+/// parameter schema has no `type` fails the whole turn. The repair keeps the
+/// tool's own schema and only declares it as an object schema, and the event
+/// keeps that repair visible in the log.
+async fn record_tool_schema_repair(state: &ProxyState, id: &str, repaired: &[String]) {
+    if repaired.is_empty() {
+        return;
+    }
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "native_tool_schema_repaired",
+            "CodeSeeX completed a tool schema so the provider accepts the forwarded declaration.",
+            Some(&json!({
+                "id": id,
+                "transport": "native_responses",
+                "repaired_functions": repaired,
+                "reason": "provider_requires_object_typed_parameters"
+            })),
+        )
+        .await;
 }
 
 async fn native_incompatible(
@@ -1166,8 +1406,22 @@ async fn native_non_streaming_response(
     let response_completed = native.get("status").and_then(Value::as_str) == Some("completed");
     if response_completed {
         if let Some(group) = tool_group.as_ref() {
-            if let Err(error) =
-                retain_native_pending_tool_group(state, id, input, &payload, group).await
+            let authoritative_input = payload
+                .get("input")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            // This path never executes a hosted round itself, so the stored
+            // group carried no CodeSeeX-injected input.
+            if let Err(error) = retain_native_pending_tool_group(
+                state,
+                id,
+                input,
+                &authoritative_input,
+                Vec::new(),
+                group,
+            )
+            .await
             {
                 let detail = json!({ "id": id, "error": error.message() });
                 let _ = state
@@ -1344,11 +1598,19 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                     match native_tool_call_group_from_response(&native_output) {
                         Ok(Some(group)) => {
                             provider_tool_calls = group.calls.len();
+                            // The streamed path never executes a hosted round
+                            // itself, so the stored group carried none either.
+                            let authoritative_input = payload
+                                .get("input")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
                             match retain_native_pending_tool_group(
                                 &state,
                                 &response_id,
                                 &original_request,
-                                &payload,
+                                &authoritative_input,
+                                Vec::new(),
                                 &group,
                             )
                             .await
@@ -1480,25 +1742,26 @@ fn native_pending_error_response(error: NativePendingError) -> axum::response::R
     json_error(StatusCode::BAD_REQUEST, error.code(), error.message())
 }
 
-/// Registers exactly the provider output group that Codex observed. This
-/// state stays only in RAM and is used solely to reject partial/out-of-order
-/// client tool outputs on the immediate full-replay continuation.
+/// Registers exactly the provider output group that Codex observed, plus the
+/// hosted rounds CodeSeeX executed for it. This state stays only in RAM and is
+/// used solely to reject partial/out-of-order client tool outputs on the
+/// immediate full-replay continuation. The caller supplies the input prefix the
+/// client is expected to replay, so it must be the client-visible history and
+/// never a payload CodeSeeX extended locally; injected rounds travel separately
+/// so the anchor stays client-visible.
 async fn retain_native_pending_tool_group(
     state: &ProxyState,
     response_id: &str,
     original_request: &Value,
-    payload: &Value,
+    authoritative_input: &[Value],
+    injected_items: Vec<NativeInjectedItems>,
     group: &NativeToolCallGroup,
 ) -> Result<(), NativePendingError> {
-    let authoritative_input = payload
-        .get("input")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let pending = PendingNativeToolGroup::new(
         response_id,
         original_request,
-        authoritative_input,
+        authoritative_input.to_vec(),
+        injected_items,
         group.provider_output.clone(),
         group.provider_output.clone(),
         Vec::new(),
@@ -1547,7 +1810,12 @@ fn native_transport_diagnostic(
         },
         "pending_continuation": pending.map(|value| json!({
             "client_output_count": value.client_output_count,
-            "local_output_count": value.local_output_count
+            "local_output_count": value.local_output_count,
+            "injected_item_count": value
+                .injected_items
+                .iter()
+                .map(|segment| segment.items.len())
+                .sum::<usize>()
         }))
     })
 }
@@ -1731,6 +1999,27 @@ mod tests {
         }))
     }
 
+    async fn fake_native_codex_app_tool_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        capture.requests.lock().expect("capture lock").push(payload);
+        Json(json!({
+            "id": "provider_codex_app_turn_1",
+            "object": "response",
+            "model": "deepseek-v4-flash",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_codex_app_1",
+                "call_id": "call_read_thread",
+                "name": "read_thread",
+                "arguments": "{\"threadId\":\"01a08b18\"}",
+                "status": "completed"
+            }],
+            "usage": { "input_tokens": 3, "output_tokens": 1, "total_tokens": 4 }
+        }))
+    }
     async fn fake_native_client_tool_turn_failed(
         State(capture): State<Capture>,
         Json(payload): Json<Value>,
@@ -1802,6 +2091,59 @@ mod tests {
                 "content": [{ "type": "output_text", "text": "done via native hosted loop" }]
             }],
             "usage": { "input_tokens": 5, "output_tokens": 2, "total_tokens": 7 }
+        }))
+    }
+
+    async fn fake_native_hosted_then_client_tool_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        let call_count = {
+            let mut requests = capture.requests.lock().expect("capture lock");
+            requests.push(payload);
+            requests.len()
+        };
+        if call_count == 1 {
+            return Json(json!({
+                "id": "provider_hosted_first_1",
+                "object": "response",
+                "model": "deepseek-v4-flash",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_hosted_search_1",
+                    "call_id": "call_hosted_search",
+                    "name": "web_search",
+                    "arguments": "not-json",
+                    "status": "completed"
+                }],
+                "usage": { "input_tokens": 3, "output_tokens": 1, "total_tokens": 4 }
+            }));
+        }
+        if call_count == 2 {
+            return Json(json!({
+                "id": "provider_hosted_first_2",
+                "object": "response",
+                "model": "deepseek-v4-flash",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_hosted_shell_1",
+                    "call_id": "call_hosted_shell",
+                    "name": "shell_command",
+                    "arguments": "{}",
+                    "status": "completed"
+                }],
+                "usage": { "input_tokens": 5, "output_tokens": 1, "total_tokens": 6 }
+            }));
+        }
+        Json(json!({
+            "id": "provider_hosted_first_3",
+            "object": "response",
+            "model": "deepseek-v4-flash",
+            "status": "completed",
+            "output": [],
+            "usage": { "input_tokens": 7, "output_tokens": 1, "total_tokens": 8 }
         }))
     }
 
@@ -1885,6 +2227,87 @@ mod tests {
             }],
             "tools": tools
         })
+    }
+
+    #[tokio::test]
+    async fn native_dispatch_merges_replayed_namespace_duplicates_before_dispatch() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_response))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("namespace-merge");
+        let config = config_for_fake(data_dir.clone(), address);
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store.clone());
+        let namespace = |tools: Value| {
+            json!({
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "Tools provided by the Codex app.",
+                "tools": tools
+            })
+        };
+        let mut input = request(
+            "resp_native_namespace_merge",
+            false,
+            json!([namespace(json!([
+                { "type": "function", "name": "fork_thread", "parameters": { "type": "object" } }
+            ]))]),
+        );
+        input["input"] = json!([
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "replayed namespace" }]
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_discovered",
+                "tools": [namespace(json!([
+                    { "type": "function", "name": "read_thread", "parameters": { "type": "object" } }
+                ]))]
+            }
+        ]);
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("native route should handle request");
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+
+        let captured = capture.requests.lock().expect("capture lock");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["tools"].as_array().unwrap().len(), 1);
+        let declared = captured[0]["tools"][0]["tools"].as_array().unwrap();
+        assert_eq!(declared.len(), 2);
+        assert_eq!(declared[0]["name"], "fork_thread");
+        assert_eq!(declared[1]["name"], "read_thread");
+        assert_eq!(captured[0]["input"][1]["tools"], json!([]));
+        drop(captured);
+
+        let (events, _) = store.recent_events(20, None).await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == "native_tool_namespace_reconciled"
+                && event
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.pointer("/merged_namespaces/0"))
+                    .and_then(Value::as_str)
+                    == Some("codex_app")
+        }));
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
@@ -2275,6 +2698,7 @@ mod tests {
                 "resp_native_stream_pending_first",
                 &first_input,
                 first_input["input"].as_array().unwrap().clone(),
+                Vec::new(),
                 vec![provider_call.clone()],
                 vec![provider_call.clone()],
                 Vec::new(),
@@ -2315,6 +2739,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    #[tokio::test]
+    async fn codex_normalized_client_tool_replay_still_dispatches_the_retained_group() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_response))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("normalized-client-tool-replay");
+        let config = config_for_fake(data_dir.clone(), address);
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let tool = json!({
+            "type": "function",
+            "name": "exec_command",
+            "parameters": { "type": "object", "properties": {} }
+        });
+        let first_input = request("resp_native_normalized_first", false, json!([tool.clone()]));
+        // DeepSeek returns bare UUID item ids and a `status` on function calls. Codex
+        // drops both before it replays history, so the continuation check must accept
+        // that normalized copy.
+        let provider_message = json!({
+            "type": "message",
+            "id": "c53e120a-544c-49fc-8314-6ebf26c2a122",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "working" }]
+        });
+        let provider_call = json!({
+            "type": "function_call",
+            "id": "2997568c-4abb-4010-999b-7a914321067a",
+            "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+            "name": "exec_command",
+            "arguments": "{\"cmd\":\"pwsh\"}",
+            "status": "completed"
+        });
+        state
+            .native_pending_tool_groups
+            .register(PendingNativeToolGroup::new(
+                "resp_native_normalized_first",
+                &first_input,
+                first_input["input"].as_array().unwrap().clone(),
+                Vec::new(),
+                vec![provider_message.clone(), provider_call.clone()],
+                vec![provider_message, provider_call],
+                Vec::new(),
+                vec![NativeToolCall {
+                    call_id: "call_00_mDEXZuYtEFUSlPgouz1p8384".to_owned(),
+                    name: "exec_command".to_owned(),
+                    input: "{\"cmd\":\"pwsh\"}".to_owned(),
+                    kind: NativeToolCallKind::Function,
+                }],
+            ))
+            .unwrap();
+        let mut continuation = request("resp_native_normalized_second", false, json!([tool]));
+        continuation["previous_response_id"] = json!("resp_native_normalized_first");
+        continuation["input"] = json!([
+            first_input["input"][0].clone(),
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "working" }]
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwsh\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_00_mDEXZuYtEFUSlPgouz1p8384",
+                "output": "done"
+            }
+        ]);
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &continuation,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the normalized Codex replay must still continue");
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            0,
+            "a dispatched continuation settles the retained group"
+        );
+        let requests = capture.requests.lock().expect("capture lock");
+        let sent = requests
+            .last()
+            .expect("the continuation reached the provider");
+        let items = sent["input"].as_array().expect("forwarded input");
+        assert!(
+            items.iter().any(|item| {
+                item.get("id").and_then(Value::as_str)
+                    == Some("2997568c-4abb-4010-999b-7a914321067a")
+            }),
+            "upstream must keep CodeSeeX's stored provider item, not the client's normalized copy"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
     #[tokio::test]
     async fn hosted_local_search_stays_on_native_and_never_defers_to_chat_compat() {
         let data_dir = temp_data_dir("local-hosted-native");
@@ -2512,6 +3047,284 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_hosted_loop_hands_client_owned_tool_groups_back_to_codex() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_client_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-client-group");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let tools = json!([
+            { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } },
+            { "type": "function", "name": "shell_command", "parameters": { "type": "object" } }
+        ]);
+        let input = request("resp_native_hosted_client_group", false, tools);
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted loop owns the native response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let native: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(native["id"], "resp_native_hosted_client_group");
+        assert_eq!(
+            native["output"][0]["call_id"], "call_native_1",
+            "the Codex-owned tool call must reach the client unchanged"
+        );
+        assert_eq!(
+            capture.requests.lock().expect("capture lock").len(),
+            1,
+            "a client-owned tool group must never be executed or re-dispatched by CodeSeeX"
+        );
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            1,
+            "the handed-back group must stay retained for the continuation check"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_hosted_loop_merges_replayed_namespaces_and_hands_codex_tools_back() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_codex_app_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-namespace-handoff");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let namespace = |tools: Value| {
+            json!({
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "Tools provided by the Codex app.",
+                "tools": tools
+            })
+        };
+        let mut input = request(
+            "resp_native_hosted_namespace_handoff",
+            false,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } },
+                namespace(json!([
+                    { "type": "function", "name": "read_thread", "parameters": { "type": "object" } }
+                ]))
+            ]),
+        );
+        input["input"] = json!([
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "open the thread" }]
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_discovered",
+                "tools": [namespace(json!([
+                    { "type": "function", "name": "fork_thread", "parameters": { "type": "object" } },
+                    {
+                        "type": "function",
+                        "name": "automation_update",
+                        "parameters": {
+                            "oneOf": [{ "$ref": "#/$defs/__schema0" }],
+                            "$defs": { "__schema0": { "type": "object", "properties": {} } }
+                        }
+                    }
+                ]))]
+            }
+        ]);
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted loop owns the native response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let native: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(native["output"][0]["name"], "read_thread");
+
+        let requests = capture.requests.lock().expect("capture lock");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the replayed namespace and the Codex-owned tool call must be handled locally"
+        );
+        let tools = requests[0]["tools"].as_array().expect("dispatched tools");
+        let namespaces = tools
+            .iter()
+            .filter(|tool| {
+                tool.get("type").and_then(Value::as_str) == Some("namespace")
+                    && tool.get("name").and_then(Value::as_str) == Some("codex_app")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            namespaces.len(),
+            1,
+            "the provider rejects a repeated namespace name, so the replay must be merged"
+        );
+        let nested = namespaces[0]["tools"]
+            .as_array()
+            .expect("merged namespace tools");
+        assert!(
+            nested
+                .iter()
+                .any(|tool| tool.get("name").and_then(Value::as_str) == Some("fork_thread")),
+            "the nested tools of the replayed declaration must survive the merge"
+        );
+        let automation = nested
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("automation_update"))
+            .expect("the deferred app tool must survive the merge");
+        assert_eq!(
+            automation["parameters"]["type"], "object",
+            "the provider rejects a declaration whose parameter schema has no object type"
+        );
+        assert_eq!(
+            automation["parameters"]["oneOf"][0]["$ref"], "#/$defs/__schema0",
+            "the union schema itself must stay intact"
+        );
+        drop(requests);
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            1,
+            "the Codex-owned tool group must stay retained for the continuation check"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+    #[tokio::test]
+    async fn native_hosted_loop_accepts_the_client_replay_of_a_handed_back_group() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_client_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-client-group-replay");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let tools = json!([
+            { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } },
+            { "type": "function", "name": "shell_command", "parameters": { "type": "object" } }
+        ]);
+        let input = request(
+            "resp_native_hosted_client_group_replay",
+            false,
+            tools.clone(),
+        );
+
+        let first = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted loop owns the native response");
+        assert_eq!(first.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+
+        let mut continuation = request(
+            "resp_native_hosted_client_group_replay_second",
+            false,
+            tools,
+        );
+        continuation["previous_response_id"] = json!("resp_native_hosted_client_group_replay");
+        continuation["input"] = json!([
+            input["input"][0].clone(),
+            {
+                "type": "function_call",
+                "id": "fc_native_1",
+                "call_id": "call_native_1",
+                "name": "shell_command",
+                "arguments": "{\"command\":\"echo native\"}",
+                "status": "completed"
+            },
+            { "type": "function_call_output", "call_id": "call_native_1", "output": "native output" }
+        ]);
+
+        let second = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &continuation,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the client replay of the handed-back group must continue upstream");
+        assert_eq!(second.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(second.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let native: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            native["id"],
+            "resp_native_hosted_client_group_replay_second"
+        );
+
+        let requests = capture.requests.lock().expect("capture lock");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the continuation must be dispatched upstream exactly once"
+        );
+        let replayed = requests[1]["input"]
+            .as_array()
+            .expect("second request input array");
+        assert!(
+            replayed.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item.get("call_id").and_then(Value::as_str) == Some("call_native_1")
+            }),
+            "the continuation must carry the client tool output Codex produced"
+        );
+        drop(requests);
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            0,
+            "the consumed continuation must be settled and the final turn retains nothing"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+    #[tokio::test]
     async fn native_mixed_hosted_and_client_tool_group_fails_closed() {
         let capture = Capture::default();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -2701,6 +3514,120 @@ mod tests {
             .await
             .is_none(),
             "local search must retain the existing Chat compatibility path"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_hosted_loop_replays_its_executed_round_in_the_next_continuation() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_hosted_then_client_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-executed-round");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let tools = json!([
+            { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } },
+            { "type": "function", "name": "shell_command", "parameters": { "type": "object" } }
+        ]);
+        let input = request("resp_native_hosted_executed_round", false, tools.clone());
+
+        let first = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted loop owns the native response");
+        assert_eq!(first.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(first.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            1,
+            "the executed search must not stop the handed-back group from being retained"
+        );
+
+        let mut continuation = request("resp_native_hosted_executed_round_second", false, tools);
+        continuation["previous_response_id"] = json!("resp_native_hosted_executed_round");
+        continuation["input"] = json!([
+            input["input"][0].clone(),
+            {
+                "type": "function_call",
+                "id": "fc_hosted_shell_1",
+                "call_id": "call_hosted_shell",
+                "name": "shell_command",
+                "arguments": "{}",
+                "status": "completed"
+            },
+            { "type": "function_call_output", "call_id": "call_hosted_shell", "output": "native output" }
+        ]);
+
+        let second = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &continuation,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the client replay of the handed-back group must continue upstream");
+        assert_eq!(second.status(), StatusCode::OK);
+        let _ = axum::body::to_bytes(second.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+
+        let requests = capture.requests.lock().expect("capture lock");
+        assert_eq!(
+            requests.len(),
+            3,
+            "the executed round and the handed-back group each dispatch exactly once"
+        );
+        let replayed = requests[2]["input"]
+            .as_array()
+            .expect("third request input array");
+        let search_call = replayed
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call")
+                    && item.get("call_id").and_then(Value::as_str) == Some("call_hosted_search")
+            })
+            .expect("the executed search call must be replayed upstream");
+        let search_output = replayed
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item.get("call_id").and_then(Value::as_str) == Some("call_hosted_search")
+            })
+            .expect("the executed search output must be replayed upstream");
+        let shell_call = replayed
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call")
+                    && item.get("call_id").and_then(Value::as_str) == Some("call_hosted_shell")
+            })
+            .expect("the retained client call must still be replayed");
+        assert!(
+            search_call < search_output && search_output < shell_call,
+            "the round CodeSeeX executed must stay before the group it was executed for: {replayed:?}"
+        );
+        drop(requests);
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            0,
+            "the consumed continuation must be settled"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }

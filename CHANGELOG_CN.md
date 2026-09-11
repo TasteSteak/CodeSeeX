@@ -39,8 +39,13 @@ CodeSeeX 0.7.1 把模型清单与定价改为带版本、可远程更新的数�
 - 修复设置页把未知模型静默按 Pro 费率计价的问题。
 - 修复峰谷窗口与倍数在 Rust 与 JavaScript 中各写一遍的问题，二者现在都来自价目表。
 - 修复上游原生分组工具声明（`namespace`、`tool_search`）被判定为无法翻译而直接拒绝的问题。CodeSeeX 现在会先校验、再原样透传这类声明，让 endpoint 保留它自己负责的工具分组与 namespace；未知或残缺的声明仍然显式失败，而不是被静默丢弃。
-- 修复默认配置下任何带工具的请求都不可用的问题：在原生 Responses 传输 + CodeSeeX 本地 web 搜索后端时，Codex 总会声明的上游原生 `web_search` 会被直接拒绝。现在这类请求会转交 Chat API 兼容通道——该通道拥有本地执行器并会丢弃上游声明，因此工具归属仍不会被静默改变；只有「上游搜索 + CodeSeeX 自托管工具」同时出现时才继续显式失败。
+- 修复默认配置下任何带工具的请求都不可用的问题：在原生 Responses 传输 + CodeSeeX 本地 web 搜索后端时，Codex 总会声明的上游原生 `web_search` 会被直接拒绝。现在这类搜索会在原生传输内部执行，而不再转交 Chat API 兼容通道，因此工具归属仍不会被静默改变。
+- 修复上游只要索要 Codex 自己的工具（例如 `read_thread`）就会以 `mixed tool group` 失败的问题。整组都是 Codex 自有的工具调用会原样交回 Codex，并在内存中保留该工具组用于续接校验；只有真正混用自托管与客户端工具的一轮才继续显式失败。
+- 修复 Codex App 重启后原生 Responses 重放被 `Duplicate namespace name 'codex_app'` 拒绝的问题。重复的分组声明会合并进首次声明，而不再作为重复项转发，并在事件日志中记录这次修复。
 - 修复原生 Responses 兼容性失败在日志中丢失 `issue`、`selected_web_search_backend`、`fallback` 字段、导致无法从日志定位不兼容原因的问题。
+- 修复原生 Responses 重放被 `Invalid schema for function 'codex_app::automation_update'` 拒绝的问题。Codex 的延迟加载应用工具可能只声明顶层 `oneOf` 联合、没有 `type` 的参数 schema，上游会直接拒绝；CodeSeeX 现在会把这类联合声明为 object 类型（不改动联合本身），并在事件日志中记录这次修复。
+- 修复原生工具续接被 `The native tool continuation did not retain the provider tool group visible to Codex` 拒绝的问题。Codex 在重放历史前会丢弃非前缀限定的 item id，以及它自身 item 结构无法承载的上游字段；续接校验现在改为比对协议单元——按顺序的 item 类型与工具调用身份——而上行请求仍使用 CodeSeeX 自己保存的工具组副本。
+- 修复托管工具循环把 CodeSeeX 自己执行过的托管轮次从上行续接中丢弃的问题。当 Codex 自有的工具轮次紧跟在 CodeSeeX 执行的搜索之后时，被保留的工具组现在会按该轮次在客户端可见锚点中的原始位置重新回放，上游因此仍能看到它产生该工具组时的完整上下文。
 
 ### 兼容说明
 
