@@ -146,9 +146,7 @@ const els = {
   troubleshootSummary: byId("troubleshootSummary"),
   uiLanguage: byId("UI_LANGUAGE"),
   codexAppModelListInjection: byId("CODEX_APP_MODEL_LIST_INJECTION"),
-  experimentReasoningSummary: byId("EXPERIMENT_REASONING_SUMMARY"),
-  experimentReasoningText: byId("EXPERIMENT_REASONING_TEXT"),
-  experimentFakeUpstream: byId("EXPERIMENT_FAKE_UPSTREAM"),
+  reasoningSummary: byId("EXPERIMENT_REASONING_SUMMARY"),
   usageAverageMs: byId("usageAverageMs"),
   usageCacheHitRate: byId("usageCacheHitRate"),
   usageRows: byId("usageRows"),
@@ -408,9 +406,7 @@ function bind() {
     els.uiLanguage,
     els.deepseekBaseUrl,
     els.proxyPort,
-    els.experimentReasoningSummary,
-    els.experimentReasoningText,
-    els.experimentFakeUpstream,
+    els.reasoningSummary,
     ...billingInputs(),
   ].forEach((input) => {
     if (!input) return;
@@ -1466,9 +1462,7 @@ function renderConfig(config) {
   setRadioValue("UI_THEME", nextTheme);
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
   if (els.codexAppModelListInjection) els.codexAppModelListInjection.checked = config.CODEX_APP_MODEL_LIST_INJECTION !== "false";
-  if (els.experimentReasoningSummary) els.experimentReasoningSummary.checked = config.EXPERIMENT_REASONING_SUMMARY !== "false";
-  if (els.experimentReasoningText) els.experimentReasoningText.checked = config.EXPERIMENT_REASONING_TEXT !== "false";
-  if (els.experimentFakeUpstream) els.experimentFakeUpstream.checked = config.EXPERIMENT_FAKE_UPSTREAM === "true";
+  if (els.reasoningSummary) els.reasoningSummary.checked = config.EXPERIMENT_REASONING_SUMMARY !== "false";
   if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
   const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
@@ -4403,9 +4397,7 @@ function buildConfigPayload() {
     WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND")),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
-    EXPERIMENT_REASONING_SUMMARY: els.experimentReasoningSummary && els.experimentReasoningSummary.checked ? "true" : "false",
-    EXPERIMENT_REASONING_TEXT: els.experimentReasoningText && els.experimentReasoningText.checked ? "true" : "false",
-    EXPERIMENT_FAKE_UPSTREAM: els.experimentFakeUpstream && els.experimentFakeUpstream.checked ? "true" : "false",
+    EXPERIMENT_REASONING_SUMMARY: els.reasoningSummary && els.reasoningSummary.checked ? "true" : "false",
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
     UI_THEME: getRadioValue("UI_THEME") || "system",

@@ -960,7 +960,6 @@ pub(crate) struct NativeResponseSseRelay {
     provider_response_id: Option<String>,
     local_response_id: String,
     present_reasoning_summary: bool,
-    keep_reasoning_text: bool,
     sequence_offset: u64,
     reasoning: ReasoningSummaryMirror,
 }
@@ -973,7 +972,6 @@ impl NativeResponseSseRelay {
             provider_response_id: None,
             local_response_id: local_response_id.into(),
             present_reasoning_summary: false,
-            keep_reasoning_text: true,
             sequence_offset: 0,
             reasoning: ReasoningSummaryMirror::default(),
         }
@@ -984,14 +982,6 @@ impl NativeResponseSseRelay {
     /// tool continuations are rebuilt from.
     pub(crate) fn with_reasoning_summary_presentation(mut self, enabled: bool) -> Self {
         self.present_reasoning_summary = enabled;
-        self
-    }
-
-    /// Whether the client-visible reasoning item keeps the provider's own
-    /// `content` (`reasoning_text`). `false` drops it, which is the experiment
-    /// that shows what Codex does with a reasoning item that carries no text.
-    pub(crate) fn with_reasoning_text_retention(mut self, enabled: bool) -> Self {
-        self.keep_reasoning_text = enabled;
         self
     }
 
@@ -1085,10 +1075,7 @@ impl NativeResponseSseRelay {
             .unwrap_or_default()
             .to_owned();
         let mut injected = Vec::new();
-        // The summary work only runs while that switch is on, but the frame also
-        // has to be inspected when the provider's `reasoning_text` must be
-        // dropped from the client copy.
-        if self.present_reasoning_summary || !self.keep_reasoning_text {
+        if self.present_reasoning_summary {
             if let Some(base_sequence) = base_sequence {
                 self.mirror_reasoning_event(&mut payload, base_sequence, &mut injected);
             }
@@ -1172,9 +1159,6 @@ impl NativeResponseSseRelay {
                     return;
                 };
                 self.reasoning.begin(&item_id);
-                if !self.keep_reasoning_text {
-                    payload["item"]["content"] = Value::Null;
-                }
                 let provider_summary = payload
                     .pointer("/item/summary")
                     .and_then(Value::as_array)
@@ -1182,10 +1166,10 @@ impl NativeResponseSseRelay {
                 if provider_summary {
                     self.reasoning.mark_provider_summary(&item_id);
                 }
-                // Either way the provider's own `content` is kept: the summary
-                // added below is a presentation for Codex, not a replacement, so
-                // a history that carries both shapes is still replayable on a
-                // direct connection, which only understands `reasoning_text`.
+                // The provider's own `content` is kept: the summary added below
+                // is a presentation for Codex, not a replacement, so a history
+                // that carries both shapes is still replayable on a direct
+                // connection, which only understands `reasoning_text`.
             }
             "response.reasoning_summary_part.added"
             | "response.reasoning_summary_text.delta"
@@ -1289,11 +1273,6 @@ impl NativeResponseSseRelay {
                 if !is_reasoning {
                     return;
                 }
-                // The experiment that drops the provider's `reasoning_text` must
-                // hold on every early return below as well.
-                if !self.keep_reasoning_text {
-                    payload["item"]["content"] = Value::Null;
-                }
                 if self.reasoning.provider_writes_summary(&item_id) {
                     self.reasoning.finish_item(&item_id);
                     return;
@@ -1330,9 +1309,6 @@ impl NativeResponseSseRelay {
                 for item in items.iter_mut() {
                     if item.get("type").and_then(Value::as_str) != Some("reasoning") {
                         continue;
-                    }
-                    if !self.keep_reasoning_text {
-                        item["content"] = Value::Null;
                     }
                     if !self.present_reasoning_summary {
                         continue;
@@ -1502,13 +1478,11 @@ fn reasoning_summary_part(text: &str) -> Value {
 /// `reasoning_text` content parts, with an empty `summary`. The client copy
 /// gains the summary shape Codex renders while keeping the provider's own
 /// content; the request boundary drops the added summary before the item is
-/// replayed upstream. `keep_reasoning_text = false` is the experiment that drops
-/// the provider content from the client copy.
-pub(crate) fn present_reasoning_summary_in_response(
-    response: &mut Value,
-    add_summary: bool,
-    keep_reasoning_text: bool,
-) {
+/// replayed upstream.
+pub(crate) fn present_reasoning_summary_in_response(response: &mut Value, add_summary: bool) {
+    if !add_summary {
+        return;
+    }
     let Some(items) = response.get_mut("output").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1516,37 +1490,33 @@ pub(crate) fn present_reasoning_summary_in_response(
         if !item.is_object() || item.get("type").and_then(Value::as_str) != Some("reasoning") {
             continue;
         }
-        if add_summary {
-            let summary_empty = item
-                .get("summary")
-                .and_then(Value::as_array)
-                .map(Vec::is_empty)
-                .unwrap_or(true);
-            if summary_empty {
-                let text = item
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .map(|parts| {
-                        parts
-                            .iter()
-                            .filter(|part| {
-                                part.get("type").and_then(Value::as_str) == Some("reasoning_text")
-                            })
-                            .map(|part| {
-                                part.get("text")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                            })
-                            .collect::<String>()
-                    })
-                    .unwrap_or_default();
-                if !text.is_empty() {
-                    item["summary"] = Value::Array(vec![reasoning_summary_part(&text)]);
-                }
-            }
+        let summary_empty = item
+            .get("summary")
+            .and_then(Value::as_array)
+            .map(Vec::is_empty)
+            .unwrap_or(true);
+        if !summary_empty {
+            continue;
         }
-        if !keep_reasoning_text {
-            item["content"] = Value::Null;
+        let text = item
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter(|part| {
+                        part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                    })
+                    .map(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        if !text.is_empty() {
+            item["summary"] = Value::Array(vec![reasoning_summary_part(&text)]);
         }
     }
 }
@@ -2809,39 +2779,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
     }
 
     #[test]
-    fn relay_drops_provider_reasoning_text_when_the_experiment_disables_it() {
-        let mut relay = NativeResponseSseRelay::new("resp_local")
-            .with_reasoning_summary_presentation(true)
-            .with_reasoning_text_retention(false);
-        let ready = relay.relay_bytes(reasoning_text_frames().as_bytes());
-        let bodies = ready
-            .iter()
-            .map(|frame| String::from_utf8(frame.clone()).unwrap())
-            .collect::<Vec<_>>();
-        let joined = bodies.concat();
-
-        // The summary is still what Codex renders, and the provider's content is
-        // removed from the client copy on every frame that carries the item.
-        assert!(joined.contains("event: response.reasoning_summary_part.added"));
-        assert!(!joined.contains("\"type\":\"reasoning_text\""));
-
-        let item_done = bodies
-            .iter()
-            .find(|body| body.contains("event: response.output_item.done"))
-            .expect("item done frame");
-        assert!(item_done.contains("\"content\":null"));
-        assert!(item_done.contains("\"summary\":[{\"text\":\"think\",\"type\":\"summary_text\"}]"));
-
-        let completed = bodies
-            .iter()
-            .find(|body| body.contains("event: response.completed"))
-            .expect("completed frame");
-        assert!(completed.contains("\"content\":null"));
-        assert!(completed.contains("\"summary\":[{\"text\":\"think\",\"type\":\"summary_text\"}]"));
-    }
-
-    #[test]
-    fn non_streaming_reasoning_drops_provider_content_when_asked_to() {
+    fn non_streaming_reasoning_is_left_alone_when_the_summary_switch_is_off() {
         let mut response = json!({
             "id": "resp_provider",
             "output": [{
@@ -2852,28 +2790,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
             }]
         });
 
-        present_reasoning_summary_in_response(&mut response, true, false);
-
-        assert_eq!(
-            response["output"][0]["summary"][0]["text"],
-            json!("step one")
-        );
-        assert_eq!(response["output"][0]["content"], Value::Null);
-    }
-
-    #[test]
-    fn non_streaming_reasoning_is_left_alone_when_both_switches_are_off() {
-        let mut response = json!({
-            "id": "resp_provider",
-            "output": [{
-                "id": "rs_1",
-                "type": "reasoning",
-                "content": [{ "type": "reasoning_text", "text": "step one" }],
-                "summary": []
-            }]
-        });
-
-        present_reasoning_summary_in_response(&mut response, false, true);
+        present_reasoning_summary_in_response(&mut response, false);
 
         assert_eq!(response["output"][0]["summary"], json!([]));
         assert_eq!(
@@ -2903,7 +2820,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
             ]
         });
 
-        present_reasoning_summary_in_response(&mut response, true, true);
+        present_reasoning_summary_in_response(&mut response, true);
 
         assert_eq!(
             response["output"][0]["summary"][0]["text"],

@@ -641,18 +641,6 @@ impl ManagerRuntime {
                 .and_then(|value| value.reasoning_summary)
                 .unwrap_or(config.experimental.reasoning_summary)
                 .to_string(),
-            "EXPERIMENT_REASONING_TEXT": user_config
-                .experimental
-                .as_ref()
-                .and_then(|value| value.reasoning_text)
-                .unwrap_or(config.experimental.reasoning_text)
-                .to_string(),
-            "EXPERIMENT_FAKE_UPSTREAM": user_config
-                .experimental
-                .as_ref()
-                .and_then(|value| value.fake_upstream)
-                .unwrap_or(config.experimental.fake_upstream)
-                .to_string(),
             "DEEPSEEK_CREDENTIAL_SOURCE": upstream
                 .and_then(|value| value.credential)
                 .unwrap_or(config.upstream.credential)
