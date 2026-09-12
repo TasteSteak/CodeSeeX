@@ -184,10 +184,6 @@ pub struct UserConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserExperimentalConfig {
-    /// Legacy on/off switch, replaced by `reasoning_summary_mode = "none"`.
-    /// Accepted when reading an older `config.toml` and never written back.
-    #[serde(skip_serializing)]
-    pub reasoning_summary: Option<bool>,
     pub reasoning_summary_mode: Option<String>,
 }
 
@@ -636,18 +632,16 @@ impl AppConfig {
         }
 
         if let Some(experimental) = user_config.experimental.as_ref() {
-            let mode = experimental
+            // The removed `reasoning_summary` boolean is deliberately ignored: it
+            // meant something different from the modes, so an old file simply
+            // falls back to the default instead of being translated.
+            if let Some(mode) = experimental
                 .reasoning_summary_mode
                 .as_deref()
-                .and_then(parse_reasoning_summary_mode);
-            self.experimental.reasoning_summary_mode = match mode {
-                Some(mode) => mode,
-                // A 0.7.1 config that switched the mirror off keeps it off.
-                None if experimental.reasoning_summary == Some(false) => {
-                    ReasoningSummaryMode::None
-                }
-                None => self.experimental.reasoning_summary_mode,
-            };
+                .and_then(parse_reasoning_summary_mode)
+            {
+                self.experimental.reasoning_summary_mode = mode;
+            }
         }
     }
 }
@@ -976,11 +970,11 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// `reasoning_summary` was the old on/off switch, replaced by the mode's
-    /// `none`. A config written by that version keeps its meaning, an explicit
-    /// mode always wins, and the legacy key is never written back.
+    /// `reasoning_summary` was the old on/off switch and is gone: it meant
+    /// something different from the modes, so an old file is ignored rather than
+    /// translated and falls back to the default mode.
     #[test]
-    fn legacy_reasoning_summary_switch_maps_to_the_mode() {
+    fn removed_reasoning_summary_switch_is_ignored() {
         fn resolved(text: &str) -> ReasoningSummaryMode {
             let user_config: UserConfig = toml::from_str(text).expect("user config");
             let mut config = AppConfig::load_base();
@@ -990,7 +984,7 @@ mod tests {
 
         assert_eq!(
             resolved("[experimental]\nreasoning_summary = false\n"),
-            ReasoningSummaryMode::None
+            ReasoningSummaryMode::Smart
         );
         assert_eq!(
             resolved("[experimental]\nreasoning_summary = true\n"),
