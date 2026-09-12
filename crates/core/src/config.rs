@@ -34,6 +34,36 @@ pub struct AppConfig {
     /// after a successful background refresh.
     #[serde(skip)]
     pub catalog_remote: Option<Arc<CatalogDocument>>,
+    /// Experiment-only switches for local verification.
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
+}
+
+/// Experiment-only switches.
+///
+/// The defaults are the shipping behaviour: present provider reasoning as the
+/// summary Codex renders, keep the provider's own `reasoning_text` on the item,
+/// and talk to the real upstream. They exist so the reasoning shape can be
+/// compared without rebuilding the proxy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentalConfig {
+    /// Add the `summary` Codex's thinking block renders.
+    pub reasoning_summary: bool,
+    /// Keep the provider's own `content` (`reasoning_text`) on the item.
+    pub reasoning_text: bool,
+    /// Answer every native request from a clearly marked local stub instead of
+    /// calling the upstream.
+    pub fake_upstream: bool,
+}
+
+impl Default for ExperimentalConfig {
+    fn default() -> Self {
+        Self {
+            reasoning_summary: true,
+            reasoning_text: true,
+            fake_upstream: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +144,8 @@ pub struct UserConfig {
     pub proxy: Option<UserProxyConfig>,
     pub upstream: Option<UserUpstreamConfig>,
     pub model: Option<UserModelConfig>,
+    /// `[experimental]`: local verification switches, see `ExperimentalConfig`.
+    pub experimental: Option<UserExperimentalConfig>,
     /// Per-model catalog overrides, keyed by slug: `[models."<slug>"]`.
     pub models: Option<BTreeMap<String, UserCatalogModelConfig>>,
     pub catalog: Option<UserCatalogConfig>,
@@ -121,6 +153,13 @@ pub struct UserConfig {
     pub ui: Option<UserUiConfig>,
     pub billing: Option<UserBillingConfig>,
     pub tools: Option<UserToolsConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserExperimentalConfig {
+    pub reasoning_summary: Option<bool>,
+    pub reasoning_text: Option<bool>,
+    pub fake_upstream: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -338,6 +377,7 @@ impl Default for AppConfig {
             catalog_remote_enabled: env_bool("CODESEEX_CATALOG_REMOTE", true),
             catalog_overrides: CatalogOverrides::default(),
             catalog_remote: None,
+            experimental: ExperimentalConfig::default(),
         }
     }
 }
@@ -563,6 +603,18 @@ impl AppConfig {
                 .and_then(|web_search| web_search.backend)
             {
                 self.web_search_backend = backend;
+            }
+        }
+
+        if let Some(experimental) = user_config.experimental.as_ref() {
+            if let Some(enabled) = experimental.reasoning_summary {
+                self.experimental.reasoning_summary = enabled;
+            }
+            if let Some(enabled) = experimental.reasoning_text {
+                self.experimental.reasoning_text = enabled;
+            }
+            if let Some(enabled) = experimental.fake_upstream {
+                self.experimental.fake_upstream = enabled;
             }
         }
     }

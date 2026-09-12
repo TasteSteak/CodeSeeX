@@ -489,6 +489,39 @@ LICENSE AGPL-3.0-only</div>
                     <span class="slider"></span>
                   </label>
                 </div>
+                <div class="setting-divider"></div>
+                <div class="setting-item">
+                  <span>
+                    <span id="experimentReasoningSummaryLabel" data-i18n="experimentReasoningSummaryLabel">Reasoning summary for Codex</span>
+                    <small class="muted" data-i18n="experimentReasoningSummaryHint">Adds the summary block Codex renders for a thinking item. Turn it off to see the provider's reasoning shape with no thinking block at all.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="EXPERIMENT_REASONING_SUMMARY" aria-labelledby="experimentReasoningSummaryLabel">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="setting-divider"></div>
+                <div class="setting-item">
+                  <span>
+                    <span id="experimentReasoningTextLabel" data-i18n="experimentReasoningTextLabel">Keep provider reasoning text</span>
+                    <small class="muted" data-i18n="experimentReasoningTextHint">Keeps the provider's own reasoning_text on the item so the history stays replayable on a direct connection. Turn it off to drop that content from the client copy.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="EXPERIMENT_REASONING_TEXT" aria-labelledby="experimentReasoningTextLabel">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="setting-divider"></div>
+                <div class="setting-item">
+                  <span>
+                    <span id="experimentFakeUpstreamLabel" data-i18n="experimentFakeUpstreamLabel">Simulate upstream responses</span>
+                    <small class="muted" data-i18n="experimentFakeUpstreamHint">Answers every native request from a local stub that streams frame by frame, so the reasoning shape can be checked without upstream variance. Every string is marked and nothing reaches the real provider.</small>
+                  </span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="EXPERIMENT_FAKE_UPSTREAM" aria-labelledby="experimentFakeUpstreamLabel">
+                    <span class="slider"></span>
+                  </label>
+                </div>
               </div>
             </div>
           </section>

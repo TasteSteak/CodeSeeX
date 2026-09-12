@@ -2,9 +2,9 @@ use codeseex_core::config::{UpstreamCredentialSource, UserCatalogModelConfig};
 use codeseex_core::models::{TemperaturePreset, UpstreamModelOverride};
 use codeseex_core::{
     parse_network_proxy_mode, AppConfig, NetworkProxyMode, UpstreamTransport, UserBillingConfig,
-    UserConfig, UserModelConfig, UserNetworkConfig, UserProxyConfig, UserToolsConfig, UserUiConfig,
-    UserUpstreamConfig, UserVisionGenerateToolConfig, UserVisionToolConfig,
-    UserWebSearchToolConfig, WebSearchBackend,
+    UserConfig, UserExperimentalConfig, UserModelConfig, UserNetworkConfig, UserProxyConfig,
+    UserToolsConfig, UserUiConfig, UserUpstreamConfig, UserVisionGenerateToolConfig,
+    UserVisionToolConfig, UserWebSearchToolConfig, WebSearchBackend,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -75,6 +75,24 @@ pub(crate) fn user_config_from_payload(
         }
         if payload.get("LOG_RETENTION_DAYS").is_some() {
             ui.log_retention_days = value_u16(payload, "LOG_RETENTION_DAYS");
+        }
+    }
+
+    if payload.get("EXPERIMENT_REASONING_SUMMARY").is_some()
+        || payload.get("EXPERIMENT_REASONING_TEXT").is_some()
+        || payload.get("EXPERIMENT_FAKE_UPSTREAM").is_some()
+    {
+        let experimental = config
+            .experimental
+            .get_or_insert_with(UserExperimentalConfig::default);
+        if payload.get("EXPERIMENT_REASONING_SUMMARY").is_some() {
+            experimental.reasoning_summary = value_bool(payload, "EXPERIMENT_REASONING_SUMMARY");
+        }
+        if payload.get("EXPERIMENT_REASONING_TEXT").is_some() {
+            experimental.reasoning_text = value_bool(payload, "EXPERIMENT_REASONING_TEXT");
+        }
+        if payload.get("EXPERIMENT_FAKE_UPSTREAM").is_some() {
+            experimental.fake_upstream = value_bool(payload, "EXPERIMENT_FAKE_UPSTREAM");
         }
     }
 

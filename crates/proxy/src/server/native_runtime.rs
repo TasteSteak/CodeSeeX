@@ -23,6 +23,20 @@ use crate::native_responses::{
 use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::WebSearchBackend;
 
+// The reasoning-shape and upstream experiments live in the user config under
+// `[experimental]` (`reasoning_summary`, `reasoning_text`, `fake_upstream`) and
+// are read per request, so they can be flipped without rebuilding the proxy.
+//
+// Marked observations from the manual runs (checkpoint commit 2c9fa2a holds the
+// behaviour from before this experiment):
+// - `reasoning_summary = false` (native shape): Codex renders no thinking block,
+//   and every intermediate message triggered one collapse/expand of the
+//   collapsible block.
+// - `reasoning_summary = true` (both shapes kept): the same collapse/expand was
+//   still observed on each intermediate message.
+// - `fake_upstream = true` answers from the local stub, streamed frame by frame
+//   like a real provider, with every string marked `[FAKE UPSTREAM]`.
+
 pub(super) async fn dispatch_if_selected(
     state: &ProxyState,
     headers: &HeaderMap,
@@ -274,19 +288,24 @@ async fn try_native_responses(
     let passthrough = crate::upstream::UpstreamPassthrough::from_headers(headers);
     crate::upstream::remember_passthrough(&passthrough);
     let started = std::time::Instant::now();
-    let upstream = crate::upstream::post_responses(
-        &client,
-        &config.upstream,
-        crate::upstream::UpstreamAuthRequest {
-            inbound: auth.as_deref(),
-            local_access_token: Some(&state.v1_access_token),
-            managed_key: managed_key.as_deref(),
-            passthrough,
-        },
-        Some(input),
-        native_upstream_payload(&payload),
-    )
-    .await;
+    let upstream = if config.experimental.fake_upstream {
+        record_fake_upstream_answer(state, &id, stream_requested).await;
+        Ok(fake_upstream_response(&id, stream_requested))
+    } else {
+        crate::upstream::post_responses(
+            &client,
+            &config.upstream,
+            crate::upstream::UpstreamAuthRequest {
+                inbound: auth.as_deref(),
+                local_access_token: Some(&state.v1_access_token),
+                managed_key: managed_key.as_deref(),
+                passthrough,
+            },
+            Some(input),
+            native_upstream_payload(&payload),
+        )
+        .await
+    };
     let response = match upstream {
         Ok(response) => response,
         Err(error) => {
@@ -350,6 +369,8 @@ async fn try_native_responses(
             content_type,
             upstream_started: started,
             web_search_backend: config.web_search_backend,
+            reasoning_summary: config.experimental.reasoning_summary,
+            reasoning_text: config.experimental.reasoning_text,
             settle_pending_response_id: pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.clone()),
@@ -369,6 +390,8 @@ async fn try_native_responses(
             response_headers,
             started,
             config.web_search_backend,
+            config.experimental.reasoning_summary,
+            config.experimental.reasoning_text,
             pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.as_str()),
@@ -390,12 +413,14 @@ fn native_hosted_call_is_local(call: &NativeToolCall, config: &AppConfig) -> boo
 async fn buffer_native_sse(
     response: reqwest::Response,
     response_id: &str,
+    config: &AppConfig,
 ) -> Result<(Vec<u8>, NativeResponseStreamInspection), reqwest::Error> {
     use futures_util::StreamExt;
 
     let mut upstream = response.bytes_stream();
     let mut relay = NativeResponseSseRelay::new(response_id.to_owned())
-        .with_reasoning_summary_presentation(true);
+        .with_reasoning_summary_presentation(config.experimental.reasoning_summary)
+        .with_reasoning_text_retention(config.experimental.reasoning_text);
     let mut buffered = Vec::new();
     while let Some(next) = upstream.next().await {
         let chunk = next?;
@@ -521,19 +546,28 @@ async fn native_hosted_tool_loop(
     loop {
         iteration += 1;
         let started = std::time::Instant::now();
-        let upstream = crate::upstream::post_responses(
-            &client,
-            &config.upstream,
-            crate::upstream::UpstreamAuthRequest {
-                inbound: auth.as_deref(),
-                local_access_token: Some(&state.v1_access_token),
-                managed_key: managed_key.as_deref(),
-                passthrough: passthrough.clone(),
-            },
-            Some(input),
-            native_upstream_payload(&payload),
-        )
-        .await;
+        let upstream = if config.experimental.fake_upstream {
+            let stream = payload
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            record_fake_upstream_answer(state, &id, stream).await;
+            Ok(fake_upstream_response(&id, stream))
+        } else {
+            crate::upstream::post_responses(
+                &client,
+                &config.upstream,
+                crate::upstream::UpstreamAuthRequest {
+                    inbound: auth.as_deref(),
+                    local_access_token: Some(&state.v1_access_token),
+                    managed_key: managed_key.as_deref(),
+                    passthrough: passthrough.clone(),
+                },
+                Some(input),
+                native_upstream_payload(&payload),
+            )
+            .await
+        };
         let response = match upstream {
             Ok(response) => response,
             Err(error) => {
@@ -583,7 +617,7 @@ async fn native_hosted_tool_loop(
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/event-stream"));
         let (body, output_items, completed, usage) = if is_sse {
-            match buffer_native_sse(response, &id).await {
+            match buffer_native_sse(response, &id, config).await {
                 Ok((bytes, inspection)) => {
                     if inspection.output_items_incomplete {
                         // The frames were forwarded, but CodeSeeX could not
@@ -764,7 +798,13 @@ async fn native_hosted_tool_loop(
                 .store
                 .finish_request(&id, status_to_store, None, Some(&detail))
                 .await;
-            return native_provider_turn_response(body, is_sse, &id);
+            return native_provider_turn_response(
+                body,
+                is_sse,
+                &id,
+                config.experimental.reasoning_summary,
+                config.experimental.reasoning_text,
+            );
         };
 
         // Codex always declares its local web search tool, so a request that
@@ -1036,7 +1076,13 @@ async fn native_hosted_client_tool_group(
         .store
         .finish_request(id, status_to_store, None, Some(&detail))
         .await;
-    native_provider_turn_response(body, is_sse, id)
+    native_provider_turn_response(
+        body,
+        is_sse,
+        id,
+        config.experimental.reasoning_summary,
+        config.experimental.reasoning_text,
+    )
 }
 
 /// Returns one buffered provider turn to the client. The native transport
@@ -1045,6 +1091,8 @@ fn native_provider_turn_response(
     body: Vec<u8>,
     is_sse: bool,
     id: &str,
+    add_reasoning_summary: bool,
+    keep_reasoning_text: bool,
 ) -> axum::response::Response {
     if is_sse {
         return response_from_bytes(
@@ -1067,10 +1115,16 @@ fn native_provider_turn_response(
     if let Some(provider_id) = provider_id.as_deref() {
         rewrite_provider_response_identity(&mut native, provider_id, id);
     }
-    // The client copy presents provider `reasoning_text` as the summary Codex
-    // renders; the stored copy keeps the provider's own item shape.
+    // The stored copy always keeps the provider's own item shape; the client
+    // copy follows the two `[experimental]` reasoning switches.
     let mut client_response = native;
-    present_reasoning_summary_in_response(&mut client_response);
+    if add_reasoning_summary || !keep_reasoning_text {
+        present_reasoning_summary_in_response(
+            &mut client_response,
+            add_reasoning_summary,
+            keep_reasoning_text,
+        );
+    }
     json_response(client_response)
 }
 
@@ -1252,6 +1306,300 @@ fn summary_part_text(part: &Value) -> String {
         .to_owned()
 }
 
+/// Every string the local stub produces carries this mark, so a synthetic turn
+/// can never be mistaken for a real model answer once the switch is off again.
+const FAKE_UPSTREAM_LABEL: &str = "[FAKE UPSTREAM]";
+
+/// Records that the experiment answered a request locally, so a synthetic turn
+/// is always distinguishable in the event log.
+async fn record_fake_upstream_answer(state: &ProxyState, id: &str, stream: bool) {
+    let _ = state
+        .store
+        .record_event(
+            "warn",
+            "native_fake_upstream_answered",
+            "The fake-upstream experiment answered this request locally; nothing was sent to DeepSeek.",
+            Some(&json!({ "id": id, "stream": stream })),
+        )
+        .await;
+}
+
+/// Builds the synthetic upstream response used by the `fake_upstream` switch.
+///
+/// The streaming form is delivered as a real SSE sequence with delays between
+/// frames, so the client sees the same cadence a provider would produce and the
+/// normal relay/presentation path is exercised end to end.
+fn fake_upstream_response(provider_response_id: &str, stream: bool) -> reqwest::Response {
+    let response_object = fake_upstream_response_object(provider_response_id);
+    let (content_type, body) = if stream {
+        let frames = fake_upstream_sse_frames(&response_object);
+        let stream = async_stream::stream! {
+            for (delay_ms, frame) in frames {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                yield Ok::<Bytes, std::io::Error>(Bytes::from(frame));
+            }
+        };
+        ("text/event-stream", reqwest::Body::wrap_stream(stream))
+    } else {
+        (
+            "application/json",
+            reqwest::Body::from(
+                serde_json::to_vec(&response_object).unwrap_or_else(|_| b"{}".to_vec()),
+            ),
+        )
+    };
+    axum::http::Response::builder()
+        .status(reqwest::StatusCode::OK)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(body)
+        .expect("the synthetic upstream response is well formed")
+        .into()
+}
+
+fn fake_upstream_reasoning_item(completed: bool) -> Value {
+    json!({
+        "id": "rs_fake_upstream",
+        "type": "reasoning",
+        "status": if completed { "completed" } else { "in_progress" },
+        "content": if completed {
+            vec![json!({ "type": "reasoning_text", "text": fake_upstream_reasoning_text() })]
+        } else {
+            Vec::<Value>::new()
+        },
+        "summary": Vec::<Value>::new()
+    })
+}
+
+fn fake_upstream_message_item(completed: bool) -> Value {
+    json!({
+        "id": "msg_fake_upstream",
+        "type": "message",
+        "role": "assistant",
+        "status": if completed { "completed" } else { "in_progress" },
+        "content": if completed {
+            vec![json!({
+                "type": "output_text",
+                "text": fake_upstream_reply_text(),
+                "annotations": []
+            })]
+        } else {
+            Vec::<Value>::new()
+        }
+    })
+}
+
+fn fake_upstream_response_object(provider_response_id: &str) -> Value {
+    json!({
+        "id": provider_response_id,
+        "object": "response",
+        "status": "completed",
+        "output": [
+            fake_upstream_reasoning_item(true),
+            fake_upstream_message_item(true)
+        ],
+        "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
+    })
+}
+
+/// The frame pieces are split so the client receives them one at a time instead
+/// of one finished block.
+fn fake_upstream_reasoning_parts() -> Vec<&'static str> {
+    vec![
+        FAKE_UPSTREAM_LABEL,
+        " reasoning: ",
+        "this text comes from the local experiment stub, ",
+        "not from DeepSeek. ",
+        "It exists so the thinking shape can be observed ",
+        "without upstream variance.",
+    ]
+}
+
+fn fake_upstream_reply_parts() -> Vec<&'static str> {
+    vec![
+        FAKE_UPSTREAM_LABEL,
+        " reply: ",
+        "this turn never reached the real upstream. ",
+        "Turn the fake-upstream switch off ",
+        "to get a real answer.",
+    ]
+}
+
+fn fake_upstream_reasoning_text() -> String {
+    fake_upstream_reasoning_parts().concat()
+}
+
+fn fake_upstream_reply_text() -> String {
+    fake_upstream_reply_parts().concat()
+}
+
+fn fake_sse_frame(event: &str, payload: &Value) -> Vec<u8> {
+    format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned())
+    )
+    .into_bytes()
+}
+
+fn fake_upstream_sse_frames(response_object: &Value) -> Vec<(u64, Vec<u8>)> {
+    let provider_response_id = response_object
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp_fake_upstream_provider");
+    let reasoning_text = fake_upstream_reasoning_text();
+    let reply_text = fake_upstream_reply_text();
+    let mut frames: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut sequence = 0_u64;
+    let mut push = |delay: u64, event: &str, mut payload: Value| {
+        sequence += 1;
+        payload["type"] = json!(event);
+        payload["sequence_number"] = json!(sequence);
+        frames.push((delay, fake_sse_frame(event, &payload)));
+    };
+
+    push(
+        200,
+        "response.created",
+        json!({
+            "response_id": provider_response_id,
+            "response": { "id": provider_response_id, "status": "in_progress" }
+        }),
+    );
+    push(
+        120,
+        "response.output_item.added",
+        json!({
+            "response_id": provider_response_id,
+            "output_index": 0,
+            "item": fake_upstream_reasoning_item(false)
+        }),
+    );
+    push(
+        120,
+        "response.content_part.added",
+        json!({
+            "response_id": provider_response_id,
+            "item_id": "rs_fake_upstream",
+            "output_index": 0,
+            "content_index": 0,
+            "part": { "type": "reasoning_text", "text": "" }
+        }),
+    );
+    for part in fake_upstream_reasoning_parts() {
+        push(
+            180,
+            "response.reasoning_text.delta",
+            json!({
+                "response_id": provider_response_id,
+                "item_id": "rs_fake_upstream",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": part
+            }),
+        );
+    }
+    push(
+        180,
+        "response.reasoning_text.done",
+        json!({
+            "response_id": provider_response_id,
+            "item_id": "rs_fake_upstream",
+            "output_index": 0,
+            "content_index": 0,
+            "text": reasoning_text
+        }),
+    );
+    push(
+        120,
+        "response.content_part.done",
+        json!({
+            "response_id": provider_response_id,
+            "item_id": "rs_fake_upstream",
+            "output_index": 0,
+            "content_index": 0,
+            "part": { "type": "reasoning_text", "text": reasoning_text }
+        }),
+    );
+    push(
+        150,
+        "response.output_item.done",
+        json!({
+            "response_id": provider_response_id,
+            "output_index": 0,
+            "item": fake_upstream_reasoning_item(true)
+        }),
+    );
+    push(
+        350,
+        "response.output_item.added",
+        json!({
+            "response_id": provider_response_id,
+            "output_index": 1,
+            "item": fake_upstream_message_item(false)
+        }),
+    );
+    push(
+        120,
+        "response.content_part.added",
+        json!({
+            "response_id": provider_response_id,
+            "item_id": "msg_fake_upstream",
+            "output_index": 1,
+            "content_index": 0,
+            "part": { "type": "output_text", "text": "", "annotations": [] }
+        }),
+    );
+    for part in fake_upstream_reply_parts() {
+        push(
+            160,
+            "response.output_text.delta",
+            json!({
+                "response_id": provider_response_id,
+                "item_id": "msg_fake_upstream",
+                "output_index": 1,
+                "content_index": 0,
+                "delta": part
+            }),
+        );
+    }
+    push(
+        160,
+        "response.output_text.done",
+        json!({
+            "response_id": provider_response_id,
+            "item_id": "msg_fake_upstream",
+            "output_index": 1,
+            "content_index": 0,
+            "text": reply_text
+        }),
+    );
+    push(
+        120,
+        "response.content_part.done",
+        json!({
+            "response_id": provider_response_id,
+            "item_id": "msg_fake_upstream",
+            "output_index": 1,
+            "content_index": 0,
+            "part": { "type": "output_text", "text": reply_text, "annotations": [] }
+        }),
+    );
+    push(
+        150,
+        "response.output_item.done",
+        json!({
+            "response_id": provider_response_id,
+            "output_index": 1,
+            "item": fake_upstream_message_item(true)
+        }),
+    );
+    push(
+        250,
+        "response.completed",
+        json!({ "response": response_object.clone() }),
+    );
+    frames
+}
+
 async fn native_upstream_status_failure(
     state: &ProxyState,
     id: &str,
@@ -1333,6 +1681,8 @@ async fn native_non_streaming_response(
     response_headers: HeaderMap,
     started: std::time::Instant,
     web_search_backend: WebSearchBackend,
+    add_reasoning_summary: bool,
+    keep_reasoning_text: bool,
     settle_pending_response_id: Option<&str>,
 ) -> axum::response::Response {
     let bytes = match response.bytes().await {
@@ -1473,7 +1823,17 @@ async fn native_non_streaming_response(
             )),
         )
         .await;
-    json_response(native)
+    // The stored copy always keeps the provider's own item shape; the client
+    // copy follows the two `[experimental]` reasoning switches.
+    let mut client_response = native;
+    if add_reasoning_summary || !keep_reasoning_text {
+        present_reasoning_summary_in_response(
+            &mut client_response,
+            add_reasoning_summary,
+            keep_reasoning_text,
+        );
+    }
+    json_response(client_response)
 }
 
 struct NativeStreamingResponseParams {
@@ -1487,6 +1847,8 @@ struct NativeStreamingResponseParams {
     content_type: Option<HeaderValue>,
     upstream_started: std::time::Instant,
     web_search_backend: WebSearchBackend,
+    reasoning_summary: bool,
+    reasoning_text: bool,
     settle_pending_response_id: Option<String>,
 }
 
@@ -1502,6 +1864,8 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         content_type,
         upstream_started,
         web_search_backend,
+        reasoning_summary,
+        reasoning_text,
         settle_pending_response_id,
     } = params;
     let cancelled = register_streaming_response(&response_id);
@@ -1512,7 +1876,8 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
             let _stream_guard = guard;
             let mut upstream = response.bytes_stream();
             let mut relay = NativeResponseSseRelay::new(response_id.clone())
-                .with_reasoning_summary_presentation(true);
+                .with_reasoning_summary_presentation(reasoning_summary)
+                .with_reasoning_text_retention(reasoning_text);
             loop {
                 tokio::select! {
                     _ = cancelled.cancelled() => {
@@ -3332,6 +3697,61 @@ mod tests {
             "the consumed continuation must be settled"
         );
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_dual_shaped_reasoning_item_reaches_upstream_as_the_providers_own_shape() {
+        // The client copy carries both shapes: the provider's `reasoning_text`
+        // and the summary Codex renders. Upstream must see only the provider's.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_dual",
+                "summary": [{ "type": "summary_text", "text": "step one" }],
+                "content": [{ "type": "reasoning_text", "text": "step one" }],
+                "encrypted_content": "blob"
+            }]
+        });
+
+        let upstream = native_upstream_payload(&payload);
+
+        assert_eq!(
+            upstream["input"][0]["content"][0]["type"],
+            json!("reasoning_text")
+        );
+        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("step one"));
+        assert_eq!(
+            upstream["input"][0]["summary"],
+            json!([]),
+            "the summary CodeSeeX added is dropped before the replay reaches DeepSeek"
+        );
+        assert_eq!(upstream["input"][0]["encrypted_content"], json!("blob"));
+    }
+
+    #[test]
+    fn a_legacy_summary_only_item_still_reaches_upstream_with_reasoning_text() {
+        // Histories written before the dual shape only carry the summary. They
+        // must keep working, which is why the boundary restores `reasoning_text`.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_legacy",
+                "summary": [{ "type": "summary_text", "text": "old step" }],
+                "content": null,
+                "encrypted_content": "blob"
+            }]
+        });
+
+        let upstream = native_upstream_payload(&payload);
+
+        assert_eq!(
+            upstream["input"][0]["content"][0]["type"],
+            json!("reasoning_text")
+        );
+        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("old step"));
+        assert_eq!(upstream["input"][0]["summary"], json!([]));
     }
 
 }
