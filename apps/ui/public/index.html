@@ -314,12 +314,16 @@ LICENSE AGPL-3.0-only</div>
                 <div class="setting-item">
                   <span>
                     <span id="reasoningSummaryLabel" data-i18n="reasoningSummaryLabel">Thinking chain</span>
-                    <small class="muted" data-i18n="reasoningSummaryHint">Mirrors the provider's reasoning text as the summary Codex renders, which is what shows the thinking chain. The provider's own reasoning text is always forwarded unchanged, so turning this off never affects whether the conversation can continue.</small>
+                    <small class="muted" data-i18n="reasoningSummaryHint">Decides how much of the provider's reasoning text is mirrored into the thinking chain. The provider's own reasoning text is always forwarded unchanged, so this only affects what the chain shows.</small>
                   </span>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="EXPERIMENT_REASONING_SUMMARY" aria-labelledby="reasoningSummaryLabel">
-                    <span class="slider"></span>
-                  </label>
+                  <div class="segmented-control compact-segmented-control">
+                    <input type="radio" name="EXPERIMENT_REASONING_SUMMARY_MODE" id="summary_mode_smart" value="smart" checked>
+                    <label for="summary_mode_smart" data-i18n="reasoningSummaryMode_smart">Smart</label>
+                    <input type="radio" name="EXPERIMENT_REASONING_SUMMARY_MODE" id="summary_mode_fixed" value="fixed">
+                    <label for="summary_mode_fixed" data-i18n="reasoningSummaryMode_fixed">Trimmed</label>
+                    <input type="radio" name="EXPERIMENT_REASONING_SUMMARY_MODE" id="summary_mode_full" value="full">
+                    <label for="summary_mode_full" data-i18n="reasoningSummaryMode_full">Complete</label>
+                  </div>
                 </div>
                 <div class="setting-divider"></div>
 
@@ -394,9 +398,11 @@ LICENSE AGPL-3.0-only</div>
                   </span>
                   <input type="number" id="PROXY_PORT" class="inline-control config-port-input" min="1" max="65535" step="1">
                 </div>
-                <div class="setting-divider"></div>
 
                 <h3 class="config-section-title" data-i18n="modelBehavior">Model behavior</h3>
+                <!-- TODO(upstream-model-picker): restore a model picker here once the
+                     replacement design lands; the catalog and billing components
+                     above are the only model controls for now. -->
                 <div class="billing-split mt-12">
                   <div class="billing-catalog">
                     <button type="button" class="btn btn-secondary btn-icon-label" id="catalogRefreshButton">
@@ -412,7 +418,6 @@ LICENSE AGPL-3.0-only</div>
                   </div>
                   <div class="billing-card-panel" id="billingCardPanel"></div>
                 </div>
-                <div class="setting-divider"></div>
 
                 <div class="setting-item">
                   <label data-i18n="thinkingMode">Thinking mode</label>

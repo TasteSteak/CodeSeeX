@@ -25,6 +25,8 @@ const RUNTIME_STATUS_STARTING = "starting";
 const RUNTIME_STATUS_STOPPING = "stopping";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
 const DEFAULT_TEMPERATURE_PRESET = "default";
+const DEFAULT_REASONING_SUMMARY_MODE = "smart";
+const REASONING_SUMMARY_MODES = ["smart", "fixed", "full"];
 const FALLBACK_PEAK_VALLEY = Object.freeze({
   enabled: true,
   timezone: "Asia/Shanghai",
@@ -146,7 +148,6 @@ const els = {
   troubleshootSummary: byId("troubleshootSummary"),
   uiLanguage: byId("UI_LANGUAGE"),
   codexAppModelListInjection: byId("CODEX_APP_MODEL_LIST_INJECTION"),
-  reasoningSummary: byId("EXPERIMENT_REASONING_SUMMARY"),
   usageAverageMs: byId("usageAverageMs"),
   usageCacheHitRate: byId("usageCacheHitRate"),
   usageRows: byId("usageRows"),
@@ -408,7 +409,6 @@ function bind() {
     els.uiLanguage,
     els.deepseekBaseUrl,
     els.proxyPort,
-    els.reasoningSummary,
     ...billingInputs(),
   ].forEach((input) => {
     if (!input) return;
@@ -432,6 +432,7 @@ function bind() {
   onRadioChange("NETWORK_PROXY_MODE", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
+  onRadioChange("EXPERIMENT_REASONING_SUMMARY_MODE", handleConfigInput);
   onRadioChange("UI_THEME", (value) => {
     applyTheme(value);
     handleConfigInput();
@@ -1457,6 +1458,7 @@ function renderConfig(config) {
   setRadioValue("WEB_SEARCH_BACKEND", latestWebSearchBackend);
   // The upstream model picker is gone; the value is carried through unchanged so
   // a save never rewrites a model the user configured elsewhere.
+  // TODO(upstream-model-picker): re-attach a control for this once designed.
   latestUpstreamModelOverride = config.UPSTREAM_MODEL_OVERRIDE == null
     ? null
     : String(config.UPSTREAM_MODEL_OVERRIDE);
@@ -1467,7 +1469,10 @@ function renderConfig(config) {
   setRadioValue("UI_THEME", nextTheme);
   if (els.autoStart) els.autoStart.checked = isTruthy(config.AUTO_START || "false");
   if (els.codexAppModelListInjection) els.codexAppModelListInjection.checked = config.CODEX_APP_MODEL_LIST_INJECTION !== "false";
-  if (els.reasoningSummary) els.reasoningSummary.checked = config.EXPERIMENT_REASONING_SUMMARY !== "false";
+  setRadioValue(
+    "EXPERIMENT_REASONING_SUMMARY_MODE",
+    normalizeReasoningSummaryMode(config.EXPERIMENT_REASONING_SUMMARY_MODE),
+  );
   if (els.deepseekBaseUrl && document.activeElement !== els.deepseekBaseUrl) els.deepseekBaseUrl.value = normalizeDeepSeekBaseUrl(config.DEEPSEEK_BASE_URL || "");
   if (document.activeElement !== els.proxyPort) els.proxyPort.value = normalizePort(config.PROXY_PORT || "8787");
   const nextLanguage = normalizeConfiguredLanguageId(config.UI_LANGUAGE || DEFAULT_LANGUAGE);
@@ -2437,8 +2442,8 @@ function renderWebSearchBackendField() {
   const control = document.createElement("div");
   control.className = "segmented-control compact-segmented-control";
   control.append(
-    webSearchBackendOption("local", "webSearchBackend_local", "CodeSeeX local"),
     webSearchBackendOption("official", "webSearchBackend_official", "DeepSeek official"),
+    webSearchBackendOption("local", "webSearchBackend_local", "CodeSeeX local"),
   );
   item.append(labelWrap, control);
   return item;
@@ -4474,7 +4479,9 @@ function buildConfigPayload() {
     WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND") || latestWebSearchBackend),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
-    EXPERIMENT_REASONING_SUMMARY: els.reasoningSummary && els.reasoningSummary.checked ? "true" : "false",
+    // The feature is always on now; the mode below decides how much the chain shows.
+    EXPERIMENT_REASONING_SUMMARY: "true",
+    EXPERIMENT_REASONING_SUMMARY_MODE: normalizeReasoningSummaryMode(getRadioValue("EXPERIMENT_REASONING_SUMMARY_MODE")),
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",
     UI_THEME: getRadioValue("UI_THEME") || "system",
@@ -5101,6 +5108,11 @@ function normalizeDeepSeekBaseUrl(value) {
 function normalizeRetentionDays(value) {
   const raw = String(value || "7");
   return raw === "1" || raw === "3" || raw === "7" || raw === "30" ? raw : "7";
+}
+
+function normalizeReasoningSummaryMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return REASONING_SUMMARY_MODES.includes(normalized) ? normalized : DEFAULT_REASONING_SUMMARY_MODE;
 }
 
 function normalizeTemperaturePreset(value) {
