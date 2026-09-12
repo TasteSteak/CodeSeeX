@@ -1283,6 +1283,26 @@ mod tests {
             .is_some());
     }
 
+    /// Whatever the published manifest declares, the Codex-facing file it
+    /// generates has to stay inside the Codex contract - a placeholder model
+    /// that misses a capability field would otherwise break the client's model
+    /// list for everyone pulling that manifest.
+    #[test]
+    fn published_remote_catalog_stays_codex_compatible() {
+        let document = CatalogDocument::from_json(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../catalog/model-catalog.json"
+        )))
+        .expect("published catalog document must parse");
+
+        let generated = serde_json::to_value(build_codeseex_catalog_from_document(&document))
+            .expect("generated catalog serializes");
+        assert!(
+            catalog_value_is_compatible(&generated),
+            "the published manifest generates a catalog Codex would reject"
+        );
+    }
+
     /// Every remote/cached document goes through the same gate, so the
     /// rejections below are what keeps a hostile or stale manifest from
     /// replacing a working catalog.
