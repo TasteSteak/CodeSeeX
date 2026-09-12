@@ -14,22 +14,69 @@ pub struct ModelInfo {
     pub effective_context_window_percent: u8,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// Which upstream model the proxy should send, whatever the client asked for.
+///
+/// `Default` follows the client through the catalog. `Flash` and `Pro` are the
+/// legacy presets kept for existing `config.toml` files and the tray menu;
+/// `Custom` pins any slug the active catalog knows, so the model list can offer
+/// a lock for every model it shows instead of only the built-in two.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum UpstreamModelOverride {
     #[default]
     Default,
     Flash,
     Pro,
+    Custom(String),
 }
 
 impl UpstreamModelOverride {
-    pub fn upstream_slug(self, requested: &str) -> String {
+    /// The slug the user pinned; `None` means "follow the client".
+    pub fn pinned_slug(&self) -> Option<&str> {
         match self {
-            Self::Default => default_upstream_slug(requested),
-            Self::Flash => MODEL_FLASH.to_owned(),
-            Self::Pro => MODEL_PRO.to_owned(),
+            Self::Default => None,
+            Self::Flash => Some(MODEL_FLASH),
+            Self::Pro => Some(MODEL_PRO),
+            Self::Custom(slug) => Some(slug.as_str()),
         }
+    }
+
+    /// Upstream name to use when the catalog cannot resolve the pin.
+    pub fn upstream_slug(&self, requested: &str) -> String {
+        match self.pinned_slug() {
+            Some(slug) => slug.to_owned(),
+            None => default_upstream_slug(requested),
+        }
+    }
+
+    /// Labels the settings UI, the environment and `config.toml` accept.
+    pub fn from_label(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "default" => Self::Default,
+            "flash" | MODEL_FLASH => Self::Flash,
+            "pro" | MODEL_PRO => Self::Pro,
+            _ => Self::Custom(value.trim().to_owned()),
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::Default => "default",
+            Self::Flash => "flash",
+            Self::Pro => "pro",
+            Self::Custom(slug) => slug.as_str(),
+        }
+    }
+}
+
+impl Serialize for UpstreamModelOverride {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for UpstreamModelOverride {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_label(&String::deserialize(deserializer)?))
     }
 }
 
@@ -138,5 +185,42 @@ mod tests {
         assert_eq!(UpstreamModelOverride::Default.upstream_slug(""), MODEL_PRO);
         assert_eq!(UpstreamModelOverride::Flash.upstream_slug("x"), MODEL_FLASH);
         assert_eq!(UpstreamModelOverride::Pro.upstream_slug("x"), MODEL_PRO);
+    }
+
+    /// Any catalog slug can be pinned, not just the two built-in presets.
+    #[test]
+    fn a_pinned_slug_survives_its_label_and_serde() {
+        let custom = UpstreamModelOverride::from_label("test-placeholder-1");
+        assert_eq!(
+            custom,
+            UpstreamModelOverride::Custom("test-placeholder-1".to_owned())
+        );
+        assert_eq!(custom.pinned_slug(), Some("test-placeholder-1"));
+        assert_eq!(custom.upstream_slug(MODEL_PRO), "test-placeholder-1");
+
+        // The labels the manager already writes keep their legacy meaning.
+        assert_eq!(UpstreamModelOverride::from_label(""), UpstreamModelOverride::Default);
+        assert_eq!(
+            UpstreamModelOverride::from_label("default"),
+            UpstreamModelOverride::Default
+        );
+        assert_eq!(UpstreamModelOverride::from_label("flash"), UpstreamModelOverride::Flash);
+        assert_eq!(UpstreamModelOverride::from_label(MODEL_PRO), UpstreamModelOverride::Pro);
+        assert_eq!(UpstreamModelOverride::Default.pinned_slug(), None);
+
+        for value in [
+            UpstreamModelOverride::Default,
+            UpstreamModelOverride::Flash,
+            UpstreamModelOverride::Pro,
+            UpstreamModelOverride::Custom("test-placeholder-1".to_owned()),
+        ] {
+            let text = serde_json::to_string(&value).expect("serialize");
+            let parsed: UpstreamModelOverride = serde_json::from_str(&text).expect("deserialize");
+            assert_eq!(parsed, value, "{text}");
+        }
+        assert_eq!(
+            serde_json::to_string(&UpstreamModelOverride::Flash).expect("serialize"),
+            "\"flash\""
+        );
     }
 }

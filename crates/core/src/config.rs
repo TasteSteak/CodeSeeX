@@ -909,16 +909,7 @@ fn env_bool(key: &str, fallback: bool) -> bool {
 }
 
 fn env_model_override(key: &str) -> UpstreamModelOverride {
-    match env::var(key)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "flash" | "deepseek-v4-flash" => UpstreamModelOverride::Flash,
-        "pro" | "deepseek-v4-pro" => UpstreamModelOverride::Pro,
-        _ => UpstreamModelOverride::Default,
-    }
+    UpstreamModelOverride::from_label(&env::var(key).unwrap_or_default())
 }
 
 fn env_temperature(key: &str) -> TemperaturePreset {

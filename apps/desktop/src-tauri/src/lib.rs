@@ -912,7 +912,7 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<Menu
     let model = user_config
         .model
         .as_ref()
-        .and_then(|value| value.override_mode)
+        .and_then(|value| value.override_mode.clone())
         .unwrap_or_default();
     let temperature = user_config
         .model

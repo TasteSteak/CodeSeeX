@@ -61,7 +61,7 @@ const catalogState = {
   status: {},
 };
 let currentBillingRatesSignature = "";
-const VISIBLE_MODEL_CARDS = 4;
+const VISIBLE_MODEL_CARDS = 3;
 const MODEL_CARD_GAP = 8;
 const CATALOG_LABEL_FLASH_MS = 1600;
 let selectedCatalogModel = "";

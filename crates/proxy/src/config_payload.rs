@@ -739,12 +739,7 @@ fn value_f64(payload: &Value, key: &str) -> Option<f64> {
 }
 
 fn value_model_override(payload: &Value, key: &str) -> Option<UpstreamModelOverride> {
-    match value_string(payload, key)?.to_ascii_lowercase().as_str() {
-        "flash" | "deepseek-v4-flash" => Some(UpstreamModelOverride::Flash),
-        "pro" | "deepseek-v4-pro" => Some(UpstreamModelOverride::Pro),
-        "default" => Some(UpstreamModelOverride::Default),
-        _ => None,
-    }
+    Some(UpstreamModelOverride::from_label(&value_string(payload, key)?))
 }
 
 fn value_temperature(payload: &Value, key: &str) -> Option<TemperaturePreset> {
@@ -762,11 +757,12 @@ fn value_network_proxy(payload: &Value, key: &str) -> Option<NetworkProxyMode> {
     parse_network_proxy_mode(&value_string(payload, key)?)
 }
 
-pub(crate) fn model_override_to_ui(value: UpstreamModelOverride) -> &'static str {
+pub(crate) fn model_override_to_ui(value: &UpstreamModelOverride) -> String {
     match value {
-        UpstreamModelOverride::Default => "default",
-        UpstreamModelOverride::Flash => "deepseek-v4-flash",
-        UpstreamModelOverride::Pro => "deepseek-v4-pro",
+        UpstreamModelOverride::Default => "default".to_owned(),
+        UpstreamModelOverride::Flash => codeseex_core::models::MODEL_FLASH.to_owned(),
+        UpstreamModelOverride::Pro => codeseex_core::models::MODEL_PRO.to_owned(),
+        UpstreamModelOverride::Custom(slug) => slug.clone(),
     }
 }
 

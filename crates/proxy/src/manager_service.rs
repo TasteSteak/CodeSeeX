@@ -611,8 +611,8 @@ impl ManagerRuntime {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("");
         let model_override = model
-            .and_then(|value| value.override_mode)
-            .unwrap_or(config.model_override);
+            .and_then(|value| value.override_mode.clone())
+            .unwrap_or_else(|| config.model_override.clone());
         let temperature = model
             .and_then(|value| value.temperature)
             .unwrap_or(config.temperature);
@@ -624,8 +624,8 @@ impl ManagerRuntime {
             "PROXY_PORT_SOURCE": proxy_port_source(proxy.and_then(|value| value.port)),
             "DEEPSEEK_BASE_URL": upstream_base_url,
             "DEEPSEEK_TRANSPORT": upstream_transport_to_ui(upstream.and_then(|value| value.transport).unwrap_or(config.upstream.transport)),
-            "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(model_override),
-            "UPSTREAM_MODEL_CHOICES": upstream_model_choices(),
+            "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(&model_override),
+            "UPSTREAM_MODEL_CHOICES": upstream_model_choices(&config),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
             "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
@@ -1942,16 +1942,18 @@ fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     }
 }
 
-/// The models an explicit upstream pin can name.
-///
-/// `UpstreamModelOverride` only carries the two built-in DeepSeek slugs today,
-/// so this is what the model list may offer a lock for; anything else would be
-/// accepted by the UI and then ignored on save.
-fn upstream_model_choices() -> Value {
-    json!([
-        codeseex_core::models::MODEL_FLASH,
-        codeseex_core::models::MODEL_PRO
-    ])
+/// The models an explicit upstream pin can name: every model the active catalog
+/// declares, so a catalog that gains a model gains a lock for it instead of the
+/// list being pinned to the two built-in slugs.
+fn upstream_model_choices(config: &AppConfig) -> Value {
+    let document = config.catalog_document();
+    Value::Array(
+        document
+            .models
+            .iter()
+            .map(|model| Value::String(model.slug.clone()))
+            .collect(),
+    )
 }
 
 fn reasoning_summary_mode_label(
@@ -2596,15 +2598,20 @@ mod tests {
             .filter_map(Value::as_str)
             .collect::<Vec<_>>();
 
-        // Only the slugs `UpstreamModelOverride` can name may be offered a lock;
-        // anything else would be accepted by the UI and ignored on save.
-        assert_eq!(
-            choices,
-            vec![
-                codeseex_core::models::MODEL_FLASH,
-                codeseex_core::models::MODEL_PRO
-            ]
-        );
+        // The lock is data driven: whatever the catalog declares may be pinned,
+        // otherwise the UI would offer a pin the save path silently drops.
+        let document = runtime.active_config().catalog_document();
+        let expected = document
+            .models
+            .iter()
+            .map(|model| model.slug.clone())
+            .collect::<Vec<_>>();
+        let actual = choices
+            .iter()
+            .map(|slug| (*slug).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(actual.contains(&"deepseek-v4-flash".to_owned()));
     }
 
     #[tokio::test]

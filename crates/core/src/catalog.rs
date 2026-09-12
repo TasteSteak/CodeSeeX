@@ -1018,14 +1018,16 @@ fn alias_pattern_matches(pattern: &str, value: &str) -> bool {
 
 /// Outbound model slug for a request, resolved against the active catalog.
 ///
-/// An explicit user override still wins; otherwise the catalog decides how the
-/// client-facing name maps onto the upstream name, and the historical
-/// `gpt-5*` fallback remains for clients that were never switched over.
+/// A pinned model wins over what the client asked for, but both go through the
+/// same catalog lookup, so a pin follows the catalog's `upstream_slug` instead
+/// of hard-coding one. The historical `gpt-5*` fallback stays for names the
+/// catalog does not know.
 pub fn resolve_upstream_slug(config: &crate::config::AppConfig, requested: &str) -> String {
-    if config.model_override != crate::models::UpstreamModelOverride::Default {
-        return config.model_override.upstream_slug(requested);
-    }
     let document = config.catalog_document();
+    let requested = config
+        .model_override
+        .pinned_slug()
+        .unwrap_or(requested);
     match document.model_for_request(requested) {
         Some(model) => model.upstream_slug_or_slug(),
         None => config.model_override.upstream_slug(requested),
@@ -1249,6 +1251,40 @@ impl crate::config::CatalogModelOverride {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pin follows the catalog's `upstream_slug` instead of hard-coding the
+    /// built-in DeepSeek slugs, and an unknown pin is forwarded as-is.
+    #[test]
+    fn an_upstream_pin_resolves_through_the_catalog() {
+        let mut config = crate::config::AppConfig::default();
+        config.catalog_overrides.models.insert(
+            crate::models::MODEL_FLASH.to_owned(),
+            crate::config::CatalogModelOverride {
+                upstream_slug: Some("upstream-flash".to_owned()),
+                ..Default::default()
+            },
+        );
+
+        config.model_override =
+            crate::models::UpstreamModelOverride::Custom(crate::models::MODEL_FLASH.to_owned());
+        assert_eq!(
+            resolve_upstream_slug(&config, crate::models::MODEL_PRO),
+            "upstream-flash"
+        );
+
+        config.model_override =
+            crate::models::UpstreamModelOverride::Custom("not-in-catalog".to_owned());
+        assert_eq!(
+            resolve_upstream_slug(&config, crate::models::MODEL_PRO),
+            "not-in-catalog"
+        );
+
+        config.model_override = crate::models::UpstreamModelOverride::Default;
+        assert_eq!(
+            resolve_upstream_slug(&config, crate::models::MODEL_PRO),
+            crate::models::MODEL_PRO
+        );
+    }
 
     #[test]
     fn catalog_contains_both_models() {
