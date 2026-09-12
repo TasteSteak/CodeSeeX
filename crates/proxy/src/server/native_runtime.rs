@@ -21,18 +21,27 @@ use crate::native_responses::{
     NativeToolCall, NativeToolCallGroup, NativeToolPlan,
 };
 use crate::upstream::SelectedUpstreamTransport;
-use codeseex_core::config::WebSearchBackend;
+use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
 
 // The provider's own `reasoning_text` is forwarded verbatim and is not
 // configurable: DeepSeek rejects a replay that drops it, so it is what keeps a
-// conversation continuable. `[experimental] reasoning_summary` only decides
-// whether CodeSeeX additionally mirrors that text as the `summary` Codex
-// renders; it is read per request, so it applies without rebuilding the proxy.
+// conversation continuable. `[experimental] reasoning_summary` decides whether
+// CodeSeeX additionally mirrors that text as the `summary` Codex renders, and
+// `reasoning_summary_mode` decides how much of it the mirror carries. Both are
+// read per request, so they apply without rebuilding the proxy.
 //
 // Marked observation from the manual runs (checkpoint commit 2c9fa2a holds the
 // behaviour from before the summary option existed): an intermediate reply
 // triggered one collapse/expand of the collapsible block both with and without
 // the mirrored summary, so that behaviour does not come from this option.
+
+/// The summary mirror for this request: `None` when it is turned off.
+fn reasoning_summary_mode(config: &AppConfig) -> Option<ReasoningSummaryMode> {
+    config
+        .experimental
+        .reasoning_summary
+        .then_some(config.experimental.reasoning_summary_mode)
+}
 
 pub(super) async fn dispatch_if_selected(
     state: &ProxyState,
@@ -361,7 +370,7 @@ async fn try_native_responses(
             content_type,
             upstream_started: started,
             web_search_backend: config.web_search_backend,
-            reasoning_summary: config.experimental.reasoning_summary,
+            reasoning_summary_mode: reasoning_summary_mode(config),
             settle_pending_response_id: pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.clone()),
@@ -381,7 +390,7 @@ async fn try_native_responses(
             response_headers,
             started,
             config.web_search_backend,
-            config.experimental.reasoning_summary,
+            reasoning_summary_mode(config),
             pending
                 .as_ref()
                 .map(|continuation| continuation.pending_response_id.as_str()),
@@ -409,7 +418,7 @@ async fn buffer_native_sse(
 
     let mut upstream = response.bytes_stream();
     let mut relay = NativeResponseSseRelay::new(response_id.to_owned())
-        .with_reasoning_summary_presentation(config.experimental.reasoning_summary);
+        .with_reasoning_summary(reasoning_summary_mode(config));
     let mut buffered = Vec::new();
     while let Some(next) = upstream.next().await {
         let chunk = next?;
@@ -782,7 +791,7 @@ async fn native_hosted_tool_loop(
                 body,
                 is_sse,
                 &id,
-                config.experimental.reasoning_summary,
+                reasoning_summary_mode(config),
             );
         };
 
@@ -1059,7 +1068,7 @@ async fn native_hosted_client_tool_group(
         body,
         is_sse,
         id,
-        config.experimental.reasoning_summary,
+        reasoning_summary_mode(config),
     )
 }
 
@@ -1069,7 +1078,7 @@ fn native_provider_turn_response(
     body: Vec<u8>,
     is_sse: bool,
     id: &str,
-    add_reasoning_summary: bool,
+    reasoning_summary_mode: Option<ReasoningSummaryMode>,
 ) -> axum::response::Response {
     if is_sse {
         return response_from_bytes(
@@ -1093,9 +1102,9 @@ fn native_provider_turn_response(
         rewrite_provider_response_identity(&mut native, provider_id, id);
     }
     // The stored copy always keeps the provider's own item shape; the client
-    // copy additionally carries the summary when `reasoning_summary` is on.
+    // copy additionally carries the mirrored summary.
     let mut client_response = native;
-    present_reasoning_summary_in_response(&mut client_response, add_reasoning_summary);
+    present_reasoning_summary_in_response(&mut client_response, reasoning_summary_mode);
     json_response(client_response)
 }
 
@@ -1263,11 +1272,24 @@ fn restore_reasoning_text_field(item: &mut Value) {
         item["summary"] = Value::Array(Vec::new());
         return;
     }
-    // Keep a provider-authored summary when it is not the presentation CodeSeeX
-    // added; only an exact duplicate of the reasoning text is dropped.
-    if content_text == summary_text {
+    // Keep a provider-authored summary, but drop the presentation CodeSeeX
+    // mirrored: that copy is always a prefix of the reasoning text, whether it
+    // carries all of it or only the opening point.
+    if summary_is_mirrored(&content_text, &summary_text) {
         item["summary"] = Value::Array(Vec::new());
     }
+}
+
+/// Whether `summary` is the copy CodeSeeX mirrored from `content`.
+///
+/// The mirror is never reordered or paraphrased, so a mirrored summary is a
+/// prefix of the reasoning text. A provider-authored summary is its own wording
+/// and therefore not a prefix.
+fn summary_is_mirrored(content: &str, summary: &str) -> bool {
+    if summary.is_empty() {
+        return false;
+    }
+    content.starts_with(summary)
 }
 
 fn summary_part_text(part: &Value) -> String {
@@ -1358,7 +1380,7 @@ async fn native_non_streaming_response(
     response_headers: HeaderMap,
     started: std::time::Instant,
     web_search_backend: WebSearchBackend,
-    add_reasoning_summary: bool,
+    reasoning_summary_mode: Option<ReasoningSummaryMode>,
     settle_pending_response_id: Option<&str>,
 ) -> axum::response::Response {
     let bytes = match response.bytes().await {
@@ -1500,9 +1522,9 @@ async fn native_non_streaming_response(
         )
         .await;
     // The stored copy always keeps the provider's own item shape; the client
-    // copy additionally carries the summary when `reasoning_summary` is on.
+    // copy additionally carries the mirrored summary.
     let mut client_response = native;
-    present_reasoning_summary_in_response(&mut client_response, add_reasoning_summary);
+    present_reasoning_summary_in_response(&mut client_response, reasoning_summary_mode);
     json_response(client_response)
 }
 
@@ -1517,7 +1539,7 @@ struct NativeStreamingResponseParams {
     content_type: Option<HeaderValue>,
     upstream_started: std::time::Instant,
     web_search_backend: WebSearchBackend,
-    reasoning_summary: bool,
+    reasoning_summary_mode: Option<ReasoningSummaryMode>,
     settle_pending_response_id: Option<String>,
 }
 
@@ -1533,7 +1555,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
         content_type,
         upstream_started,
         web_search_backend,
-        reasoning_summary,
+        reasoning_summary_mode,
         settle_pending_response_id,
     } = params;
     let cancelled = register_streaming_response(&response_id);
@@ -1544,7 +1566,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
             let _stream_guard = guard;
             let mut upstream = response.bytes_stream();
             let mut relay = NativeResponseSseRelay::new(response_id.clone())
-                .with_reasoning_summary_presentation(reasoning_summary);
+                .with_reasoning_summary(reasoning_summary_mode);
             loop {
                 tokio::select! {
                     _ = cancelled.cancelled() => {
@@ -3394,6 +3416,55 @@ mod tests {
             "the summary CodeSeeX added is dropped before the replay reaches DeepSeek"
         );
         assert_eq!(upstream["input"][0]["encrypted_content"], json!("blob"));
+    }
+
+    #[test]
+    fn a_trimmed_mirror_is_dropped_before_the_replay_reaches_upstream() {
+        // The `smart` and `fixed` modes mirror only the opening of the reasoning
+        // text, so the replay boundary cannot rely on an exact match; any
+        // mirrored copy is a prefix of the provider text.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_trimmed",
+                "summary": [{ "type": "summary_text", "text": "Keep the opening point." }],
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "Keep the opening point.\n\nThen narration."
+                }],
+                "encrypted_content": "blob"
+            }]
+        });
+
+        let upstream = native_upstream_payload(&payload);
+
+        assert_eq!(upstream["input"][0]["summary"], json!([]));
+        assert_eq!(
+            upstream["input"][0]["content"][0]["text"],
+            json!("Keep the opening point.\n\nThen narration.")
+        );
+    }
+
+    #[test]
+    fn a_provider_authored_summary_survives_the_replay() {
+        // A summary the provider wrote is its own wording, so it is not a prefix
+        // of the reasoning text and CodeSeeX leaves it alone.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_provider_summary",
+                "summary": [{ "type": "summary_text", "text": "A short recap." }],
+                "content": [{ "type": "reasoning_text", "text": "Detailed reasoning." }],
+                "encrypted_content": "blob"
+            }]
+        });
+
+        let upstream = native_upstream_payload(&payload);
+
+        assert_eq!(upstream["input"][0]["summary"][0]["text"], json!("A short recap."));
+        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("Detailed reasoning."));
     }
 
     #[test]

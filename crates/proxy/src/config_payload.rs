@@ -78,12 +78,18 @@ pub(crate) fn user_config_from_payload(
         }
     }
 
-    if payload.get("EXPERIMENT_REASONING_SUMMARY").is_some() {
+    if payload.get("EXPERIMENT_REASONING_SUMMARY").is_some()
+        || payload.get("EXPERIMENT_REASONING_SUMMARY_MODE").is_some()
+    {
         let experimental = config
             .experimental
             .get_or_insert_with(UserExperimentalConfig::default);
         if payload.get("EXPERIMENT_REASONING_SUMMARY").is_some() {
             experimental.reasoning_summary = value_bool(payload, "EXPERIMENT_REASONING_SUMMARY");
+        }
+        if payload.get("EXPERIMENT_REASONING_SUMMARY_MODE").is_some() {
+            experimental.reasoning_summary_mode =
+                value_string(payload, "EXPERIMENT_REASONING_SUMMARY_MODE");
         }
     }
 

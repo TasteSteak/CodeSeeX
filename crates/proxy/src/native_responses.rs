@@ -7,7 +7,8 @@
 //! inspector always observes the untouched upstream frames, so the provider
 //! copy remains authoritative for tool continuations.
 
-use codeseex_core::config::WebSearchBackend;
+use crate::reasoning_summary::SummaryProjector;
+use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -960,6 +961,7 @@ pub(crate) struct NativeResponseSseRelay {
     provider_response_id: Option<String>,
     local_response_id: String,
     present_reasoning_summary: bool,
+    reasoning_summary_mode: ReasoningSummaryMode,
     sequence_offset: u64,
     reasoning: ReasoningSummaryMirror,
 }
@@ -972,16 +974,20 @@ impl NativeResponseSseRelay {
             provider_response_id: None,
             local_response_id: local_response_id.into(),
             present_reasoning_summary: false,
+            reasoning_summary_mode: ReasoningSummaryMode::default(),
             sequence_offset: 0,
-            reasoning: ReasoningSummaryMirror::default(),
+            reasoning: ReasoningSummaryMirror::new(ReasoningSummaryMode::default()),
         }
     }
 
     /// Presents provider `reasoning_text` as the summary Codex renders. The
     /// provider copy of every item is still what the inspector retains and what
-    /// tool continuations are rebuilt from.
-    pub(crate) fn with_reasoning_summary_presentation(mut self, enabled: bool) -> Self {
-        self.present_reasoning_summary = enabled;
+    /// tool continuations are rebuilt from. `None` turns the mirror off, and the
+    /// mode only shapes the copy the client renders.
+    pub(crate) fn with_reasoning_summary(mut self, mode: Option<ReasoningSummaryMode>) -> Self {
+        self.present_reasoning_summary = mode.is_some();
+        self.reasoning_summary_mode = mode.unwrap_or_default();
+        self.reasoning = ReasoningSummaryMirror::new(self.reasoning_summary_mode);
         self
     }
 
@@ -1225,7 +1231,7 @@ impl NativeResponseSseRelay {
                 if !self.present_reasoning_summary {
                     return;
                 }
-                self.reasoning.push_delta(&item_id, delta);
+                let emit = self.reasoning.push_delta(&item_id, delta);
                 if !self.reasoning.part_announced {
                     self.reasoning.part_announced = true;
                     injected.push(reasoning_summary_part_added(
@@ -1234,12 +1240,14 @@ impl NativeResponseSseRelay {
                         output_index,
                     ));
                 }
-                if !delta.is_empty() {
+                // Only whole sentences or lines are mirrored, so the client can
+                // never hold text the final projection drops.
+                if let Some(emit) = emit {
                     injected.push(reasoning_summary_text_delta(
                         &response_id,
                         &item_id,
                         output_index,
-                        delta,
+                        &emit,
                     ));
                 }
             }
@@ -1286,7 +1294,7 @@ impl NativeResponseSseRelay {
                     self.reasoning.finish_item(&item_id);
                     return;
                 }
-                let Some(text) = self.reasoning.text(&item_id).map(str::to_owned) else {
+                let Some(text) = self.reasoning.summary(&item_id).map(str::to_owned) else {
                     self.reasoning.finish_item(&item_id);
                     return;
                 };
@@ -1299,7 +1307,7 @@ impl NativeResponseSseRelay {
                 self.reasoning.finish_item(&item_id);
             }
             "response.completed" => {
-                let texts = self.reasoning.texts.clone();
+                let texts = self.reasoning.summaries();
                 let Some(items) = payload
                     .pointer_mut("/response/output")
                     .and_then(Value::as_array_mut)
@@ -1357,7 +1365,17 @@ impl NativeResponseSseRelay {
             return;
         }
         self.reasoning.text_done = true;
-        let Some(text) = self.reasoning.text(item_id).map(str::to_owned) else {
+        // Whatever the projector held back is released now that the item ended,
+        // so the done events carry exactly the projection the client will keep.
+        if let Some(tail) = self.reasoning.finish_text(item_id) {
+            injected.push(reasoning_summary_text_delta(
+                response_id,
+                item_id,
+                output_index,
+                &tail,
+            ));
+        }
+        let Some(text) = self.reasoning.summary(item_id).map(str::to_owned) else {
             return;
         };
         injected.push(reasoning_summary_text_done(
@@ -1402,13 +1420,15 @@ impl NativeResponseSseRelay {
 /// Client-facing display mirror of provider reasoning.
 ///
 /// Only item ids and the mirrored text live here; provider items are never
-/// rebuilt from this state.
-#[derive(Debug, Default)]
+/// rebuilt from this state. Each item keeps its own projector, so the text the
+/// client has received always matches the projection the item is completed with.
+#[derive(Debug)]
 struct ReasoningSummaryMirror {
     active_item_id: Option<String>,
     part_announced: bool,
     text_done: bool,
-    texts: BTreeMap<String, String>,
+    mode: ReasoningSummaryMode,
+    projectors: BTreeMap<String, SummaryProjector>,
     /// Items where the provider writes the summary itself. Those keep their own
     /// presentation; CodeSeeX never rewrites or duplicates them.
     provider_summary_items: BTreeSet<String>,
@@ -1417,32 +1437,59 @@ struct ReasoningSummaryMirror {
 impl ReasoningSummaryMirror {
     const MAX_TRACKED_ITEMS: usize = 8;
 
+    fn new(mode: ReasoningSummaryMode) -> Self {
+        Self {
+            active_item_id: None,
+            part_announced: false,
+            text_done: false,
+            mode,
+            projectors: BTreeMap::new(),
+            provider_summary_items: BTreeSet::new(),
+        }
+    }
+
     fn begin(&mut self, item_id: &str) {
         if self.active_item_id.as_deref() != Some(item_id) {
             self.active_item_id = Some(item_id.to_owned());
             self.part_announced = false;
             self.text_done = false;
         }
-        self.texts.entry(item_id.to_owned()).or_default();
-        while self.texts.len() > Self::MAX_TRACKED_ITEMS {
-            let Some(oldest) = self.texts.keys().next().cloned() else {
+        let mode = self.mode;
+        self.projectors
+            .entry(item_id.to_owned())
+            .or_insert_with(|| SummaryProjector::new(mode));
+        while self.projectors.len() > Self::MAX_TRACKED_ITEMS {
+            let Some(oldest) = self.projectors.keys().next().cloned() else {
                 break;
             };
-            self.texts.remove(&oldest);
+            self.projectors.remove(&oldest);
         }
     }
 
-    fn push_delta(&mut self, item_id: &str, delta: &str) {
-        if let Some(text) = self.texts.get_mut(item_id) {
-            text.push_str(delta);
-        }
+    /// Feeds one provider delta and returns the text that became safe to show.
+    fn push_delta(&mut self, item_id: &str, delta: &str) -> Option<String> {
+        self.projectors.get_mut(item_id)?.push(delta)
     }
 
-    fn text(&self, item_id: &str) -> Option<&str> {
-        self.texts
+    /// Flushes whatever the projector held back once the item is complete.
+    fn finish_text(&mut self, item_id: &str) -> Option<String> {
+        self.projectors.get_mut(item_id)?.finish()
+    }
+
+    /// The summary as the client has received it.
+    fn summary(&self, item_id: &str) -> Option<&str> {
+        self.projectors
             .get(item_id)
-            .map(String::as_str)
+            .map(SummaryProjector::summary)
             .filter(|text| !text.is_empty())
+    }
+
+    fn summaries(&self) -> BTreeMap<String, String> {
+        self.projectors
+            .iter()
+            .map(|(item_id, projector)| (item_id.clone(), projector.summary().to_owned()))
+            .filter(|(_, text)| !text.is_empty())
+            .collect()
     }
 
     fn finish_item(&mut self, item_id: &str) {
@@ -1478,11 +1525,14 @@ fn reasoning_summary_part(text: &str) -> Value {
 /// `reasoning_text` content parts, with an empty `summary`. The client copy
 /// gains the summary shape Codex renders while keeping the provider's own
 /// content; the request boundary drops the added summary before the item is
-/// replayed upstream.
-pub(crate) fn present_reasoning_summary_in_response(response: &mut Value, add_summary: bool) {
-    if !add_summary {
+/// replayed upstream. `mode` is `None` when the mirror is turned off.
+pub(crate) fn present_reasoning_summary_in_response(
+    response: &mut Value,
+    mode: Option<ReasoningSummaryMode>,
+) {
+    let Some(mode) = mode else {
         return;
-    }
+    };
     let Some(items) = response.get_mut("output").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1515,8 +1565,9 @@ pub(crate) fn present_reasoning_summary_in_response(response: &mut Value, add_su
                     .collect::<String>()
             })
             .unwrap_or_default();
-        if !text.is_empty() {
-            item["summary"] = Value::Array(vec![reasoning_summary_part(&text)]);
+        let projected = crate::reasoning_summary::project(&text, mode);
+        if !projected.is_empty() {
+            item["summary"] = Value::Array(vec![reasoning_summary_part(projected)]);
         }
     }
 }
@@ -2715,7 +2766,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
     #[test]
     fn relay_presents_provider_reasoning_as_a_codex_summary() {
         let mut relay = NativeResponseSseRelay::new("resp_local")
-            .with_reasoning_summary_presentation(true);
+            .with_reasoning_summary(Some(ReasoningSummaryMode::Full));
         let ready = relay.relay_bytes(reasoning_text_frames().as_bytes());
         let bodies = ready
             .iter()
@@ -2764,6 +2815,204 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
         assert!(!joined.contains("[DONE]"));
     }
 
+    /// Frames whose reasoning text is long enough to hold two paragraphs, so the
+    /// structure-aware modes have something to cut.
+    fn two_paragraph_reasoning_frames() -> String {
+        [
+            sse_frame_text(
+                "response.created",
+                &json!({
+                    "type": "response.created",
+                    "sequence_number": 1,
+                    "response": { "id": "resp_provider" }
+                }),
+            ),
+            sse_frame_text(
+                "response.output_item.added",
+                &json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": 2,
+                    "response_id": "resp_provider",
+                    "output_index": 0,
+                    "item": {
+                        "id": "rs_provider",
+                        "type": "reasoning",
+                        "status": "in_progress",
+                        "content": [],
+                        "summary": []
+                    }
+                }),
+            ),
+            sse_frame_text(
+                "response.content_part.added",
+                &json!({
+                    "type": "response.content_part.added",
+                    "sequence_number": 3,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": { "type": "reasoning_text", "text": "" }
+                }),
+            ),
+            sse_frame_text(
+                "response.reasoning_text.delta",
+                &json!({
+                    "type": "response.reasoning_text.delta",
+                    "sequence_number": 4,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "Keep the opening point."
+                }),
+            ),
+            sse_frame_text(
+                "response.reasoning_text.delta",
+                &json!({
+                    "type": "response.reasoning_text.delta",
+                    "sequence_number": 5,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "\n\nThen a long stretch of narration that must not be mirrored."
+                }),
+            ),
+            sse_frame_text(
+                "response.reasoning_text.done",
+                &json!({
+                    "type": "response.reasoning_text.done",
+                    "sequence_number": 6,
+                    "response_id": "resp_provider",
+                    "item_id": "rs_provider",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Keep the opening point.\n\nThen a long stretch of narration that must not be mirrored."
+                }),
+            ),
+            sse_frame_text(
+                "response.output_item.done",
+                &json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": 7,
+                    "response_id": "resp_provider",
+                    "output_index": 0,
+                    "item": {
+                        "id": "rs_provider",
+                        "type": "reasoning",
+                        "status": "completed",
+                        "content": [{
+                            "type": "reasoning_text",
+                            "text": "Keep the opening point.\n\nThen a long stretch of narration that must not be mirrored."
+                        }],
+                        "summary": []
+                    }
+                }),
+            ),
+            sse_frame_text(
+                "response.completed",
+                &json!({
+                    "type": "response.completed",
+                    "sequence_number": 8,
+                    "response": {
+                        "id": "resp_provider",
+                        "output": [{
+                            "id": "rs_provider",
+                            "type": "reasoning",
+                            "content": [{
+                                "type": "reasoning_text",
+                                "text": "Keep the opening point.\n\nThen a long stretch of narration that must not be mirrored."
+                            }],
+                            "summary": []
+                        }]
+                    }
+                }),
+            ),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn relay_summary_modes_trim_the_mirror_without_touching_the_provider_text() {
+        let mut relay = NativeResponseSseRelay::new("resp_local")
+            .with_reasoning_summary(Some(ReasoningSummaryMode::Smart));
+        let ready = relay.relay_bytes(two_paragraph_reasoning_frames().as_bytes());
+        let bodies = ready
+            .iter()
+            .map(|frame| String::from_utf8(frame.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let joined = bodies.concat();
+
+        // The provider's own text is untouched on the item and in the snapshot.
+        assert!(
+            joined.contains("\"content\":[{\"text\":\"Keep the opening point.\\n\\nThen a long stretch of narration that must not be mirrored.\",\"type\":\"reasoning_text\"}]"),
+            "{joined}"
+        );
+        // The mirror stops at the paragraph the mode keeps.
+        let item_done = bodies
+            .iter()
+            .find(|body| body.contains("event: response.output_item.done"))
+            .expect("item done frame");
+        assert!(
+            item_done.contains("\"summary\":[{\"text\":\"Keep the opening point.\",\"type\":\"summary_text\"}]"),
+            "{item_done}"
+        );
+        let completed = bodies
+            .iter()
+            .find(|body| body.contains("event: response.completed"))
+            .expect("completed frame");
+        assert!(
+            completed.contains("\"summary\":[{\"text\":\"Keep the opening point.\",\"type\":\"summary_text\"}]"),
+            "{completed}"
+        );
+        assert!(
+            !joined.contains("narration that must not be mirrored\",\"type\":\"summary_text\""),
+            "the trimmed tail must not reach the summary: {joined}"
+        );
+
+        // Every byte the client received is a prefix of what the item ends with.
+        let streamed = reasoning_summary_stream(&bodies);
+        assert_eq!(streamed, "Keep the opening point.");
+    }
+
+    #[test]
+    fn relay_full_mode_still_mirrors_every_delta() {
+        let mut relay = NativeResponseSseRelay::new("resp_local")
+            .with_reasoning_summary(Some(ReasoningSummaryMode::Full));
+        let ready = relay.relay_bytes(two_paragraph_reasoning_frames().as_bytes());
+        let bodies = ready
+            .iter()
+            .map(|frame| String::from_utf8(frame.clone()).unwrap())
+            .collect::<Vec<_>>();
+        let streamed = reasoning_summary_stream(&bodies);
+        assert_eq!(
+            streamed,
+            "Keep the opening point.\n\nThen a long stretch of narration that must not be mirrored."
+        );
+    }
+
+    /// Concatenates the mirrored deltas exactly as the client accumulates them.
+    fn reasoning_summary_stream(bodies: &[String]) -> String {
+        let mut streamed = String::new();
+        for body in bodies {
+            let Some(rest) = body.strip_prefix("event: response.reasoning_summary_text.delta\ndata: ")
+            else {
+                continue;
+            };
+            let Some(line) = rest.lines().next() else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(delta) = payload.get("delta").and_then(Value::as_str) {
+                streamed.push_str(delta);
+            }
+        }
+        streamed
+    }
+
     #[test]
     fn relay_reasoning_presentation_is_off_by_default() {
         let mut relay = NativeResponseSseRelay::new("resp_local");
@@ -2779,6 +3028,28 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
     }
 
     #[test]
+    fn non_streaming_reasoning_is_trimmed_by_the_requested_mode() {
+        let text = "Keep the opening point.\n\nThen a long stretch of narration.";
+        let mut response = json!({
+            "id": "resp_provider",
+            "output": [{
+                "id": "rs_1",
+                "type": "reasoning",
+                "content": [{ "type": "reasoning_text", "text": text }],
+                "summary": []
+            }]
+        });
+
+        present_reasoning_summary_in_response(&mut response, Some(ReasoningSummaryMode::Smart));
+
+        assert_eq!(
+            response["output"][0]["summary"][0]["text"],
+            json!("Keep the opening point.")
+        );
+        assert_eq!(response["output"][0]["content"][0]["text"], json!(text));
+    }
+
+    #[test]
     fn non_streaming_reasoning_is_left_alone_when_the_summary_switch_is_off() {
         let mut response = json!({
             "id": "resp_provider",
@@ -2790,7 +3061,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
             }]
         });
 
-        present_reasoning_summary_in_response(&mut response, false);
+        present_reasoning_summary_in_response(&mut response, None);
 
         assert_eq!(response["output"][0]["summary"], json!([]));
         assert_eq!(
@@ -2820,7 +3091,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
             ]
         });
 
-        present_reasoning_summary_in_response(&mut response, true);
+        present_reasoning_summary_in_response(&mut response, Some(ReasoningSummaryMode::Full));
 
         assert_eq!(
             response["output"][0]["summary"][0]["text"],
@@ -2896,7 +3167,7 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
         ]
         .concat();
         let mut relay = NativeResponseSseRelay::new("resp_local")
-            .with_reasoning_summary_presentation(true);
+            .with_reasoning_summary(Some(ReasoningSummaryMode::Full));
         let ready = relay.relay_bytes(frames.as_bytes());
         let bodies = ready
             .iter()

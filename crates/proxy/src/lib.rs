@@ -11,6 +11,7 @@ mod manager_service;
 mod native_coordinator;
 mod native_responses;
 mod network;
+mod reasoning_summary;
 mod response_sse;
 mod responses;
 mod runtime_config;

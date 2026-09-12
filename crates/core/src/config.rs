@@ -49,13 +49,51 @@ pub struct AppConfig {
 pub struct ExperimentalConfig {
     /// Add the `summary` Codex's thinking block renders.
     pub reasoning_summary: bool,
+    /// How much of the provider's reasoning text that summary mirrors.
+    pub reasoning_summary_mode: ReasoningSummaryMode,
 }
 
 impl Default for ExperimentalConfig {
     fn default() -> Self {
         Self {
             reasoning_summary: true,
+            reasoning_summary_mode: ReasoningSummaryMode::default(),
         }
+    }
+}
+
+/// How much of the provider's own reasoning text the mirrored summary carries.
+///
+/// The provider text itself is never touched; this only shapes the copy Codex
+/// renders, so every mode stays replayable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummaryMode {
+    /// Keep the opening point, bounded by the shared budget.
+    #[default]
+    Smart,
+    /// Keep the leading text, cut back to a sentence boundary inside the budget.
+    Fixed,
+    /// Mirror the whole reasoning text.
+    Full,
+}
+
+impl ReasoningSummaryMode {
+    /// `None` means "no budget": the whole text is mirrored.
+    pub const fn budget(self) -> Option<usize> {
+        match self {
+            Self::Smart | Self::Fixed => Some(400),
+            Self::Full => None,
+        }
+    }
+}
+
+pub fn parse_reasoning_summary_mode(value: &str) -> Option<ReasoningSummaryMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "smart" | "intelligent" => Some(ReasoningSummaryMode::Smart),
+        "fixed" | "trimmed" | "truncate" => Some(ReasoningSummaryMode::Fixed),
+        "full" | "complete" => Some(ReasoningSummaryMode::Full),
+        _ => None,
     }
 }
 
@@ -152,6 +190,7 @@ pub struct UserConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserExperimentalConfig {
     pub reasoning_summary: Option<bool>,
+    pub reasoning_summary_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -601,6 +640,13 @@ impl AppConfig {
         if let Some(experimental) = user_config.experimental.as_ref() {
             if let Some(enabled) = experimental.reasoning_summary {
                 self.experimental.reasoning_summary = enabled;
+            }
+            if let Some(mode) = experimental
+                .reasoning_summary_mode
+                .as_deref()
+                .and_then(parse_reasoning_summary_mode)
+            {
+                self.experimental.reasoning_summary_mode = mode;
             }
         }
     }

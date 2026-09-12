@@ -641,6 +641,11 @@ impl ManagerRuntime {
                 .and_then(|value| value.reasoning_summary)
                 .unwrap_or(config.experimental.reasoning_summary)
                 .to_string(),
+            "EXPERIMENT_REASONING_SUMMARY_MODE": user_config
+                .experimental
+                .as_ref()
+                .and_then(|value| value.reasoning_summary_mode.clone())
+                .unwrap_or_else(|| reasoning_summary_mode_label(config.experimental.reasoning_summary_mode).to_owned()),
             "DEEPSEEK_CREDENTIAL_SOURCE": upstream
                 .and_then(|value| value.credential)
                 .unwrap_or(config.upstream.credential)
@@ -1936,6 +1941,16 @@ fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     }
 }
 
+fn reasoning_summary_mode_label(
+    value: codeseex_core::config::ReasoningSummaryMode,
+) -> &'static str {
+    match value {
+        codeseex_core::config::ReasoningSummaryMode::Smart => "smart",
+        codeseex_core::config::ReasoningSummaryMode::Fixed => "fixed",
+        codeseex_core::config::ReasoningSummaryMode::Full => "full",
+    }
+}
+
 fn canonical_enabled_tool_ids(ids: &[String]) -> Vec<String> {
     let mut output = Vec::new();
     for id in ids {
@@ -2549,6 +2564,33 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn config_payload_round_trips_the_reasoning_summary_mode() {
+        let config = temp_config("reasoning-summary-mode");
+        let user_config = UserConfig {
+            experimental: Some(codeseex_core::UserExperimentalConfig {
+                reasoning_summary: Some(true),
+                reasoning_summary_mode: Some("fixed".to_owned()),
+            }),
+            ..UserConfig::default()
+        };
+        user_config
+            .write_atomic(&config.config_path())
+            .expect("write experimental config");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+
+        let payload = runtime.config_payload();
+
+        assert_eq!(
+            payload
+                .get("EXPERIMENT_REASONING_SUMMARY_MODE")
+                .and_then(Value::as_str),
+            Some("fixed")
+        );
     }
 
     #[tokio::test]
