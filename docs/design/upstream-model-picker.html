@@ -15,12 +15,21 @@
     <link rel="stylesheet" href="../../apps/ui/public/styles/pages/config.css">
     <style>
       /* Mock-only chrome. Everything inside .mock-surface is the real app CSS. */
+      /* The app shell pins the viewport and scrolls its own panes, so the mock
+         page has to undo that to be scrollable as a normal document. */
+      html { height: auto; overflow: auto; }
       body.mock-page {
         background: var(--bg-app);
         color: var(--text-main);
         margin: 0;
         padding: 32px 24px 72px;
         font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        height: auto;
+        min-height: 100vh;
+        display: block;
+        overflow: visible;
+        user-select: text;
+        -webkit-user-select: text;
       }
       .mock-wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
       .mock-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
