@@ -635,12 +635,6 @@ impl ManagerRuntime {
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
             "UI_CLOSE_BEHAVIOR": ui.and_then(|value| value.close_behavior.as_deref()).unwrap_or("exit"),
             "LOG_RETENTION_DAYS": ui.and_then(|value| value.log_retention_days).unwrap_or(7).to_string(),
-            "EXPERIMENT_REASONING_SUMMARY": user_config
-                .experimental
-                .as_ref()
-                .and_then(|value| value.reasoning_summary)
-                .unwrap_or(config.experimental.reasoning_summary)
-                .to_string(),
             "EXPERIMENT_REASONING_SUMMARY_MODE": user_config
                 .experimental
                 .as_ref()
@@ -2602,8 +2596,8 @@ mod tests {
         let config = temp_config("reasoning-summary-mode");
         let user_config = UserConfig {
             experimental: Some(codeseex_core::UserExperimentalConfig {
-                reasoning_summary: Some(true),
                 reasoning_summary_mode: Some("fixed".to_owned()),
+                ..Default::default()
             }),
             ..UserConfig::default()
         };

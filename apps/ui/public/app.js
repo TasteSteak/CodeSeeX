@@ -4483,8 +4483,6 @@ function buildConfigPayload() {
     WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND") || latestWebSearchBackend),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
-    // The feature is always on now; the mode below decides how much the chain shows.
-    EXPERIMENT_REASONING_SUMMARY: "true",
     EXPERIMENT_REASONING_SUMMARY_MODE: normalizeReasoningSummaryMode(getRadioValue("EXPERIMENT_REASONING_SUMMARY_MODE")),
     AUTO_START: els.autoStart && els.autoStart.checked ? "true" : "false",
     COMMUNITY_TOOL_CODE_ENABLED: "false",

@@ -45,21 +45,12 @@ pub struct AppConfig {
 /// replay that drops it, so it is forwarded verbatim and is not configurable.
 /// The only choice here is whether CodeSeeX additionally mirrors that text as
 /// the `summary` Codex renders, which is what makes the thinking block visible.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExperimentalConfig {
-    /// Add the `summary` Codex's thinking block renders.
-    pub reasoning_summary: bool,
-    /// How much of the provider's reasoning text that summary mirrors.
+    /// How much of the provider's reasoning text the mirrored `summary` carries.
+    /// `None` is the off switch: there is no separate enable flag, because
+    /// "mirror nothing" and "do not mirror" are the same state.
     pub reasoning_summary_mode: ReasoningSummaryMode,
-}
-
-impl Default for ExperimentalConfig {
-    fn default() -> Self {
-        Self {
-            reasoning_summary: true,
-            reasoning_summary_mode: ReasoningSummaryMode::default(),
-        }
-    }
 }
 
 /// How much of the provider's own reasoning text the mirrored summary carries.
@@ -193,6 +184,9 @@ pub struct UserConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserExperimentalConfig {
+    /// Legacy on/off switch, replaced by `reasoning_summary_mode = "none"`.
+    /// Accepted when reading an older `config.toml` and never written back.
+    #[serde(skip_serializing)]
     pub reasoning_summary: Option<bool>,
     pub reasoning_summary_mode: Option<String>,
 }
@@ -642,16 +636,18 @@ impl AppConfig {
         }
 
         if let Some(experimental) = user_config.experimental.as_ref() {
-            if let Some(enabled) = experimental.reasoning_summary {
-                self.experimental.reasoning_summary = enabled;
-            }
-            if let Some(mode) = experimental
+            let mode = experimental
                 .reasoning_summary_mode
                 .as_deref()
-                .and_then(parse_reasoning_summary_mode)
-            {
-                self.experimental.reasoning_summary_mode = mode;
-            }
+                .and_then(parse_reasoning_summary_mode);
+            self.experimental.reasoning_summary_mode = match mode {
+                Some(mode) => mode,
+                // A 0.7.1 config that switched the mirror off keeps it off.
+                None if experimental.reasoning_summary == Some(false) => {
+                    ReasoningSummaryMode::None
+                }
+                None => self.experimental.reasoning_summary_mode,
+            };
         }
     }
 }
@@ -979,6 +975,45 @@ pub fn parse_network_proxy_mode(value: &str) -> Option<NetworkProxyMode> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// `reasoning_summary` was the old on/off switch, replaced by the mode's
+    /// `none`. A config written by that version keeps its meaning, an explicit
+    /// mode always wins, and the legacy key is never written back.
+    #[test]
+    fn legacy_reasoning_summary_switch_maps_to_the_mode() {
+        fn resolved(text: &str) -> ReasoningSummaryMode {
+            let user_config: UserConfig = toml::from_str(text).expect("user config");
+            let mut config = AppConfig::load_base();
+            config.apply_user_config(user_config);
+            config.experimental.reasoning_summary_mode
+        }
+
+        assert_eq!(
+            resolved("[experimental]\nreasoning_summary = false\n"),
+            ReasoningSummaryMode::None
+        );
+        assert_eq!(
+            resolved("[experimental]\nreasoning_summary = true\n"),
+            ReasoningSummaryMode::Smart
+        );
+        assert_eq!(
+            resolved("[experimental]\nreasoning_summary = false\nreasoning_summary_mode = \"full\"\n"),
+            ReasoningSummaryMode::Full
+        );
+        assert_eq!(
+            resolved("[experimental]\nreasoning_summary_mode = \"none\"\n"),
+            ReasoningSummaryMode::None
+        );
+
+        let user_config: UserConfig =
+            toml::from_str("[experimental]\nreasoning_summary = false\n").expect("user config");
+        let text = toml::to_string_pretty(&user_config).expect("serialize legacy config");
+        assert!(!text_mentions_key(&text), "{text}");
+
+        fn text_mentions_key(text: &str) -> bool {
+            text.contains("reasoning_summary =")
+        }
+    }
 
     #[test]
     fn user_config_accepts_utf8_bom() {
