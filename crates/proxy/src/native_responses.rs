@@ -91,7 +91,6 @@ pub(crate) fn native_tool_call_group_from_response(
 /// Builds the exact full-replay continuation for a single provider tool group.
 /// The caller supplies output items in the provider call order; every call
 /// must have exactly one matching output with its verified native type.
-#[allow(dead_code)] // Used by the local-tool native continuation slice.
 pub(crate) fn append_complete_native_tool_group(
     authoritative_input: &[Value],
     group: &NativeToolCallGroup,
@@ -125,7 +124,6 @@ pub(crate) fn append_complete_native_tool_group(
     Ok(input)
 }
 
-#[allow(dead_code)] // Used by the local-tool native continuation slice.
 pub(crate) fn native_tool_output_item(call: &NativeToolCall, output: impl Into<String>) -> Value {
     let item_type = match call.kind {
         NativeToolCallKind::Function => "function_call_output",

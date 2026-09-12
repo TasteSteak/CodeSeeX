@@ -155,11 +155,6 @@ pub fn parse_model_thinking(value: &str) -> Option<ModelThinking> {
     }
 }
 
-/// Models advertised by the currently embedded catalog document.
-pub fn available_models() -> Vec<ModelInfo> {
-    available_models_from_document(&crate::catalog::embedded_catalog_document())
-}
-
 pub fn available_models_from_document(
     document: &crate::catalog::CatalogDocument,
 ) -> Vec<ModelInfo> {

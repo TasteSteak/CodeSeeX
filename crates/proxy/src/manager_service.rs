@@ -2309,17 +2309,14 @@ mod tests {
     #[tokio::test]
     async fn adapter_reports_builtin_catalog_for_legacy_modes() {
         let config = temp_config("builtin-catalog-mode");
-        let user_config = UserConfig {
-            catalog: Some(codeseex_core::UserCatalogConfig {
-                mode: Some("auto".to_owned()),
-                source_url: None,
-                remote_enabled: Some(false),
-            }),
-            ..UserConfig::default()
-        };
-        user_config
-            .write_atomic(&config.config_path())
-            .expect("write legacy catalog mode");
+        // The removed `[catalog] mode` key is still tolerated: it is ignored and
+        // the built-in document keeps being reported.
+        std::fs::create_dir_all(&config.data_dir).expect("create data dir");
+        std::fs::write(
+            config.config_path(),
+            "[catalog]\nmode = \"auto\"\nremote_enabled = false\n",
+        )
+        .expect("write legacy catalog mode");
         let runtime = ManagerRuntime::open(config.clone())
             .await
             .expect("open manager runtime");

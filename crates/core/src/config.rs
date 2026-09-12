@@ -232,7 +232,6 @@ pub struct UserModelConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserCatalogConfig {
-    pub mode: Option<String>,
     /// Remote catalog manifest URL. Empty disables remote refresh.
     pub source_url: Option<String>,
     pub remote_enabled: Option<bool>,
@@ -461,7 +460,6 @@ impl AppConfig {
         config.load_cached_catalog();
         let path = config.config_path();
         let Ok(user_config) = UserConfig::read_from(&path) else {
-            config.refresh_catalog_document();
             return config;
         };
         config.apply_user_config(user_config);
@@ -526,10 +524,6 @@ impl AppConfig {
             CatalogLayer::Cache => "cache",
             CatalogLayer::Remote => "remote",
         }
-    }
-
-    pub fn refresh_catalog_document(&mut self) {
-        let _ = self.catalog_document();
     }
 
     pub fn proxy_base_url(&self) -> String {

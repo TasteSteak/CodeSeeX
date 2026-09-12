@@ -4463,9 +4463,9 @@ async fn codex_service_responses_requests_route_flash_disable_thinking_and_suppr
         .all(|item| item.lifecycle == "service_ephemeral" && !item.conversation_turn));
 
     let (events, _) = inspection_store
-        .recent_visible_events(20, None)
+        .recent_events(20, None)
         .await
-        .expect("visible events");
+        .expect("recorded events");
     let service_diagnostics = events
         .iter()
         .filter(|event| event.event_type == "service_request_diagnostic")
@@ -7300,9 +7300,9 @@ async fn streaming_apply_patch_returns_native_custom_tool_call() {
     assert_eq!(summary.billable_history[0].total_tokens, 6);
 
     let (events, _) = store
-        .recent_visible_events(20, None)
+        .recent_events(20, None)
         .await
-        .expect("visible events");
+        .expect("recorded events");
     let completed = events
         .iter()
         .find(|event| event.event_type == "request_completed")
@@ -7378,9 +7378,9 @@ async fn nonstreaming_client_tool_handoff_is_not_user_completed_turn() {
     assert_eq!(summary.billable_history.len(), 1);
     assert_eq!(summary.total_output_tokens, 4);
     let (events, _) = store
-        .recent_visible_events(20, None)
+        .recent_events(20, None)
         .await
-        .expect("visible events");
+        .expect("recorded events");
     let completed = events
         .iter()
         .find(|event| event.event_type == "request_completed")

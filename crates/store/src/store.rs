@@ -4228,7 +4228,7 @@ fn usage_requests_by_final_turn(
         if !matches(request) {
             continue;
         }
-        let Some(anchor_id) = usage_final_anchor_for_handoff(request, &finals) else {
+        let Some(anchor_id) = usage_final_anchor_for_handoff(request, finals) else {
             continue;
         };
         output
@@ -4601,8 +4601,6 @@ fn usage_session_row(turn: &RequestTurn, is_final: bool) -> UsageSessionRow {
         "final_reply"
     } else if turn.lifecycle == "service_ephemeral" {
         "service"
-    } else if turn.lifecycle == "client_tool_handoff" {
-        "intermediate_reply"
     } else {
         "intermediate_reply"
     };
