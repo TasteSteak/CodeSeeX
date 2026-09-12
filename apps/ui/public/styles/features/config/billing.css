@@ -18,16 +18,17 @@
 .billing-model-card.is-selected .billing-model-badge { color: var(--primary-text); background: var(--primary); border-color: var(--primary); }
 /* Upstream lock: hidden until the row is hovered, red once it pins the model. */
 .model-lock {
-  position: absolute; right: 8px; bottom: 8px; width: 26px; height: 26px;
+  position: absolute; right: 14px; bottom: 12px; width: 16px; height: 16px;
   display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--border-color); border-radius: 7px;
-  background: var(--bg-panel); color: var(--text-muted);
+  padding: 0; border: none; background: transparent; color: var(--text-muted);
   opacity: 0; cursor: pointer; transition: var(--theme-transition);
 }
-.model-lock svg { width: 14px; height: 14px; display: block; }
+/* Keep a comfortable target without drawing a box around the icon. */
+.model-lock::after { content: ""; position: absolute; inset: -6px; }
+.model-lock svg { width: 16px; height: 16px; display: block; }
 .billing-model-item:hover .model-lock, .model-lock:focus-visible { opacity: 1; }
-.model-lock:hover { color: var(--text-main); border-color: var(--text-muted); }
-.model-lock.is-locked { opacity: 1; color: var(--danger); border-color: var(--danger); }
+.model-lock:hover { color: var(--text-main); }
+.model-lock.is-locked { opacity: 1; color: var(--danger); }
 .model-lock[disabled] { display: none; }
 .billing-model-empty { padding: 40px 16px; border: 1px dashed var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
 .billing-model-empty small { display: block; margin-top: 4px; }
