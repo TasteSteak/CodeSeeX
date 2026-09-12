@@ -240,6 +240,8 @@ let usageRenderRuntime = null;
 let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
 let latestAdapter = null;
+let latestUpstreamModelOverride = null;
+let latestWebSearchBackend = "local";
 let latestCatalogRuntimeDiagnostic = null;
 let codexRuntimeVerificationInFlight = false;
 let troubleshootTechnicalOpen = false;
@@ -424,11 +426,9 @@ function bind() {
   });
 
   onRadioChange("CONFIG_TAB", setConfigTab);
-  onRadioChange("UPSTREAM_MODEL_OVERRIDE", handleConfigInput);
   onRadioChange("DEEPSEEK_TEMPERATURE_PRESET", handleConfigInput);
   onRadioChange("DEEPSEEK_THINKING", handleConfigInput);
   onRadioChange("DEEPSEEK_TRANSPORT", handleConfigInput);
-  onRadioChange("WEB_SEARCH_BACKEND", handleConfigInput);
   onRadioChange("NETWORK_PROXY_MODE", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
@@ -1451,10 +1451,15 @@ function renderConfig(config) {
   currentConfigSignature = configSignature;
 
   setRadioValue("DEEPSEEK_THINKING", config.DEEPSEEK_THINKING || "auto");
-  setRadioValue("UPSTREAM_MODEL_OVERRIDE", normalizeUpstreamModelOverride(config.UPSTREAM_MODEL_OVERRIDE));
   setRadioValue("DEEPSEEK_TEMPERATURE_PRESET", normalizeTemperaturePreset(config.DEEPSEEK_TEMPERATURE_PRESET));
   setRadioValue("DEEPSEEK_TRANSPORT", normalizeUpstreamTransport(config.DEEPSEEK_TRANSPORT));
-  setRadioValue("WEB_SEARCH_BACKEND", normalizeWebSearchBackend(config.WEB_SEARCH_BACKEND));
+  latestWebSearchBackend = normalizeWebSearchBackend(config.WEB_SEARCH_BACKEND);
+  setRadioValue("WEB_SEARCH_BACKEND", latestWebSearchBackend);
+  // The upstream model picker is gone; the value is carried through unchanged so
+  // a save never rewrites a model the user configured elsewhere.
+  latestUpstreamModelOverride = config.UPSTREAM_MODEL_OVERRIDE == null
+    ? null
+    : String(config.UPSTREAM_MODEL_OVERRIDE);
   setRadioValue("NETWORK_PROXY_MODE", normalizeNetworkProxyMode(config.NETWORK_PROXY_MODE || config.WEB_SEARCH_PROXY_MODE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
@@ -1483,7 +1488,7 @@ function renderCodexAdapter(adapter) {
   latestAdapter = adapter || {};
   const signature = stableStringify({
     adapter: latestAdapter,
-    model: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE") || (lastSavedConfig && lastSavedConfig.UPSTREAM_MODEL_OVERRIDE)),
+    model: latestUpstreamModelOverride,
   });
   if (signature === currentAdapterSignature) return;
   currentAdapterSignature = signature;
@@ -2332,7 +2337,7 @@ function renderTools(tools, config) {
   if (!els.toolConfigList) return;
   if (signature !== currentToolsSignature) {
     currentToolsSignature = signature;
-    els.toolConfigList.replaceChildren(...nextTools.map(renderToolCard));
+    els.toolConfigList.replaceChildren(...orderToolCards(nextTools).map(renderToolCard));
     rebuildToolConfigControlCache();
     applyToolFieldVisibility();
   } else if (toolConfigControlCache.size === 0) {
@@ -2389,18 +2394,84 @@ function renderToolCard(tool) {
   const body = document.createElement("div");
   body.className = "tool-card-body";
   const fields = Array.isArray(tool.config) ? tool.config : [];
-  if (fields.length > 0) {
-    fields.forEach((field, index) => {
-      if (index > 0) {
-        const divider = settingDivider();
-        divider.dataset.toolFieldDivider = "true";
-        body.appendChild(divider);
-      }
-      body.appendChild(renderToolField(field));
-    });
-  }
-  if (fields.length > 0) card.appendChild(body);
+  const extraFields = toolCardExtraFields(tool);
+  fields.forEach((field, index) => {
+    if (index > 0) {
+      const divider = settingDivider();
+      divider.dataset.toolFieldDivider = "true";
+      body.appendChild(divider);
+    }
+    body.appendChild(renderToolField(field));
+  });
+  extraFields.forEach((field, index) => {
+    if (fields.length > 0 || index > 0) {
+      const divider = settingDivider();
+      divider.dataset.toolFieldDivider = "true";
+      body.appendChild(divider);
+    }
+    body.appendChild(field);
+  });
+  if (fields.length > 0 || extraFields.length > 0) card.appendChild(body);
   return card;
+}
+
+/// Cards CodeSeeX owns that are not part of the tool's own schema but still
+/// belong on the card rather than on a separate settings page.
+function toolCardExtraFields(tool) {
+  if (normalizeToolId(tool && tool.id) === "web_search") return [renderWebSearchBackendField()];
+  return [];
+}
+
+function renderWebSearchBackendField() {
+  const item = document.createElement("div");
+  item.className = "setting-item";
+  const labelWrap = document.createElement("span");
+  const label = document.createElement("label");
+  label.dataset.i18n = "webSearchBackend";
+  label.textContent = t("webSearchBackend");
+  const hint = document.createElement("small");
+  hint.className = "muted";
+  hint.dataset.i18n = "webSearchBackendHint";
+  hint.textContent = t("webSearchBackendHint");
+  labelWrap.append(label, hint);
+  const control = document.createElement("div");
+  control.className = "segmented-control compact-segmented-control";
+  control.append(
+    webSearchBackendOption("local", "webSearchBackend_local", "CodeSeeX local"),
+    webSearchBackendOption("official", "webSearchBackend_official", "DeepSeek official"),
+  );
+  item.append(labelWrap, control);
+  return item;
+}
+
+function webSearchBackendOption(value, labelKey, labelText) {
+  const input = document.createElement("input");
+  input.type = "radio";
+  input.name = "WEB_SEARCH_BACKEND";
+  input.id = `web_search_backend_${value}`;
+  input.value = value;
+  input.checked = value === latestWebSearchBackend;
+  const label = document.createElement("label");
+  label.htmlFor = input.id;
+  label.dataset.i18n = labelKey;
+  label.textContent = labelText;
+  const fragment = document.createDocumentFragment();
+  fragment.append(input, label);
+  return fragment;
+}
+
+/// The three workspace tools are the least specific ones, so they are demoted
+/// below everything else on the tools page without touching their definition.
+const TOOL_CARD_TRAILING_IDS = ["list_directory", "read_file_range", "workspace_search"];
+
+function orderToolCards(tools) {
+  const leading = [];
+  const trailing = [];
+  for (const tool of Array.isArray(tools) ? tools : []) {
+    const id = normalizeToolId(tool && tool.id);
+    (TOOL_CARD_TRAILING_IDS.includes(id) ? trailing : leading).push(tool);
+  }
+  return [...leading, ...trailing];
 }
 
 function isSystemTool(tool) {
@@ -2423,12 +2494,19 @@ function renderToolEnableSwitch(tool) {
 }
 
 function normalizeToolLabels(labels) {
+  const source = (Array.isArray(labels) ? labels : []).filter(
+    (label) => label && typeof label === "object",
+  );
+  // A card that already carries the System label does not need the Built-in one.
+  const hasSystemLabel = source.some(
+    (label) => String(label.id || "").trim() === "system",
+  );
   const seen = new Set();
   const output = [];
-  for (const label of Array.isArray(labels) ? labels : []) {
-    if (!label || typeof label !== "object") continue;
+  for (const label of source) {
     const id = String(label.id || label.label || "").trim();
     if (!id || seen.has(id)) continue;
+    if (hasSystemLabel && id === "built_in") continue;
     seen.add(id);
     output.push({
       id,
@@ -4387,14 +4465,13 @@ function isTextConfigInput(target) {
 }
 
 function buildConfigPayload() {
-  return {
+  const payload = {
     ...collectToolConfigPayload(),
     CONFIG_VERSION: latestConfigVersion || "",
     DEEPSEEK_THINKING: getRadioValue("DEEPSEEK_THINKING") || "auto",
-    UPSTREAM_MODEL_OVERRIDE: normalizeUpstreamModelOverride(getRadioValue("UPSTREAM_MODEL_OVERRIDE")),
     DEEPSEEK_TEMPERATURE_PRESET: normalizeTemperaturePreset(getRadioValue("DEEPSEEK_TEMPERATURE_PRESET")),
     DEEPSEEK_TRANSPORT: selectedUpstreamTransportForSave(),
-    WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND")),
+    WEB_SEARCH_BACKEND: normalizeWebSearchBackend(getRadioValue("WEB_SEARCH_BACKEND") || latestWebSearchBackend),
     NETWORK_PROXY_MODE: normalizeNetworkProxyMode(getRadioValue("NETWORK_PROXY_MODE")),
     CODEX_APP_MODEL_LIST_INJECTION: els.codexAppModelListInjection && els.codexAppModelListInjection.checked ? "true" : "false",
     EXPERIMENT_REASONING_SUMMARY: els.reasoningSummary && els.reasoningSummary.checked ? "true" : "false",
@@ -4408,6 +4485,8 @@ function buildConfigPayload() {
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
     CATALOG_PRICING: catalogPeakPricingPayload(),
   };
+  if (latestUpstreamModelOverride) payload.UPSTREAM_MODEL_OVERRIDE = latestUpstreamModelOverride;
+  return payload;
 }
 
 function normalizeConfigPayload(payload) {
@@ -5022,22 +5101,6 @@ function normalizeDeepSeekBaseUrl(value) {
 function normalizeRetentionDays(value) {
   const raw = String(value || "7");
   return raw === "1" || raw === "3" || raw === "7" || raw === "30" ? raw : "7";
-}
-
-/// The override dropdown is catalog driven; legacy `flash`/`pro` labels are
-/// still accepted so a 0.7.0 configuration keeps working.
-function normalizeUpstreamModelOverride(value) {
-  const normalized = String(value || "default").trim();
-  if (!normalized) return "default";
-  const lower = normalized.toLowerCase();
-  const slug = catalogModels().find((model) =>
-    model.slug === normalized
-    || String(model.slug).toLowerCase() === lower
-    || (Array.isArray(model.aliases) && model.aliases.some((alias) => String(alias).toLowerCase() === lower)));
-  if (slug) return slug.slug;
-  if (lower === "flash") return "flash";
-  if (lower === "pro") return "pro";
-  return "default";
 }
 
 function normalizeTemperaturePreset(value) {

@@ -293,6 +293,12 @@ LICENSE AGPL-3.0-only</div>
               <div class="config-tab-panel active" data-config-panel="client">
                 <h3 class="config-section-title" data-i18n="personalization">Personalization</h3>
                 <div class="setting-item">
+                  <label for="UI_LANGUAGE" data-i18n="language">Language</label>
+                  <select id="UI_LANGUAGE" class="inline-control config-language-select"></select>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
                   <label data-i18n="theme">Theme</label>
                   <div class="segmented-control">
                     <input type="radio" name="UI_THEME" id="theme_system" value="system" checked>
@@ -306,22 +312,14 @@ LICENSE AGPL-3.0-only</div>
                 <div class="setting-divider"></div>
 
                 <div class="setting-item">
-                  <label for="UI_LANGUAGE" data-i18n="language">Language</label>
-                  <select id="UI_LANGUAGE" class="inline-control config-language-select"></select>
-                </div>
-                <div class="setting-divider"></div>
-
-                <div class="setting-item">
                   <span>
-                    <label data-i18n="webSearchBackend">Web Search backend</label>
-                    <small class="muted" data-i18n="webSearchBackendHint">Local keeps CodeSeeX's bounded search. Official lets DeepSeek search server-side and may use more tokens. CodeSeeX uses only the selected backend; a request that also needs local tools must use Local or Chat compatibility.</small>
+                    <span id="reasoningSummaryLabel" data-i18n="reasoningSummaryLabel">Thinking chain</span>
+                    <small class="muted" data-i18n="reasoningSummaryHint">Mirrors the provider's reasoning text as the summary Codex renders, which is what shows the thinking chain. The provider's own reasoning text is always forwarded unchanged, so turning this off never affects whether the conversation can continue.</small>
                   </span>
-                  <div class="segmented-control compact-segmented-control">
-                    <input type="radio" name="WEB_SEARCH_BACKEND" id="web_search_backend_local" value="local" checked>
-                    <label for="web_search_backend_local" data-i18n="webSearchBackend_local">CodeSeeX local</label>
-                    <input type="radio" name="WEB_SEARCH_BACKEND" id="web_search_backend_official" value="official">
-                    <label for="web_search_backend_official" data-i18n="webSearchBackend_official">DeepSeek official</label>
-                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="EXPERIMENT_REASONING_SUMMARY" aria-labelledby="reasoningSummaryLabel">
+                    <span class="slider"></span>
+                  </label>
                 </div>
                 <div class="setting-divider"></div>
 
@@ -399,16 +397,20 @@ LICENSE AGPL-3.0-only</div>
                 <div class="setting-divider"></div>
 
                 <h3 class="config-section-title" data-i18n="modelBehavior">Model behavior</h3>
-                <div class="setting-item">
-                  <label data-i18n="upstreamModel">Upstream model</label>
-                  <div class="segmented-control">
-                    <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_default" value="default" checked>
-                    <label for="model_default" data-i18n="modelDefault">Default</label>
-                    <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_flash" value="deepseek-v4-flash">
-                    <label for="model_flash" data-i18n="modelFlash">Flash</label>
-                    <input type="radio" name="UPSTREAM_MODEL_OVERRIDE" id="model_pro" value="deepseek-v4-pro">
-                    <label for="model_pro" data-i18n="modelPro">Pro</label>
+                <div class="billing-split mt-12">
+                  <div class="billing-catalog">
+                    <button type="button" class="btn btn-secondary btn-icon-label" id="catalogRefreshButton">
+                      <svg class="btn-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2.6 8a5.4 5.4 0 0 1 9.2-3.8L13.4 5.6"/>
+                        <path d="M13.4 2.4v3.2h-3.2"/>
+                        <path d="M13.4 8a5.4 5.4 0 0 1-9.2 3.8L2.6 10.4"/>
+                        <path d="M2.6 13.6v-3.2h3.2"/>
+                      </svg>
+                      <span id="catalogRefreshLabel" data-i18n="catalogFetchModels">Update model list</span>
+                    </button>
+                    <div class="billing-model-list" id="billingModelList"></div>
                   </div>
+                  <div class="billing-card-panel" id="billingCardPanel"></div>
                 </div>
                 <div class="setting-divider"></div>
 
@@ -440,24 +442,6 @@ LICENSE AGPL-3.0-only</div>
                     <label for="temp_creative" data-i18n="temperatureCreative">Creative</label>
                   </div>
                 </div>
-                <div class="setting-divider"></div>
-
-                <div class="billing-split mt-12">
-                  <div class="billing-catalog">
-                    <button type="button" class="btn btn-secondary btn-icon-label" id="catalogRefreshButton">
-                      <svg class="btn-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M2.6 8a5.4 5.4 0 0 1 9.2-3.8L13.4 5.6"/>
-                        <path d="M13.4 2.4v3.2h-3.2"/>
-                        <path d="M13.4 8a5.4 5.4 0 0 1-9.2 3.8L2.6 10.4"/>
-                        <path d="M2.6 13.6v-3.2h3.2"/>
-                      </svg>
-                      <span id="catalogRefreshLabel" data-i18n="catalogFetchModels">Update model list</span>
-                    </button>
-                    <div class="billing-model-list" id="billingModelList"></div>
-                  </div>
-                  <div class="billing-card-panel" id="billingCardPanel"></div>
-                </div>
-
               </div>
 
               <div class="config-tab-panel" data-config-panel="tools">
@@ -486,17 +470,6 @@ LICENSE AGPL-3.0-only</div>
                   </span>
                   <label class="toggle-switch">
                     <input type="checkbox" id="CODEX_APP_MODEL_LIST_INJECTION" aria-labelledby="codexAppModelListInjectionLabel">
-                    <span class="slider"></span>
-                  </label>
-                </div>
-                <div class="setting-divider"></div>
-                <div class="setting-item">
-                  <span>
-                    <span id="reasoningSummaryLabel" data-i18n="reasoningSummaryLabel">Thinking block</span>
-                    <small class="muted" data-i18n="reasoningSummaryHint">Mirrors the provider's reasoning text as the summary Codex renders, which is what shows the thinking block. The provider's own reasoning text is always forwarded unchanged, so turning this off never affects whether the conversation can continue.</small>
-                  </span>
-                  <label class="toggle-switch">
-                    <input type="checkbox" id="EXPERIMENT_REASONING_SUMMARY" aria-labelledby="reasoningSummaryLabel">
                     <span class="slider"></span>
                   </label>
                 </div>

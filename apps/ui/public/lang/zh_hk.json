@@ -358,7 +358,7 @@
   "viewUpdateProgress": "查看",
   "codexAppModelListInjection": "Codex App 模型列表注入",
   "codexAppModelListInjectionHint": "實驗性功能，預設啟用。「啟動 Codex」亦會嘗試修改 Codex App 渲染端的模型列表；如果 Codex App 相容性有變化，可將它關閉。",
-  "reasoningSummaryLabel": "思維鏈顯示",
+  "reasoningSummaryLabel": "思考鏈",
   "reasoningSummaryHint": "把上游的思維文字鏡像成 Codex 用來渲染摺疊塊的摘要，這就是思考鏈顯示與否的來源。上游自帶的思維文字一律原樣透傳，因此關閉它不會影響對話能否續接。",
   "toolVisionAnalyzeName": "圖像理解",
   "toolVisionAnalyzeDescription": "使用 DeepSeek Vision 或自訂 OpenAI 相容圖像理解端點分析圖片。",
