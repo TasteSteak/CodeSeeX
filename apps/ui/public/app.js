@@ -65,7 +65,7 @@ const VISIBLE_MODEL_CARDS = 4;
 const MODEL_CARD_GAP = 8;
 const CATALOG_LABEL_FLASH_MS = 1600;
 let selectedCatalogModel = "";
-let modelListHeightTimer = null;
+let modelListGeometryTimer = null;
 const catalogLabelTimers = new Map();
 const SYSTEM_LANGUAGE = "system";
 const FALLBACK_LANGUAGE = "en_us";
@@ -391,7 +391,7 @@ function bind() {
     hideUsageTraceTooltip();
   }, true);
   window.addEventListener("resize", hideUsageTraceTooltip);
-  window.addEventListener("resize", scheduleModelListHeightSync);
+  window.addEventListener("resize", scheduleModelListGeometrySync);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && els.ccsKeyModal && !els.ccsKeyModal.hidden) closeCcsKeyModal("");
     if (event.key === "Escape" && els.troubleshootModal && !els.troubleshootModal.hidden) closeTroubleshootModal();
@@ -2888,8 +2888,8 @@ function setConfigTab(value) {
     panel.classList.toggle("active", panel.dataset.configPanel === currentConfigTab);
   });
   if (currentConfigTab === "tools") ensureToolsLoaded();
-  /* 模型列表的行高只在可见时才能测量 */
-  if (currentConfigTab === "proxy") requestAnimationFrame(updateBillingModelListHeight);
+  /* 模型列表的行高与锁的位置只在可见时才能测量 */
+  if (currentConfigTab === "proxy") requestAnimationFrame(syncBillingModelListGeometry);
 }
 
 function sanitizeDomId(value) {
@@ -4147,7 +4147,7 @@ function setView(viewName) {
   els.pageSubtitle.textContent = t("view" + name + "Subtitle");
   if (view === "usage") refreshUsage({ force: true }).catch(() => {});
   if (view === "logs") refreshLatestLogs({ force: true }).catch(() => {});
-  if (view === "config") requestAnimationFrame(updateBillingModelListHeight);
+  if (view === "config") requestAnimationFrame(syncBillingModelListGeometry);
 }
 
 function handleAboutAction(action) {
@@ -4812,7 +4812,7 @@ function renderBillingCatalog() {
   currentBillingRatesSignature = signature;
   renderBillingModelList(models);
   renderBillingCard(models.find((model) => model.slug === selectedCatalogModel) || null);
-  requestAnimationFrame(updateBillingModelListHeight);
+  requestAnimationFrame(syncBillingModelListGeometry);
 }
 
 function renderBillingModelList(models) {
@@ -4888,11 +4888,33 @@ function renderModelLock(model) {
 
 /// MingCute lock-fill (MIT); inline so the icon follows the button colour.
 const MODEL_LOCK_ICON =
-  '<svg viewBox="3 2 18 20" preserveAspectRatio="xMaxYMid meet" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725 1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>';
+  '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725 1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>';
 
 /// Slugs the backend can actually pin; anything else would save nothing.
 function upstreamModelChoices() {
   return Array.isArray(latestUpstreamModelChoices) ? latestUpstreamModelChoices : [];
+}
+
+/// The lock reads as part of the badge above it, so it is centred on the badge's
+/// column instead of on the card's padding edge. The badge is sized by its own
+/// label, so this can only run once the list has been laid out; a model without
+/// a badge falls back to the card's right padding edge from the stylesheet.
+function alignModelLocks() {
+  const list = els.billingModelList;
+  if (!list) return;
+  for (const item of list.querySelectorAll(".billing-model-item")) {
+    const lock = item.querySelector(".model-lock");
+    if (!lock) continue;
+    const badge = item.querySelector(".billing-model-badge");
+    if (!badge || !badge.offsetWidth || !lock.offsetWidth) {
+      lock.style.left = "";
+      lock.style.right = "";
+      continue;
+    }
+    const badgeCentre = badge.offsetLeft + badge.offsetWidth / 2;
+    lock.style.left = `${Math.round(badgeCentre - lock.offsetWidth / 2)}px`;
+    lock.style.right = "auto";
+  }
 }
 
 function toggleUpstreamModel(slug) {
@@ -5004,28 +5026,30 @@ function selectBillingModel(event) {
 }
 
 /// Keeps exactly VISIBLE_MODEL_CARDS model card rows in view; the rest scrolls.
-function updateBillingModelListHeight() {
+/// Both jobs here are measurements, so they only produce a result while the
+/// model list is actually visible.
+function syncBillingModelListGeometry() {
   const list = els.billingModelList;
   if (!list) return;
   const cards = list.querySelectorAll(".billing-model-card");
   if (cards.length === 0) {
     list.style.maxHeight = "";
-    return;
-  }
-  if (cards.length <= VISIBLE_MODEL_CARDS) {
+  } else if (cards.length <= VISIBLE_MODEL_CARDS) {
     list.style.maxHeight = "none";
-    return;
+  } else {
+    const cardHeight = cards[0].offsetHeight;
+    if (cardHeight > 0) {
+      list.style.maxHeight = `${cardHeight * VISIBLE_MODEL_CARDS + MODEL_CARD_GAP * (VISIBLE_MODEL_CARDS - 1)}px`;
+    }
   }
-  const cardHeight = cards[0].offsetHeight;
-  if (cardHeight <= 0) return;
-  list.style.maxHeight = `${cardHeight * VISIBLE_MODEL_CARDS + MODEL_CARD_GAP * (VISIBLE_MODEL_CARDS - 1)}px`;
+  alignModelLocks();
 }
 
-function scheduleModelListHeightSync() {
-  if (modelListHeightTimer) clearTimeout(modelListHeightTimer);
-  modelListHeightTimer = setTimeout(() => {
-    modelListHeightTimer = null;
-    updateBillingModelListHeight();
+function scheduleModelListGeometrySync() {
+  if (modelListGeometryTimer) clearTimeout(modelListGeometryTimer);
+  modelListGeometryTimer = setTimeout(() => {
+    modelListGeometryTimer = null;
+    syncBillingModelListGeometry();
   }, 120);
 }
 

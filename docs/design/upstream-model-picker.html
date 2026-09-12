@@ -58,11 +58,14 @@
         <h2>状态一 · 未锁定（悬停时出现灰色锁）</h2>
         <div class="billing-model-item mock-show-lock" style="max-width:280px">
           <button type="button" class="billing-model-card">
-            <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Pro</span></span>
+            <span class="billing-model-head">
+              <span class="billing-model-name">DeepSeek V4 Pro</span>
+              <span class="billing-model-badge">Pro</span>
+            </span>
             <span class="billing-model-desc">deepseek-v4-pro</span>
           </button>
           <button type="button" class="model-lock" title="锁定为上游模型" aria-label="锁定为上游模型">
-            <svg viewBox="3 2 18 20" preserveAspectRatio="xMaxYMid meet" aria-hidden="true"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725a1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725a1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>
           </button>
         </div>
         <div class="mock-state">灰色 · 未锁定 · 实际使用时仅在卡片悬停时可见</div>
@@ -74,11 +77,12 @@
           <button type="button" class="billing-model-card is-selected">
             <span class="billing-model-head">
               <span class="billing-model-name">DeepSeek V4 Flash</span>
+              <span class="billing-model-badge">Flash</span>
             </span>
             <span class="billing-model-desc">deepseek-v4-flash</span>
           </button>
           <button type="button" class="model-lock is-locked" title="取消锁定，回到跟随客户端" aria-label="取消锁定，回到跟随客户端">
-            <svg viewBox="3 2 18 20" preserveAspectRatio="xMaxYMid meet" aria-hidden="true"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725a1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725a1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>
           </button>
         </div>
         <div class="mock-state">红色 · 已锁定为上游 · 常驻显示，鼠标移开也在</div>
@@ -102,5 +106,16 @@
         </p>
       </div>
     </div>
+    <script>
+      // Mirrors alignModelLocks() in app.js: the lock is centred on the badge
+      // above it, not on the card's padding edge.
+      for (const item of document.querySelectorAll(".billing-model-item")) {
+        const lock = item.querySelector(".model-lock");
+        const badge = item.querySelector(".billing-model-badge");
+        if (!lock || !badge) continue;
+        lock.style.left = `${Math.round(badge.offsetLeft + badge.offsetWidth / 2 - lock.offsetWidth / 2)}px`;
+        lock.style.right = "auto";
+      }
+    </script>
   </body>
 </html>
