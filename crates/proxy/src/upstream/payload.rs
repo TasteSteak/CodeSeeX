@@ -1,6 +1,6 @@
 use crate::upstream::codex_request_markers;
-use codeseex_core::models::MODEL_FLASH;
-use codeseex_core::{AppConfig, UserConfig};
+use codeseex_core::models::{ModelThinking, MODEL_FLASH};
+use codeseex_core::AppConfig;
 use serde_json::{json, Value};
 
 const TEXT_SCAN_CHAR_LIMIT: usize = 32_000;
@@ -786,17 +786,12 @@ fn thinking_from_request(config: &AppConfig, request: &Value) -> Option<Value> {
     if codex_service_request_kind(request).is_service() {
         return Some(json!({ "type": "disabled" }));
     }
-    let forced = UserConfig::read_from(&config.config_path())
-        .ok()
-        .and_then(|user_config| user_config.model.and_then(|model| model.thinking))
-        .unwrap_or_else(|| "auto".to_owned())
-        .trim()
-        .to_ascii_lowercase();
-    if forced == "enabled" || forced == "on" {
-        return Some(json!({ "type": "enabled" }));
-    }
-    if forced == "disabled" || forced == "off" {
-        return Some(json!({ "type": "disabled" }));
+    // The resolved setting travels on `AppConfig`, so the upstream hot path
+    // never re-reads `config.toml`.
+    match config.thinking {
+        ModelThinking::Enabled => return Some(json!({ "type": "enabled" })),
+        ModelThinking::Disabled => return Some(json!({ "type": "disabled" })),
+        ModelThinking::Auto => {}
     }
     let effort = request
         .pointer("/reasoning/effort")
@@ -1341,5 +1336,77 @@ mod tests {
             resolve_upstream_model(&config, &request, "gpt-5.4-mini"),
             MODEL_PRO
         );
+    }
+
+    /// `auto` keeps the historical client-driven behaviour, while the forced
+    /// values win over whatever effort the client asked for.
+    #[test]
+    fn thinking_setting_overrides_the_request_effort() {
+        fn thinking_payload(thinking: ModelThinking, effort: &str) -> Value {
+            let config = AppConfig {
+                thinking,
+                ..AppConfig::default()
+            };
+            let request = json!({
+                "model": "gpt-5.4",
+                "reasoning": { "effort": effort }
+            });
+            let mut payload = json!({ "model": "gpt-5.4", "stream": false });
+            normalize_chat_payload(&config, &request, &mut payload);
+            payload["thinking"].clone()
+        }
+
+        assert_eq!(
+            thinking_payload(ModelThinking::Auto, "high"),
+            json!({ "type": "enabled" })
+        );
+        assert_eq!(
+            thinking_payload(ModelThinking::Auto, "none"),
+            json!({ "type": "disabled" })
+        );
+        assert_eq!(thinking_payload(ModelThinking::Auto, ""), Value::Null);
+        assert_eq!(
+            thinking_payload(ModelThinking::Enabled, "none"),
+            json!({ "type": "enabled" })
+        );
+        assert_eq!(
+            thinking_payload(ModelThinking::Disabled, "high"),
+            json!({ "type": "disabled" })
+        );
+    }
+
+    #[test]
+    fn service_requests_disable_thinking_even_when_forced_on() {
+        let config = AppConfig {
+            thinking: ModelThinking::Enabled,
+            ..AppConfig::default()
+        };
+        let request = json!({
+            "model": "gpt-5.4",
+            "input": "Generate a short conversation title.",
+            "store": false,
+            "max_output_tokens": 32,
+            "reasoning": { "effort": "high" },
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "thread_title",
+                    "schema": {
+                        "type": "object",
+                        "properties": { "title": { "type": "string" } },
+                        "required": ["title"],
+                        "additionalProperties": false
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            codex_service_request_kind(&request),
+            CodexServiceRequestKind::ThreadTitle
+        );
+        let mut payload = json!({ "model": "gpt-5.4", "stream": false });
+        normalize_chat_payload(&config, &request, &mut payload);
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
     }
 }

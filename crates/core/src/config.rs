@@ -1,5 +1,5 @@
 use crate::catalog::CatalogDocument;
-use crate::models::{TemperaturePreset, UpstreamModelOverride};
+use crate::models::{parse_model_thinking, ModelThinking, TemperaturePreset, UpstreamModelOverride};
 use crate::pricing::PricingTable;
 use crate::urls::normalize_base_url;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,9 @@ pub struct AppConfig {
     pub upstream: UpstreamConfig,
     pub model_override: UpstreamModelOverride,
     pub temperature: TemperaturePreset,
+    /// Whether the upstream `thinking` flag is forced on or off.
+    #[serde(default)]
+    pub thinking: ModelThinking,
     pub network_proxy: NetworkProxyMode,
     pub web_search_backend: WebSearchBackend,
     /// Remote catalog manifest URL. `None` uses the built-in release URL.
@@ -34,9 +37,25 @@ pub struct AppConfig {
     /// after a successful background refresh.
     #[serde(skip)]
     pub catalog_remote: Option<Arc<CatalogDocument>>,
+    /// The document loaded from the cache file at startup, kept separately so
+    /// `catalog_layer()` can tell "cache" from "remote": a remote refresh
+    /// activates a freshly allocated `Arc`, which no longer matches this one.
+    #[serde(skip)]
+    pub catalog_cache: Option<Arc<CatalogDocument>>,
     /// Reasoning presentation options.
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+}
+
+/// Which catalog layer is actually in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogLayer {
+    /// Only the document compiled into the binary is in use.
+    Builtin,
+    /// The cache file written by an earlier remote refresh is in use.
+    Cache,
+    /// A document fetched from the remote manifest is in use.
+    Remote,
 }
 
 /// Reasoning presentation options.
@@ -393,6 +412,7 @@ impl Default for AppConfig {
             upstream: UpstreamConfig::default(),
             model_override: env_model_override("UPSTREAM_MODEL_OVERRIDE"),
             temperature: env_temperature("DEEPSEEK_TEMPERATURE_PRESET"),
+            thinking: env_model_thinking("DEEPSEEK_THINKING"),
             network_proxy: env_network_proxy(),
             web_search_backend: env_web_search_backend(),
             catalog_source_url: env::var("CODESEEX_CATALOG_URL")
@@ -402,6 +422,7 @@ impl Default for AppConfig {
             catalog_remote_enabled: env_bool("CODESEEX_CATALOG_REMOTE", true),
             catalog_overrides: CatalogOverrides::default(),
             catalog_remote: None,
+            catalog_cache: None,
             experimental: ExperimentalConfig::default(),
         }
     }
@@ -456,7 +477,9 @@ impl AppConfig {
         }
         if let Some(document) = crate::catalog::read_cached_catalog_document(&self.catalog_cache_path())
         {
-            self.catalog_remote = Some(Arc::new(document));
+            let document = Arc::new(document);
+            self.catalog_remote = Some(Arc::clone(&document));
+            self.catalog_cache = Some(document);
         }
     }
 
@@ -483,12 +506,25 @@ impl AppConfig {
         self.catalog_document().revision
     }
 
+    /// The highest catalog layer currently in use.
+    ///
+    /// The active document is the one loaded from cache only while it is still
+    /// the same allocation; `RuntimeConfigService::set_catalog_document` swaps
+    /// in a fresh `Arc` when a remote refresh lands.
+    pub fn catalog_layer(&self) -> CatalogLayer {
+        match (self.catalog_remote.as_ref(), self.catalog_cache.as_ref()) {
+            (None, _) => CatalogLayer::Builtin,
+            (Some(active), Some(cached)) if Arc::ptr_eq(active, cached) => CatalogLayer::Cache,
+            _ => CatalogLayer::Remote,
+        }
+    }
+
     /// `builtin`, `cache` or `remote` depending on the highest layer in use.
     pub fn catalog_source_label(&self) -> &'static str {
-        if self.catalog_remote.is_some() {
-            "remote"
-        } else {
-            "builtin"
+        match self.catalog_layer() {
+            CatalogLayer::Builtin => "builtin",
+            CatalogLayer::Cache => "cache",
+            CatalogLayer::Remote => "remote",
         }
     }
 
@@ -564,6 +600,11 @@ impl AppConfig {
                     self.temperature = temperature;
                 }
             }
+            if env::var("DEEPSEEK_THINKING").is_err() {
+                if let Some(thinking) = model.thinking.as_deref().and_then(parse_model_thinking) {
+                    self.thinking = thinking;
+                }
+            }
         }
 
         if let Some(catalog) = user_config.catalog.as_ref() {
@@ -602,6 +643,7 @@ impl AppConfig {
         self.catalog_overrides = overrides;
         if !self.catalog_remote_enabled {
             self.catalog_remote = None;
+            self.catalog_cache = None;
         }
 
         let user_network_proxy = user_config
@@ -925,6 +967,13 @@ fn env_network_proxy() -> NetworkProxyMode {
         .unwrap_or(NetworkProxyMode::System)
 }
 
+fn env_model_thinking(key: &str) -> ModelThinking {
+    env::var(key)
+        .ok()
+        .and_then(|value| parse_model_thinking(&value))
+        .unwrap_or_default()
+}
+
 fn env_upstream_transport() -> UpstreamTransport {
     env::var("DEEPSEEK_TRANSPORT")
         .ok()
@@ -1007,6 +1056,65 @@ mod tests {
         fn text_mentions_key(text: &str) -> bool {
             text.contains("reasoning_summary =")
         }
+    }
+
+    /// The settings page and the refresh guard both read this label, so a
+    /// cached document must not be reported as a remote one.
+    #[test]
+    fn catalog_layer_reports_builtin_cache_and_remote() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let mut config = AppConfig {
+            data_dir: env::temp_dir().join(format!("codeseex-catalog-layer-{nanos}")),
+            ..Default::default()
+        };
+        config.catalog_remote_enabled = true;
+        assert_eq!(config.catalog_layer(), CatalogLayer::Builtin);
+        assert_eq!(config.catalog_source_label(), "builtin");
+
+        let cached = crate::catalog::embedded_catalog_document();
+        crate::catalog::write_cached_catalog_document(&config.catalog_cache_path(), &cached)
+            .expect("write catalog cache");
+        config.load_cached_catalog();
+        assert_eq!(config.catalog_layer(), CatalogLayer::Cache);
+        assert_eq!(config.catalog_source_label(), "cache");
+
+        // A refresh swaps the cached Arc for a freshly fetched document, the
+        // same way `RuntimeConfigService::set_catalog_document` does.
+        let mut refreshed = cached.clone();
+        refreshed.revision = "test-refresh".to_owned();
+        config.catalog_remote = Some(Arc::new(refreshed));
+        assert_eq!(config.catalog_layer(), CatalogLayer::Remote);
+        assert_eq!(config.catalog_source_label(), "remote");
+
+        let _ = fs::remove_dir_all(config.data_dir);
+    }
+
+    #[test]
+    fn model_thinking_is_applied_from_user_config() {
+        fn resolved(text: &str) -> ModelThinking {
+            let user_config: UserConfig = toml::from_str(text).expect("user config");
+            let mut config = AppConfig::load_base();
+            config.apply_user_config(user_config);
+            config.thinking
+        }
+
+        assert_eq!(resolved(""), ModelThinking::Auto);
+        assert_eq!(
+            resolved("[model]\nthinking = \"enabled\"\n"),
+            ModelThinking::Enabled
+        );
+        assert_eq!(
+            resolved("[model]\nthinking = \"disabled\"\n"),
+            ModelThinking::Disabled
+        );
+        // An unusable value is ignored instead of reaching the upstream call.
+        assert_eq!(
+            resolved("[model]\nthinking = \"garbage\"\n"),
+            ModelThinking::Auto
+        );
     }
 
     #[test]

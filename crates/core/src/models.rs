@@ -119,6 +119,42 @@ impl TemperaturePreset {
     }
 }
 
+/// Whether the proxy forces the upstream `thinking` flag on or off.
+///
+/// `Auto` keeps the historical behaviour: a Codex service request (thread
+/// title, ambient suggestions, ...) disables thinking and every other request
+/// follows the client's `reasoning.effort`. The other two variants override
+/// that decision. The value lives on `AppConfig` so the hot upstream path never
+/// has to re-read `config.toml`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelThinking {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl ModelThinking {
+    /// Canonical label shared by `config.toml`, the settings payload and the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+pub fn parse_model_thinking(value: &str) -> Option<ModelThinking> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "default" => Some(ModelThinking::Auto),
+        "enabled" | "on" | "enable" => Some(ModelThinking::Enabled),
+        "disabled" | "off" | "disable" => Some(ModelThinking::Disabled),
+        _ => None,
+    }
+}
+
 /// Models advertised by the currently embedded catalog document.
 pub fn available_models() -> Vec<ModelInfo> {
     available_models_from_document(&crate::catalog::embedded_catalog_document())

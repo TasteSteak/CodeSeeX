@@ -1027,7 +1027,15 @@ pub fn resolve_upstream_slug(config: &crate::config::AppConfig, requested: &str)
     let requested = config
         .model_override
         .pinned_slug()
-        .unwrap_or(requested);
+        .unwrap_or(requested)
+        .trim();
+    // "Unspecified" always means the catalog's own default model, the single
+    // rule `CatalogDocument::upstream_slug_for` applies. Falling back to the
+    // hard-coded pro slug here would disagree whenever the catalog ships a
+    // different default.
+    if requested.is_empty() {
+        return document.default_slug().to_owned();
+    }
     match document.model_for_request(requested) {
         Some(model) => model.upstream_slug_or_slug(),
         None => config.model_override.upstream_slug(requested),
@@ -1283,6 +1291,34 @@ mod tests {
         assert_eq!(
             resolve_upstream_slug(&config, crate::models::MODEL_PRO),
             crate::models::MODEL_PRO
+        );
+    }
+
+    /// An empty or blank request always resolves to whatever the catalog
+    /// declares as its default model. Both entry points must agree, which was
+    /// not the case while one of them hard-coded the pro slug.
+    #[test]
+    fn an_empty_request_resolves_to_the_catalog_default_model() {
+        let mut overlay = embedded_catalog_document();
+        overlay.default_model = crate::models::MODEL_FLASH.to_owned();
+        let config = crate::config::AppConfig {
+            catalog_remote: Some(std::sync::Arc::new(overlay)),
+            ..crate::config::AppConfig::default()
+        };
+
+        let document = config.catalog_document();
+        assert_eq!(document.default_slug(), crate::models::MODEL_FLASH);
+        assert_eq!(
+            resolve_upstream_slug(&config, ""),
+            document.upstream_slug_for("")
+        );
+        assert_eq!(
+            resolve_upstream_slug(&config, "   "),
+            document.upstream_slug_for("   ")
+        );
+        assert_eq!(
+            resolve_upstream_slug(&config, ""),
+            crate::models::MODEL_FLASH
         );
     }
 

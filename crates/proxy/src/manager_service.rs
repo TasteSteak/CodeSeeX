@@ -595,7 +595,6 @@ impl ManagerRuntime {
         let user_config = UserConfig::read_from(&config.config_path()).unwrap_or_default();
         let proxy = user_config.proxy.as_ref();
         let upstream = user_config.upstream.as_ref();
-        let model = user_config.model.as_ref();
         let ui = user_config.ui.as_ref();
         let billing = user_config.billing.as_ref();
         let _ = billing;
@@ -610,13 +609,6 @@ impl ManagerRuntime {
             .and_then(|value| value.base_url.as_deref())
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("");
-        let model_override = model
-            .and_then(|value| value.override_mode.clone())
-            .unwrap_or_else(|| config.model_override.clone());
-        let temperature = model
-            .and_then(|value| value.temperature)
-            .unwrap_or(config.temperature);
-
         let mut payload = json!({
             "config_version": config_version(&config),
             "PROXY_PORT": proxy.and_then(|value| value.port).unwrap_or(config.port).to_string(),
@@ -624,9 +616,12 @@ impl ManagerRuntime {
             "PROXY_PORT_SOURCE": proxy_port_source(proxy.and_then(|value| value.port)),
             "DEEPSEEK_BASE_URL": upstream_base_url,
             "DEEPSEEK_TRANSPORT": upstream_transport_to_ui(upstream.and_then(|value| value.transport).unwrap_or(config.upstream.transport)),
-            "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(&model_override),
-            "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
-            "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
+            // Enum-shaped settings echo the resolved value, never the raw user
+            // string: an unusable entry in `config.toml` must not be shown as if
+            // it were in effect (and then saved back again).
+            "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(&config.model_override),
+            "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(config.temperature),
+            "DEEPSEEK_THINKING": config.thinking.label(),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
             "WEB_SEARCH_BACKEND": web_search_backend_to_ui(tools.and_then(|value| value.web_search.as_ref()).and_then(|value| value.backend).unwrap_or(config.web_search_backend)),
             "AUTO_START": ui.and_then(|value| value.auto_start).unwrap_or(false).to_string(),
@@ -635,11 +630,7 @@ impl ManagerRuntime {
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
             "UI_CLOSE_BEHAVIOR": ui.and_then(|value| value.close_behavior.as_deref()).unwrap_or("exit"),
             "LOG_RETENTION_DAYS": ui.and_then(|value| value.log_retention_days).unwrap_or(7).to_string(),
-            "EXPERIMENT_REASONING_SUMMARY_MODE": user_config
-                .experimental
-                .as_ref()
-                .and_then(|value| value.reasoning_summary_mode.clone())
-                .unwrap_or_else(|| reasoning_summary_mode_label(config.experimental.reasoning_summary_mode).to_owned()),
+            "EXPERIMENT_REASONING_SUMMARY_MODE": reasoning_summary_mode_label(config.experimental.reasoning_summary_mode),
             "DEEPSEEK_CREDENTIAL_SOURCE": upstream
                 .and_then(|value| value.credential)
                 .unwrap_or(config.upstream.credential)
@@ -2615,6 +2606,42 @@ mod tests {
                 .get("EXPERIMENT_REASONING_SUMMARY_MODE")
                 .and_then(Value::as_str),
             Some("fixed")
+        );
+    }
+
+    /// An unusable value in `config.toml` must not be echoed back to the UI: the
+    /// payload reports the value that is actually in effect.
+    #[tokio::test]
+    async fn config_payload_reports_the_effective_enum_settings() {
+        let config = temp_config("effective-enum-settings");
+        let user_config = UserConfig {
+            experimental: Some(codeseex_core::UserExperimentalConfig {
+                reasoning_summary_mode: Some("garbage".to_owned()),
+            }),
+            model: Some(codeseex_core::UserModelConfig {
+                thinking: Some("garbage".to_owned()),
+                ..Default::default()
+            }),
+            ..UserConfig::default()
+        };
+        user_config
+            .write_atomic(&config.config_path())
+            .expect("write config");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+
+        let payload = runtime.config_payload();
+
+        assert_eq!(
+            payload
+                .get("EXPERIMENT_REASONING_SUMMARY_MODE")
+                .and_then(Value::as_str),
+            Some("smart")
+        );
+        assert_eq!(
+            payload.get("DEEPSEEK_THINKING").and_then(Value::as_str),
+            Some("auto")
         );
     }
 
