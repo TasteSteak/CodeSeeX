@@ -39,8 +39,7 @@ use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
 fn reasoning_summary_mode(config: &AppConfig) -> Option<ReasoningSummaryMode> {
     match config.experimental.reasoning_summary_mode {
         ReasoningSummaryMode::None => None,
-        mode if config.experimental.reasoning_summary => Some(mode),
-        _ => None,
+        mode => Some(mode),
     }
 }
 
@@ -1032,7 +1031,7 @@ async fn native_hosted_client_tool_group(
     } else {
         RequestStatus::Failed
     };
-    let detail = json!({
+    let mut detail = json!({
         "transport": "native_responses",
         "tool_loop": "native_hosted",
         "client_tool_group": group
@@ -1043,6 +1042,13 @@ async fn native_hosted_client_tool_group(
         "web_search_backend": web_search_backend_label(config.web_search_backend),
         "provider_tool_calls": group.calls.len()
     });
+    if completed {
+        // This turn hands Codex-owned tool calls back to the client, so it is one
+        // round trip of a longer user turn. Without the marker the store reads
+        // every round trip as a finished turn of its own, which is what split a
+        // single request into one usage session per model call.
+        detail["codeseex_lifecycle"] = json!("client_tool_handoff");
+    }
     let _ = state
         .store
         .record_event(
@@ -1472,11 +1478,15 @@ async fn native_non_streaming_response(
     } else {
         RequestStatus::Failed
     };
-    let detail = json!({
+    let provider_tool_calls = tool_group.as_ref().map(|group| group.calls.len()).unwrap_or(0);
+    let mut detail = json!({
         "transport": "native_responses",
         "web_search_backend": web_search_backend_label(web_search_backend),
-        "provider_tool_calls": tool_group.as_ref().map(|group| group.calls.len()).unwrap_or(0)
+        "provider_tool_calls": provider_tool_calls
     });
+    if native_client_tool_handoff(response_completed, provider_tool_calls) {
+        detail["codeseex_lifecycle"] = json!("client_tool_handoff");
+    }
     let _ = state
         .store
         .record_event(
@@ -1663,7 +1673,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                 "output": inspection.output_items,
                 "usage": usage
             });
-            let detail = json!({
+            let mut detail = json!({
                 "transport": "native_responses",
                 "web_search_backend": web_search_backend_label(web_search_backend),
                 "terminal": native_terminal_label(finalization),
@@ -1679,6 +1689,12 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                 "provider_tool_calls": provider_tool_calls,
                 "tool_group_issue": tool_group_issue
             });
+            if native_client_tool_handoff(
+                finalization == NativeStreamFinalization::Completed,
+                provider_tool_calls,
+            ) {
+                detail["codeseex_lifecycle"] = json!("client_tool_handoff");
+            }
             let _ = state.store.record_event(
                 "info",
                 "upstream_call_usage_breakdown",
@@ -1897,6 +1913,15 @@ fn native_transport_diagnostic(
                 .sum::<usize>()
         }))
     })
+}
+
+/// A completed native response that still carries tool calls is a handoff: the
+/// client executes them and sends the next request of the *same* turn. The store
+/// keys off this marker to fold every round trip of a turn into one usage
+/// session, so the page shows the intermediate replies instead of one session
+/// per request.
+fn native_client_tool_handoff(completed: bool, provider_tool_calls: usize) -> bool {
+    completed && provider_tool_calls > 0
 }
 
 fn native_stream_status(finalization: NativeStreamFinalization) -> &'static str {
@@ -2501,6 +2526,23 @@ mod tests {
             2,
             "the sub-agent turn must reach upstream instead of failing closed"
         );
+        let summary = state.store.runtime_summary(10).await.expect("runtime summary");
+        assert!(
+            !summary.billable_history.is_empty(),
+            "the handoff rounds are billable and must be recorded"
+        );
+        assert!(
+            summary
+                .billable_history
+                .iter()
+                .all(|turn| turn.lifecycle == "client_tool_handoff" && !turn.conversation_turn),
+            "a streaming handoff carries the usage marker: {:?}",
+            summary
+                .billable_history
+                .iter()
+                .map(|turn| turn.lifecycle.as_str())
+                .collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -2594,16 +2636,33 @@ mod tests {
 
         assert_eq!(second_response["id"], "resp_native_tool_second");
         assert_eq!(state.native_pending_tool_groups.pending_count(), 0);
-        let captured = capture.requests.lock().expect("capture lock");
-        assert_eq!(captured.len(), 2);
-        assert_eq!(captured[1]["input"], continuation["input"]);
-        assert!(captured[1].get("previous_response_id").is_none());
-        assert_eq!(captured[1]["stream"], true);
-        assert_eq!(
-            captured[1]["instructions"],
-            "current authoritative instructions"
-        );
-        drop(captured);
+        {
+            let captured = capture.requests.lock().expect("capture lock");
+            assert_eq!(captured.len(), 2);
+            assert_eq!(captured[1]["input"], continuation["input"]);
+            assert!(captured[1].get("previous_response_id").is_none());
+            assert_eq!(captured[1]["stream"], true);
+            assert_eq!(
+                captured[1]["instructions"],
+                "current authoritative instructions"
+            );
+        }
+
+        // The turn must read as one usage entry: the round trip that handed the
+        // tool call back, and the round trip that finished it.
+        let summary = state.store.runtime_summary(10).await.expect("runtime summary");
+        assert_eq!(summary.turn_history.len(), 1, "one user turn");
+        assert_eq!(summary.turn_history[0].lifecycle, "final_turn");
+        let session = summary
+            .usage_sessions
+            .iter()
+            .find(|session| session.id == "resp_native_tool_second")
+            .expect("the final request anchors the usage session");
+        assert!(session.conversation_turn);
+        assert_eq!(session.rows.len(), 2, "intermediate reply plus final reply");
+        assert_eq!(session.rows[0].lifecycle, "client_tool_handoff");
+        assert_eq!(session.rows[0].kind, "intermediate_reply");
+        assert_eq!(session.rows[1].kind, "final_reply");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -2854,6 +2913,17 @@ mod tests {
             0,
             "CodeSeeX executes no hosted round here, so it retains nothing"
         );
+        let summary = state.store.runtime_summary(10).await.expect("runtime summary");
+        assert_eq!(summary.turn_history.len(), 0, "this round is not a finished turn");
+        let turn = summary
+            .billable_history
+            .first()
+            .expect("the handed-back round is billable");
+        assert_eq!(
+            turn.lifecycle, "client_tool_handoff",
+            "a handed-back group is one round trip of the user's turn"
+        );
+        assert!(!turn.conversation_turn);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
