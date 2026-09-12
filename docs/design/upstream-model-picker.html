@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>上游模型选择 — 方案模板</title>
+    <link rel="stylesheet" href="../../apps/ui/public/styles/foundation/theme.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/foundation/base.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/components/buttons.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/components/panels.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/components/cards.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/components/forms.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/components/lists.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/features/config/billing.css">
+    <link rel="stylesheet" href="../../apps/ui/public/styles/pages/config.css">
+    <style>
+      /* Mock-only chrome. Everything inside .mock-surface is the real app CSS. */
+      body.mock-page {
+        background: var(--bg-app);
+        color: var(--text-main);
+        margin: 0;
+        padding: 32px 24px 72px;
+        font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      .mock-wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+      .mock-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+      .mock-head h1 { margin: 0 0 6px; font-size: 22px; }
+      .mock-head p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+      .mock-badge {
+        display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px;
+        background: var(--ctrl-bg); color: var(--text-secondary); border: 1px solid var(--border-color);
+      }
+      .mock-section {
+        background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 10px;
+        padding: 20px; display: flex; flex-direction: column; gap: 16px;
+      }
+      .mock-section > header { display: flex; flex-direction: column; gap: 6px; }
+      .mock-section > header h2 { margin: 0; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+      .mock-section > header p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+      .mock-notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+      .mock-note { border: 1px dashed var(--border-color); border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.6; }
+      .mock-note strong { display: block; margin-bottom: 4px; font-size: 12px; }
+      .mock-note.good strong { color: var(--success); }
+      .mock-note.bad strong { color: var(--warn); }
+      .mock-surface {
+        background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px;
+      }
+      .mock-surface-title {
+        font-size: 12px; color: var(--text-muted); margin-bottom: 12px; letter-spacing: 0;
+      }
+
+      /* Proposed pieces, styled with the app's own tokens. */
+      .upstream-status {
+        display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary);
+        padding: 8px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--ctrl-bg);
+        margin-bottom: 12px;
+      }
+      .upstream-status strong { color: var(--text-main); font-weight: 600; }
+      .upstream-status.is-follow strong { color: var(--text-secondary); font-weight: 600; }
+      .upstream-tag {
+        display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px;
+        font-size: 11px; background: var(--tool-badge-bg); color: var(--tool); border: 1px solid transparent;
+      }
+      .upstream-follow-row {
+        display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+        border: 1px dashed var(--border-color); background: transparent; color: var(--text-secondary);
+        border-radius: 8px; padding: 10px 12px; cursor: pointer; font: inherit;
+      }
+      .upstream-follow-row.is-selected { border-style: solid; border-color: var(--primary); color: var(--text-main); }
+      .upstream-row { display: flex; align-items: center; gap: 8px; }
+      .upstream-row .billing-model-card { flex: 1; }
+      .upstream-pick {
+        flex: none; font: inherit; font-size: 11px; padding: 6px 10px; border-radius: 7px;
+        border: 1px solid var(--border-color); background: var(--bg-panel); color: var(--text-secondary); cursor: pointer;
+      }
+      .upstream-pick.is-active { border-color: var(--primary); color: var(--primary); background: var(--ctrl-bg); }
+      .upstream-lock { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+      .upstream-lock input { accent-color: var(--primary); }
+      .mock-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .mock-table th, .mock-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-color); vertical-align: top; }
+      .mock-table th { color: var(--text-secondary); font-weight: 600; }
+    </style>
+  </head>
+  <body class="mock-page">
+    <div class="mock-wrap">
+      <div class="mock-head">
+        <div>
+          <h1>上游模型选择 — 方案模板</h1>
+          <p>
+            背景：原来的「真实上游模型」三选一（Default / Flash / Pro）已删除，现在模型列表的点击只切换右侧计费卡片。
+            目标是让「哪个模型真正服务请求」重新可选，且尽量复用已有的模型列表与计费卡片，不新增第三个控件。
+            以下四份是静态示意，不含后端。
+          </p>
+        </div>
+        <button type="button" class="mock-badge" id="themeToggle">切换深色</button>
+      </div>
+
+      <div class="mock-section">
+        <header>
+          <h2>约定</h2>
+          <p>四份方案都遵守同一套语义，区别只在交互落点。</p>
+        </header>
+        <table class="mock-table">
+          <thead>
+            <tr><th>状态</th><th>含义</th><th>写入的配置</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>跟随客户端</td><td>上游用 Codex 请求里指定的模型（现在的默认行为）</td><td><code>override = "default"</code></td></tr>
+            <tr><td>锁定模型</td><td>无论客户端要什么，都用选中的这个模型</td><td><code>override = "&lt;slug&gt;"</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 方案 A -->
+      <div class="mock-section" data-mock="A">
+        <header>
+          <h2>方案 A <span class="mock-badge">列表即选择器</span></h2>
+          <p>列表第一行是「跟随客户端」，点其他行直接把该模型设为上游。选中行带「上游」小标签，右侧计费卡片同步显示它的价格。</p>
+        </header>
+        <div class="mock-surface">
+          <div class="mock-surface-title">代理 → 模型行为</div>
+          <div class="upstream-status" data-status>
+            当前上游：<strong>跟随客户端</strong>
+          </div>
+          <div class="billing-split">
+            <div class="billing-catalog">
+              <button type="button" class="btn btn-secondary btn-icon-label">更新模型列表</button>
+              <div class="billing-model-list" data-list="A">
+                <button type="button" class="upstream-follow-row is-selected" data-target="default">
+                  跟随客户端 <small class="muted">使用请求里指定的模型</small>
+                </button>
+                <button type="button" class="billing-model-card" data-target="deepseek-v4-pro">
+                  <span class="billing-model-head">
+                    <span class="billing-model-name">DeepSeek V4 Pro</span>
+                  </span>
+                  <span class="billing-model-desc">deepseek-v4-pro</span>
+                </button>
+                <button type="button" class="billing-model-card" data-target="deepseek-v4-flash">
+                  <span class="billing-model-head">
+                    <span class="billing-model-name">DeepSeek V4 Flash</span>
+                  </span>
+                  <span class="billing-model-desc">deepseek-v4-flash</span>
+                </button>
+              </div>
+            </div>
+            <div class="billing-card-panel">
+              <div class="billing-rate-card">
+                <div class="billing-card-header">
+                  <div class="billing-model-meta">
+                    <strong data-rate-name>跟随客户端</strong>
+                    <small class="muted">计费按实际使用的模型计算</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="mock-notes">
+          <div class="mock-note good"><strong>优点</strong>零新增控件，列表已经有点击和选中态；点击行为从「看价格」变成「看价格并用于上游」，心智只有一个。</div>
+          <div class="mock-note bad"><strong>代价</strong>要看另一个模型的价格就会顺手把它设成上游，需要「跟随客户端」那一行足够显眼。</div>
+        </div>
+      </div>
+
+      <!-- 方案 B -->
+      <div class="mock-section" data-mock="B">
+        <header>
+          <h2>方案 B <span class="mock-badge">行内按钮</span></h2>
+          <p>点击行仍然是「查看价格」，每行右侧多一个「用于上游」按钮。顶部一条状态说明当前上游是谁。</p>
+        </header>
+        <div class="mock-surface">
+          <div class="mock-surface-title">代理 → 模型行为</div>
+          <div class="upstream-status" data-status>
+            当前上游：<strong>跟随客户端</strong>
+          </div>
+          <div class="billing-split">
+            <div class="billing-catalog">
+              <button type="button" class="btn btn-secondary btn-icon-label">更新模型列表</button>
+              <div class="billing-model-list" data-list="B">
+                <div class="upstream-row" data-target="default">
+                  <button type="button" class="billing-model-card is-selected">
+                    <span class="billing-model-head"><span class="billing-model-name">跟随客户端</span></span>
+                    <span class="billing-model-desc">使用请求里指定的模型</span>
+                  </button>
+                  <button type="button" class="upstream-pick is-active">用于上游</button>
+                </div>
+                <div class="upstream-row" data-target="deepseek-v4-pro">
+                  <button type="button" class="billing-model-card">
+                    <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Pro</span></span>
+                    <span class="billing-model-desc">deepseek-v4-pro</span>
+                  </button>
+                  <button type="button" class="upstream-pick">用于上游</button>
+                </div>
+                <div class="upstream-row" data-target="deepseek-v4-flash">
+                  <button type="button" class="billing-model-card">
+                    <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Flash</span></span>
+                    <span class="billing-model-desc">deepseek-v4-flash</span>
+                  </button>
+                  <button type="button" class="upstream-pick">用于上游</button>
+                </div>
+              </div>
+            </div>
+            <div class="billing-card-panel">
+              <div class="billing-rate-card">
+                <div class="billing-card-header">
+                  <div class="billing-model-meta">
+                    <strong data-rate-name>跟随客户端</strong>
+                    <small class="muted">当前查看的模型</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="mock-notes">
+          <div class="mock-note good"><strong>优点</strong>「浏览价格」和「用于上游」两个动作彻底分开，不会误操作。</div>
+          <div class="mock-note bad"><strong>代价</strong>每行多一个按钮，列表更拥挤；默认那行是唯一没有价格的行，样式要单独处理。</div>
+        </div>
+      </div>
+
+      <!-- 方案 C -->
+      <div class="mock-section" data-mock="C">
+        <header>
+          <h2>方案 C <span class="mock-badge">卡片头部锁定</span></h2>
+          <p>列表保持现在的含义（只切换查看的价格）。右侧计费卡片头部加一个开关：把正在查看的模型锁为上游。</p>
+        </header>
+        <div class="mock-surface">
+          <div class="mock-surface-title">代理 → 模型行为</div>
+          <div class="upstream-status is-follow" data-status>
+            当前上游：<strong>跟随客户端</strong>
+          </div>
+          <div class="billing-split">
+            <div class="billing-catalog">
+              <button type="button" class="btn btn-secondary btn-icon-label">更新模型列表</button>
+              <div class="billing-model-list" data-list="C">
+                <button type="button" class="billing-model-card is-selected" data-target="deepseek-v4-pro">
+                  <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Pro</span></span>
+                  <span class="billing-model-desc">deepseek-v4-pro</span>
+                </button>
+                <button type="button" class="billing-model-card" data-target="deepseek-v4-flash">
+                  <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Flash</span></span>
+                  <span class="billing-model-desc">deepseek-v4-flash</span>
+                </button>
+              </div>
+            </div>
+            <div class="billing-card-panel">
+              <div class="billing-rate-card">
+                <div class="billing-card-header">
+                  <div class="billing-model-meta">
+                    <strong data-rate-name>DeepSeek V4 Pro</strong>
+                    <small class="muted">每 100 万 Token</small>
+                  </div>
+                  <label class="upstream-lock">
+                    <input type="checkbox" data-lock>
+                    锁定为上游
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="mock-notes">
+          <div class="mock-note good"><strong>优点</strong>新增面积最小：一个开关。浏览价格的路径完全不变，误操作成本最低。</div>
+          <div class="mock-note bad"><strong>代价</strong>两步操作（先选模型，再锁定）；列表上看不出哪个是上游，得看顶部状态行。</div>
+        </div>
+      </div>
+
+      <!-- 方案 D -->
+      <div class="mock-section" data-mock="D">
+        <header>
+          <h2>方案 D <span class="mock-badge">独立下拉</span></h2>
+          <p>模型列表完全不动，在它上面加一行「上游模型」下拉，选项由 catalog 生成，外加一个「跟随客户端」。</p>
+        </header>
+        <div class="mock-surface">
+          <div class="mock-surface-title">代理 → 模型行为</div>
+          <div class="setting-item">
+            <span>
+              <label>上游模型</label>
+              <small class="muted">真实发往上游的模型。跟随客户端时使用请求里指定的模型。</small>
+            </span>
+            <select class="inline-control" style="width: 220px">
+              <option>跟随客户端</option>
+              <option>DeepSeek V4 Pro（deepseek-v4-pro）</option>
+              <option>DeepSeek V4 Flash（deepseek-v4-flash）</option>
+            </select>
+          </div>
+          <div class="setting-divider"></div>
+          <div class="billing-split">
+            <div class="billing-catalog">
+              <button type="button" class="btn btn-secondary btn-icon-label">更新模型列表</button>
+              <div class="billing-model-list">
+                <button type="button" class="billing-model-card is-selected">
+                  <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Pro</span></span>
+                  <span class="billing-model-desc">deepseek-v4-pro</span>
+                </button>
+                <button type="button" class="billing-model-card">
+                  <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Flash</span></span>
+                  <span class="billing-model-desc">deepseek-v4-flash</span>
+                </button>
+              </div>
+            </div>
+            <div class="billing-card-panel">
+              <div class="billing-rate-card">
+                <div class="billing-card-header">
+                  <div class="billing-model-meta">
+                    <strong>DeepSeek V4 Pro</strong>
+                    <small class="muted">每 100 万 Token</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="mock-notes">
+          <div class="mock-note good"><strong>优点</strong>最接近被删掉的那个控件，语义直白；下拉由 catalog 生成，不再是写死的 Flash / Pro。</div>
+          <div class="mock-note bad"><strong>代价</strong>多了一个控件，且和下方列表可能显示不一致（下拉选了 Pro、列表在看 Flash）。</div>
+        </div>
+      </div>
+
+      <div class="mock-section">
+        <header>
+          <h2>我的倾向</h2>
+        </header>
+        <p style="margin:0;font-size:13px;line-height:1.8;color:var(--text-secondary)">
+          A 最省，但它把「看价格」和「改上游」绑在一起；D 最直白，代价是多一个控件。
+          如果只选一个，我建议 A 的列表加上 C 的卡片开关：列表点击负责选择，卡片上的开关决定这一选择是否真的作用于上游，
+          同时保留顶部状态行。这样既复用了现有组件，也不会因为想看一眼价格就把上游改掉。等你定方向后我再落实现。
+        </p>
+      </div>
+    </div>
+
+    <script>
+      // Theme toggle so both palettes can be checked.
+      const toggle = document.getElementById("themeToggle");
+      if (new URLSearchParams(location.search).get("theme") === "dark") {
+        document.documentElement.dataset.theme = "dark";
+        toggle.textContent = "切换浅色";
+      }
+      toggle.addEventListener("click", () => {
+        const dark = document.documentElement.dataset.theme === "dark";
+        document.documentElement.dataset.theme = dark ? "light" : "dark";
+        toggle.textContent = dark ? "切换深色" : "切换浅色";
+      });
+
+      // Minimal interaction so each proposal can be felt: clicking a row selects
+      // it, the status line follows, and the "用于上游" buttons mark the target.
+      function statusFor(section, label) {
+        const status = section.querySelector("[data-status]");
+        if (!status) return;
+        status.classList.toggle("is-follow", label === "跟随客户端");
+        status.innerHTML = "当前上游：<strong>" + label + "</strong>";
+      }
+
+      function labelFor(container, target, fallback) {
+        const row = container.querySelector('[data-target="' + target + '"]');
+        if (target === "default") return "跟随客户端";
+        const name = row && row.querySelector(".billing-model-name");
+        return name ? name.textContent.trim() : fallback;
+      }
+
+      document.querySelectorAll('[data-mock="A"]').forEach((section) => {
+        const list = section.querySelector('[data-list="A"]');
+        const rateName = section.querySelector("[data-rate-name]");
+        list.addEventListener("click", (event) => {
+          const row = event.target.closest("[data-target]");
+          if (!row) return;
+          list.querySelectorAll("[data-target]").forEach((item) => {
+            item.classList.toggle("is-selected", item === row);
+          });
+          const target = row.dataset.target;
+          const label = labelFor(list, target, target);
+          rateName.textContent = label;
+          statusFor(section, label);
+        });
+      });
+
+      document.querySelectorAll('[data-mock="B"]').forEach((section) => {
+        const list = section.querySelector('[data-list="B"]');
+        list.addEventListener("click", (event) => {
+          const pick = event.target.closest(".upstream-pick");
+          const row = event.target.closest("[data-target]");
+          if (!row) return;
+          if (pick || event.target.closest(".billing-model-card")) {
+            list.querySelectorAll(".upstream-pick").forEach((button) => {
+              button.classList.toggle("is-active", button === row.querySelector(".upstream-pick"));
+            });
+            list.querySelectorAll(".billing-model-card").forEach((card) => {
+              card.classList.toggle("is-selected", card === row.querySelector(".billing-model-card"));
+            });
+            const target = row.dataset.target;
+            const label = labelFor(list, target, target);
+            section.querySelector("[data-rate-name]").textContent = label;
+            statusFor(section, label);
+          }
+        });
+      });
+
+      document.querySelectorAll('[data-mock="C"]').forEach((section) => {
+        const list = section.querySelector('[data-list="C"]');
+        const lock = section.querySelector("[data-lock]");
+        const rateName = section.querySelector("[data-rate-name]");
+        let viewed = "deepseek-v4-pro";
+        const sync = () => {
+          const label = labelFor(list, viewed, viewed);
+          rateName.textContent = label;
+          statusFor(section, lock.checked ? label : "跟随客户端");
+        };
+        list.addEventListener("click", (event) => {
+          const row = event.target.closest("[data-target]");
+          if (!row) return;
+          viewed = row.dataset.target;
+          list.querySelectorAll("[data-target]").forEach((item) => {
+            item.classList.toggle("is-selected", item === row);
+          });
+          sync();
+        });
+        lock.addEventListener("change", sync);
+        sync();
+      });
+    </script>
+  </body>
+</html>
