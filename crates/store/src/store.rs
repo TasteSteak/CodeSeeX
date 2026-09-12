@@ -3976,11 +3976,31 @@ fn usage_sessions_from_inner(
         .iter()
         .map(|turn| turn.id.as_str())
         .collect::<HashSet<_>>();
-    let mut handoff_ids_by_final_id = orphan_handoffs_by_final_turn(inner, turn_history);
-    let mut guard_stop_ids_by_final_id = guard_stopped_requests_by_final_turn(inner, turn_history);
+    // Each finished turn's continuation chain is walked once and reused for
+    // both the rows and the "already accounted for" set.
+    let chains = turn_history
+        .iter()
+        .map(|turn| {
+            (
+                turn.id.clone(),
+                usage_chain_for_final_turn(inner, &turn.id),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let chain_ids = chains
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let finals = usage_final_anchors(inner, turn_history);
+    let mut handoff_ids_by_final_id = usage_requests_by_final_turn(inner, &finals, |request| {
+        request_lifecycle(request) == "client_tool_handoff" && !chain_ids.contains(&request.id)
+    });
+    let mut guard_stop_ids_by_final_id =
+        usage_requests_by_final_turn(inner, &finals, request_has_guard_stopped);
 
     for final_turn in turn_history {
-        let chain = usage_chain_for_final_turn(inner, &final_turn.id);
+        let chain = chains.get(&final_turn.id).cloned().unwrap_or_default();
         let mut rows = Vec::new();
         for id in chain {
             if let Some(turn) = billable_by_id.remove(&id) {
@@ -4143,14 +4163,8 @@ fn usage_chain_for_final_turn(inner: &StoreInner, final_id: &str) -> Vec<String>
     newest_first
 }
 
-fn orphan_handoffs_by_final_turn(
-    inner: &StoreInner,
-    turn_history: &[RequestTurn],
-) -> HashMap<String, Vec<String>> {
-    let chain_ids = turn_history
-        .iter()
-        .flat_map(|turn| usage_chain_for_final_turn(inner, &turn.id))
-        .collect::<HashSet<_>>();
+/// The finished turns a handed-back round trip may be anchored to.
+fn usage_final_anchors(inner: &StoreInner, turn_history: &[RequestTurn]) -> Vec<UsageFinalAnchor> {
     let mut finals = turn_history
         .iter()
         .filter_map(|turn| {
@@ -4159,7 +4173,6 @@ fn orphan_handoffs_by_final_turn(
                 id: turn.id.clone(),
                 created_at: request.created_at,
                 summary_key: usage_summary_key(request),
-                full_context_key: usage_full_context_key(request),
                 prompt_cache_key: usage_prompt_cache_key(request),
             })
         })
@@ -4169,55 +4182,22 @@ fn orphan_handoffs_by_final_turn(
             .cmp(&right.created_at)
             .then(left.id.cmp(&right.id))
     });
-    let mut output: HashMap<String, Vec<String>> = HashMap::new();
-    for request in inner
-        .request_order
-        .iter()
-        .filter_map(|id| inner.requests.get(id))
-    {
-        if chain_ids.contains(&request.id) || request_lifecycle(request) != "client_tool_handoff" {
-            continue;
-        }
-        let Some(anchor_id) = usage_final_anchor_for_handoff(request, &finals) else {
-            continue;
-        };
-        output
-            .entry(anchor_id)
-            .or_default()
-            .push(request.id.clone());
-    }
-    output
+    finals
 }
 
-fn guard_stopped_requests_by_final_turn(
+/// Groups the requests `matches` selects by the finished turn they belong to.
+fn usage_requests_by_final_turn(
     inner: &StoreInner,
-    turn_history: &[RequestTurn],
+    finals: &[UsageFinalAnchor],
+    matches: impl Fn(&StoredRequest) -> bool,
 ) -> HashMap<String, Vec<String>> {
-    let mut finals = turn_history
-        .iter()
-        .filter_map(|turn| {
-            let request = inner.requests.get(&turn.id)?;
-            Some(UsageFinalAnchor {
-                id: turn.id.clone(),
-                created_at: request.created_at,
-                summary_key: usage_summary_key(request),
-                full_context_key: usage_full_context_key(request),
-                prompt_cache_key: usage_prompt_cache_key(request),
-            })
-        })
-        .collect::<Vec<_>>();
-    finals.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then(left.id.cmp(&right.id))
-    });
     let mut output: HashMap<String, Vec<String>> = HashMap::new();
     for request in inner
         .request_order
         .iter()
         .filter_map(|id| inner.requests.get(id))
     {
-        if !request_has_guard_stopped(request) {
+        if !matches(request) {
             continue;
         }
         let Some(anchor_id) = usage_final_anchor_for_handoff(request, &finals) else {
@@ -4236,7 +4216,6 @@ struct UsageFinalAnchor {
     id: String,
     created_at: DateTime<Utc>,
     summary_key: Option<String>,
-    full_context_key: Option<String>,
     prompt_cache_key: Option<String>,
 }
 
@@ -4252,7 +4231,6 @@ fn usage_final_anchor_for_handoff(
     finals: &[UsageFinalAnchor],
 ) -> Option<String> {
     let summary_key = usage_summary_key(handoff);
-    let full_context_key = usage_full_context_key(handoff);
     let prompt_cache_key = usage_prompt_cache_key(handoff);
     let mut fallback = None;
     for final_turn in finals {
@@ -4260,9 +4238,6 @@ fn usage_final_anchor_for_handoff(
             continue;
         }
         if summary_key.is_some() && summary_key == final_turn.summary_key {
-            return Some(final_turn.id.clone());
-        }
-        if full_context_key.is_some() && full_context_key == final_turn.full_context_key {
             return Some(final_turn.id.clone());
         }
         let delay = final_turn
@@ -4299,16 +4274,11 @@ fn row_sort_ts(inner: &StoreInner, request_id: &str) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
+/// The user turn a request belongs to, as the compacted user summary itself:
+/// compared for equality only and bounded by `MAX_USAGE_SESSION_TITLE_CHARS`, so
+/// hashing it would only add a 64-bit collision risk.
 fn usage_summary_key(request: &StoredRequest) -> Option<String> {
-    latest_user_summary(request).map(|summary| stable_hash_hex(summary.as_bytes()))
-}
-
-fn usage_full_context_key(request: &StoredRequest) -> Option<String> {
-    request
-        .input
-        .pointer("/_codeseex_runtime/original_input_hash")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+    latest_user_summary(request)
 }
 
 fn usage_prompt_cache_key(request: &StoredRequest) -> Option<String> {
@@ -4328,7 +4298,6 @@ fn request_prompt_cache_key(request: &StoredRequest) -> Option<String> {
 fn usage_non_final_session_key(request: &StoredRequest) -> String {
     usage_summary_key(request)
         .map(|key| format!("summary:{key}"))
-        .or_else(|| usage_full_context_key(request).map(|key| format!("full_context:{key}")))
         .or_else(|| usage_prompt_cache_key(request).map(|key| format!("prompt_cache:{key}")))
         .unwrap_or_else(|| format!("request:{}", request.id))
 }
@@ -4535,7 +4504,6 @@ fn usage_active_session_anchor(
     inner: &StoreInner,
 ) -> Option<String> {
     let summary_key = usage_summary_key(request);
-    let full_context_key = usage_full_context_key(request);
     let prompt_cache_key = usage_prompt_cache_key(request);
     let mut fallback = None;
     for session in sessions.iter().rev() {
@@ -4555,10 +4523,6 @@ fn usage_active_session_anchor(
             continue;
         }
         if summary_key.is_some() && summary_key == usage_summary_key(anchor_request) {
-            return Some(session.id.clone());
-        }
-        if full_context_key.is_some() && full_context_key == usage_full_context_key(anchor_request)
-        {
             return Some(session.id.clone());
         }
         if session.status == "running"
@@ -6729,7 +6693,6 @@ mod tests {
             id: id.to_owned(),
             created_at,
             summary_key,
-            full_context_key: None,
             prompt_cache_key: Some(stable_hash_hex(b"same-thread")),
         }
     }
