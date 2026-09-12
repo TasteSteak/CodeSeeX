@@ -237,6 +237,9 @@ pub struct RequestTurn {
     pub requested_model: String,
     pub reasoning_effort: String,
     pub lifecycle: String,
+    /// The round itself failed, so the row stays visible as a failure even when
+    /// it belongs to a turn that finished.
+    pub failed: bool,
     pub conversation_turn: bool,
     pub billable: bool,
     pub completed_at: String,
@@ -4329,12 +4332,9 @@ fn usage_session_from_rows(
     let output_tokens: u64 = rows.iter().map(|row| row.output_tokens).sum();
     let total_tokens: u64 = rows.iter().map(|row| row.total_tokens).sum();
     let request_ms = rows.iter().map(|row| row.request_ms).sum();
-    let status = if rows.iter().any(|row| row.status == "failed") {
-        "failed"
-    } else {
-        "completed"
-    }
-    .to_owned();
+    // The turn's own result decides the session: a failed round inside a turn
+    // that finished stays a failed *row*, it does not fail the session.
+    let status = usage_session_status(&rows);
     let (title, title_source) = usage_session_title(anchor, anchor_request);
     let segments = usage_session_segments(inner, &rows);
     let vision_tokens = usage_vision_token_totals(&segments);
@@ -4459,6 +4459,7 @@ fn usage_non_final_session_from_rows(
         requested_model: anchor_row.requested_model.clone(),
         reasoning_effort: anchor_row.reasoning_effort.clone(),
         lifecycle: anchor_row.lifecycle.clone(),
+        failed: anchor_row.status == "failed",
         conversation_turn: true,
         billable: anchor_row.billable,
         completed_at: anchor_row.completed_at.clone(),
@@ -4473,12 +4474,7 @@ fn usage_non_final_session_from_rows(
     let output_tokens: u64 = rows.iter().map(|row| row.output_tokens).sum();
     let total_tokens: u64 = rows.iter().map(|row| row.total_tokens).sum();
     let request_ms = rows.iter().map(|row| row.request_ms).sum();
-    let status = if rows.iter().any(|row| row.status == "failed") {
-        "failed"
-    } else {
-        "completed"
-    }
-    .to_owned();
+    let status = usage_session_status(&rows);
     let (title, title_source) = usage_session_title(&title_turn, anchor_request);
     let segments = usage_session_segments(inner, &rows);
     let vision_tokens = usage_vision_token_totals(&segments);
@@ -4563,15 +4559,25 @@ fn merge_active_usage_session(existing: &mut UsageSession, active: UsageSession)
     existing.technical_details.extend(active.technical_details);
 }
 
+/// A session failed only when its own last row failed: a failed round inside a
+/// turn that then finished stays a failed row and leaves the turn completed.
+fn usage_session_status(rows: &[UsageSessionRow]) -> String {
+    if rows.last().is_some_and(|row| row.status == "failed") {
+        "failed".to_owned()
+    } else {
+        "completed".to_owned()
+    }
+}
+
 fn usage_session_row(turn: &RequestTurn, is_final: bool) -> UsageSessionRow {
-    let kind = if is_final {
+    let kind = if turn.failed {
+        "failed_reply"
+    } else if is_final {
         "final_reply"
     } else if turn.lifecycle == "service_ephemeral" {
         "service"
     } else if turn.lifecycle == "client_tool_handoff" {
         "intermediate_reply"
-    } else if turn.lifecycle == "failed_billable" {
-        "failed_reply"
     } else {
         "intermediate_reply"
     };
@@ -4584,12 +4590,7 @@ fn usage_session_row(turn: &RequestTurn, is_final: bool) -> UsageSessionRow {
         requested_model: turn.requested_model.clone(),
         reasoning_effort: turn.reasoning_effort.clone(),
         lifecycle: turn.lifecycle.clone(),
-        status: if turn.lifecycle == "failed_billable" {
-            "failed"
-        } else {
-            "completed"
-        }
-        .to_owned(),
+        status: if turn.failed { "failed" } else { "completed" }.to_owned(),
         billable: turn.billable,
         completed_at: turn.completed_at.clone(),
         cached_input_tokens: turn.cached_input_tokens,
@@ -5353,6 +5354,16 @@ fn request_lifecycle(request: &StoredRequest) -> String {
     "final_turn".to_owned()
 }
 
+/// Whether the round itself failed. Separate from `lifecycle` because a failed
+/// round can still belong to a turn, which is what the lifecycle records; a
+/// response the proxy had to downgrade (`failed_billable`) counts as failed too.
+fn request_failed(request: &StoredRequest) -> bool {
+    matches!(
+        request.status,
+        RequestStatus::Failed | RequestStatus::Interrupted
+    ) || request_lifecycle(request) == "failed_billable"
+}
+
 fn turn_from_request(request: &StoredRequest) -> Option<RequestTurn> {
     let usage = usage_value(&request.response).unwrap_or(&Value::Null);
     let cached_input_tokens = first_u64(
@@ -5411,6 +5422,7 @@ fn turn_from_request(request: &StoredRequest) -> Option<RequestTurn> {
             .to_owned(),
         reasoning_effort: request_reasoning_effort(request),
         lifecycle: request_lifecycle(request),
+        failed: request_failed(request),
         conversation_turn: request_is_completed_final_turn(request),
         billable: request_has_billable_usage(request),
         completed_at: request.updated_at.to_rfc3339(),
@@ -6739,6 +6751,92 @@ mod tests {
             usage_final_anchor_for_handoff(&handoff, &finals),
             Some("resp_summaryless_final".to_owned())
         );
+    }
+
+    /// A round that failed still belongs to its turn: the row keeps the failure,
+    /// the turn itself stays completed.
+    #[tokio::test]
+    async fn runtime_summary_folds_a_failed_handoff_into_its_turn() {
+        let dir = temp_dir("usage-session-failed-handoff");
+        let store = Store::open(&dir).await.expect("open store");
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "prompt_cache_key": "failed-handoff-thread",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "run the failing tool" }]
+            }]
+        });
+
+        store
+            .checkpoint_request(
+                "resp_failed_handoff",
+                None,
+                Some("deepseek-v4-flash"),
+                &request,
+            )
+            .await
+            .expect("checkpoint failed handoff");
+        store
+            .finish_request(
+                "resp_failed_handoff",
+                RequestStatus::Failed,
+                Some(&json!({
+                    "model": "deepseek-v4-flash",
+                    "usage": {
+                        "cached_input_tokens": 10,
+                        "cache_miss_input_tokens": 5,
+                        "output_tokens": 1,
+                        "total_tokens": 16
+                    }
+                })),
+                Some(&json!({ "codeseex_lifecycle": "client_tool_handoff" })),
+            )
+            .await
+            .expect("finish failed handoff");
+
+        store
+            .checkpoint_request(
+                "resp_failed_handoff_final",
+                None,
+                Some("deepseek-v4-flash"),
+                &request,
+            )
+            .await
+            .expect("checkpoint final");
+        store
+            .finish_request(
+                "resp_failed_handoff_final",
+                RequestStatus::Completed,
+                Some(&json!({
+                    "model": "deepseek-v4-flash",
+                    "usage": {
+                        "cached_input_tokens": 20,
+                        "cache_miss_input_tokens": 5,
+                        "output_tokens": 2,
+                        "total_tokens": 27
+                    }
+                })),
+                None,
+            )
+            .await
+            .expect("finish final");
+
+        let summary = store.runtime_summary(10).await.expect("summary");
+        assert_eq!(summary.turn_history.len(), 1);
+        assert_eq!(summary.usage_sessions.len(), 1);
+        let session = &summary.usage_sessions[0];
+        assert_eq!(session.id, "resp_failed_handoff_final");
+        assert_eq!(session.rows.len(), 2);
+        assert_eq!(session.rows[0].lifecycle, "client_tool_handoff");
+        assert_eq!(session.rows[0].kind, "failed_reply");
+        assert_eq!(session.rows[0].status, "failed");
+        assert_eq!(session.rows[1].kind, "final_reply");
+        assert_eq!(session.status, "completed");
+        assert_eq!(session.cache_miss_input_tokens, 10);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

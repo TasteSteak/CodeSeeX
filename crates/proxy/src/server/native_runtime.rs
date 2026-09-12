@@ -1042,13 +1042,12 @@ async fn native_hosted_client_tool_group(
         "web_search_backend": web_search_backend_label(config.web_search_backend),
         "provider_tool_calls": group.calls.len()
     });
-    if completed {
-        // This turn hands Codex-owned tool calls back to the client, so it is one
-        // round trip of a longer user turn. Without the marker the store reads
-        // every round trip as a finished turn of its own, which is what split a
-        // single request into one usage session per model call.
-        detail["codeseex_lifecycle"] = json!("client_tool_handoff");
-    }
+    // This turn hands Codex-owned tool calls back to the client, so it is one
+    // round trip of a longer user turn - a failed round stays a failed row in
+    // that turn. Without the marker the store reads every round trip as a
+    // finished turn of its own, which is what split a single turn into one
+    // usage session per model call.
+    detail["codeseex_lifecycle"] = json!("client_tool_handoff");
     let _ = state
         .store
         .record_event(
@@ -1484,7 +1483,7 @@ async fn native_non_streaming_response(
         "web_search_backend": web_search_backend_label(web_search_backend),
         "provider_tool_calls": provider_tool_calls
     });
-    if native_client_tool_handoff(response_completed, provider_tool_calls) {
+    if provider_tool_calls > 0 {
         detail["codeseex_lifecycle"] = json!("client_tool_handoff");
     }
     let _ = state
@@ -1689,10 +1688,7 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                 "provider_tool_calls": provider_tool_calls,
                 "tool_group_issue": tool_group_issue
             });
-            if native_client_tool_handoff(
-                finalization == NativeStreamFinalization::Completed,
-                provider_tool_calls,
-            ) {
+            if provider_tool_calls > 0 {
                 detail["codeseex_lifecycle"] = json!("client_tool_handoff");
             }
             let _ = state.store.record_event(
@@ -1913,15 +1909,6 @@ fn native_transport_diagnostic(
                 .sum::<usize>()
         }))
     })
-}
-
-/// A completed native response that still carries tool calls is a handoff: the
-/// client executes them and sends the next request of the *same* turn. The store
-/// keys off this marker to fold every round trip of a turn into one usage
-/// session, so the page shows the intermediate replies instead of one session
-/// per request.
-fn native_client_tool_handoff(completed: bool, provider_tool_calls: usize) -> bool {
-    completed && provider_tool_calls > 0
 }
 
 fn native_stream_status(finalization: NativeStreamFinalization) -> &'static str {
