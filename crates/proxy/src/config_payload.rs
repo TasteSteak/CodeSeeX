@@ -82,10 +82,8 @@ pub(crate) fn user_config_from_payload(
         let experimental = config
             .experimental
             .get_or_insert_with(UserExperimentalConfig::default);
-        if payload.get("EXPERIMENT_REASONING_SUMMARY_MODE").is_some() {
-            experimental.reasoning_summary_mode =
-                value_string(payload, "EXPERIMENT_REASONING_SUMMARY_MODE");
-        }
+        experimental.reasoning_summary_mode =
+            value_string(payload, "EXPERIMENT_REASONING_SUMMARY_MODE");
     }
 
     if payload.get("BILLING_PEAK_VALLEY_ENABLED").is_some()

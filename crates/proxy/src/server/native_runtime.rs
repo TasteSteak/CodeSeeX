@@ -25,10 +25,10 @@ use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
 
 // The provider's own `reasoning_text` is forwarded verbatim and is not
 // configurable: DeepSeek rejects a replay that drops it, so it is what keeps a
-// conversation continuable. `[experimental] reasoning_summary` decides whether
-// CodeSeeX additionally mirrors that text as the `summary` Codex renders, and
-// `reasoning_summary_mode` decides how much of it the mirror carries. Both are
-// read per request, so they apply without rebuilding the proxy.
+// conversation continuable. `[experimental] reasoning_summary_mode` decides
+// whether and how much of that text CodeSeeX additionally mirrors as the
+// `summary` Codex renders; `none` is the off switch. It is read per request, so
+// it applies without rebuilding the proxy.
 //
 // Marked observation from the manual runs (checkpoint commit 2c9fa2a holds the
 // behaviour from before the summary option existed): an intermediate reply
