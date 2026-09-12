@@ -4888,7 +4888,7 @@ function renderModelLock(model) {
 
 /// MingCute lock-fill (MIT); inline so the icon follows the button colour.
 const MODEL_LOCK_ICON =
-  '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725 1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>';
+  '<svg viewBox="3 2 18 20" preserveAspectRatio="xMaxYMid meet" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725 1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>';
 
 /// Slugs the backend can actually pin; anything else would save nothing.
 function upstreamModelChoices() {
