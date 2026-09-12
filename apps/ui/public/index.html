@@ -313,10 +313,12 @@ LICENSE AGPL-3.0-only</div>
 
                 <div class="setting-item">
                   <span>
-                    <span id="reasoningSummaryLabel" data-i18n="reasoningSummaryLabel">Thinking chain</span>
-                    <small class="muted" data-i18n="reasoningSummaryHint">Decides how much of the provider's reasoning text is mirrored into the thinking chain. The provider's own reasoning text is always forwarded unchanged, so this only affects what the chain shows.</small>
+                    <span id="reasoningSummaryLabel" data-i18n="reasoningSummaryLabel">Thinking chain display</span>
+                    <small class="muted" data-i18n="reasoningSummaryHint">Only decides how much of the thinking chain appears in the Codex window. The upstream model keeps thinking exactly as before, the conversation still continues, and nothing here changes the request sent to the model.</small>
                   </span>
                   <div class="segmented-control compact-segmented-control">
+                    <input type="radio" name="EXPERIMENT_REASONING_SUMMARY_MODE" id="summary_mode_none" value="none">
+                    <label for="summary_mode_none" data-i18n="reasoningSummaryMode_none">Hidden</label>
                     <input type="radio" name="EXPERIMENT_REASONING_SUMMARY_MODE" id="summary_mode_smart" value="smart" checked>
                     <label for="summary_mode_smart" data-i18n="reasoningSummaryMode_smart">Smart</label>
                     <input type="radio" name="EXPERIMENT_REASONING_SUMMARY_MODE" id="summary_mode_fixed" value="fixed">

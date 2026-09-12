@@ -26,7 +26,7 @@ const RUNTIME_STATUS_STOPPING = "stopping";
 const ENABLED_TOOLS_KEY = "ENABLED_TOOLS";
 const DEFAULT_TEMPERATURE_PRESET = "default";
 const DEFAULT_REASONING_SUMMARY_MODE = "smart";
-const REASONING_SUMMARY_MODES = ["smart", "fixed", "full"];
+const REASONING_SUMMARY_MODES = ["none", "smart", "fixed", "full"];
 const FALLBACK_PEAK_VALLEY = Object.freeze({
   enabled: true,
   timezone: "Asia/Shanghai",

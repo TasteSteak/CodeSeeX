@@ -1945,6 +1945,7 @@ fn reasoning_summary_mode_label(
     value: codeseex_core::config::ReasoningSummaryMode,
 ) -> &'static str {
     match value {
+        codeseex_core::config::ReasoningSummaryMode::None => "none",
         codeseex_core::config::ReasoningSummaryMode::Smart => "smart",
         codeseex_core::config::ReasoningSummaryMode::Fixed => "fixed",
         codeseex_core::config::ReasoningSummaryMode::Full => "full",

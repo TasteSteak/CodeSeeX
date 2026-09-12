@@ -64,11 +64,14 @@ impl Default for ExperimentalConfig {
 
 /// How much of the provider's own reasoning text the mirrored summary carries.
 ///
-/// The provider text itself is never touched; this only shapes the copy Codex
-/// renders, so every mode stays replayable.
+/// The provider text itself is never touched and the upstream model keeps
+/// thinking exactly as before; this only shapes the copy Codex renders, so every
+/// mode stays replayable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningSummaryMode {
+    /// Do not mirror anything; the thinking chain stays empty.
+    None,
     /// Keep the opening point, bounded by the shared budget.
     #[default]
     Smart,
@@ -83,13 +86,14 @@ impl ReasoningSummaryMode {
     pub const fn budget(self) -> Option<usize> {
         match self {
             Self::Smart | Self::Fixed => Some(400),
-            Self::Full => None,
+            Self::None | Self::Full => None,
         }
     }
 }
 
 pub fn parse_reasoning_summary_mode(value: &str) -> Option<ReasoningSummaryMode> {
     match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" | "disabled" => Some(ReasoningSummaryMode::None),
         "smart" | "intelligent" => Some(ReasoningSummaryMode::Smart),
         "fixed" | "trimmed" | "truncate" => Some(ReasoningSummaryMode::Fixed),
         "full" | "complete" => Some(ReasoningSummaryMode::Full),

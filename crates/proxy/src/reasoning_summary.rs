@@ -69,6 +69,7 @@ impl SummaryProjector {
 /// The complete summary for a finished piece of reasoning text.
 pub(crate) fn project(text: &str, mode: ReasoningSummaryMode) -> &str {
     match mode {
+        ReasoningSummaryMode::None => "",
         ReasoningSummaryMode::Full => text,
         ReasoningSummaryMode::Fixed => trim_to_budget(text, mode),
         ReasoningSummaryMode::Smart => trim_to_budget(smart_prefix(text), mode),
@@ -81,6 +82,9 @@ pub(crate) fn project(text: &str, mode: ReasoningSummaryMode) -> &str {
 /// client never receives text the final projection could drop. `Full` mirrors
 /// the text as it arrives.
 fn streamable_len(text: &str, mode: ReasoningSummaryMode) -> usize {
+    if mode == ReasoningSummaryMode::None {
+        return 0;
+    }
     if mode == ReasoningSummaryMode::Full {
         return text.len();
     }
@@ -236,6 +240,14 @@ mod tests {
         let text = "First paragraph.\n\nSecond paragraph that keeps going.";
         assert_eq!(project(text, mode("full")), text);
         assert_eq!(project("short", mode("full")), "short");
+    }
+
+    #[test]
+    fn none_mirrors_nothing() {
+        let mut projector = SummaryProjector::new(mode("none"));
+        assert_eq!(projector.push("nothing should show."), None);
+        assert_eq!(projector.finish(), None);
+        assert_eq!(projector.summary(), "");
     }
 
     #[test]

@@ -37,10 +37,11 @@ use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
 
 /// The summary mirror for this request: `None` when it is turned off.
 fn reasoning_summary_mode(config: &AppConfig) -> Option<ReasoningSummaryMode> {
-    config
-        .experimental
-        .reasoning_summary
-        .then_some(config.experimental.reasoning_summary_mode)
+    match config.experimental.reasoning_summary_mode {
+        ReasoningSummaryMode::None => None,
+        mode if config.experimental.reasoning_summary => Some(mode),
+        _ => None,
+    }
 }
 
 pub(super) async fn dispatch_if_selected(
