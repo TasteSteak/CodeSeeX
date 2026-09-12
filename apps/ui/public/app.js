@@ -47,7 +47,6 @@ const READ_ONLY_CONFIG_KEYS = new Set([
   "CATALOG",
   "CATALOG_MODELS",
   "CATALOG_STATUS",
-  "UPSTREAM_MODEL_CHOICES",
 ]);
 const catalogState = {
   revision: "",
@@ -243,7 +242,6 @@ let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
 let latestAdapter = null;
 let latestUpstreamModelOverride = null;
-let latestUpstreamModelChoices = [];
 let latestWebSearchBackend = "local";
 let latestCatalogRuntimeDiagnostic = null;
 let codexRuntimeVerificationInFlight = false;
@@ -603,6 +601,9 @@ async function refreshCatalogDocument() {
     const added = catalogModels().filter((model) => !knownSlugs.has(model.slug)).length;
     currentBillingRatesSignature = "";
     renderBillingCatalog();
+    // The tray mirrors the catalog, so a pull that changed the model set has to
+    // rebuild it, exactly like a config save does.
+    if (isTauriRuntime()) desktopInvoke("desktop_refresh_tray").catch(() => {});
     flashCatalogLabel(els.catalogRefreshLabel, "catalogFetchModels", added > 0 ? `${t("catalogFetchAdded")} +${added}` : t("catalogFetchUpToDate"));
   } catch (error) {
     flashCatalogLabel(els.catalogRefreshLabel, "catalogFetchModels", t("catalogFetchFailed"));
@@ -1464,9 +1465,6 @@ function renderConfig(config) {
   latestUpstreamModelOverride = config.UPSTREAM_MODEL_OVERRIDE == null
     ? null
     : String(config.UPSTREAM_MODEL_OVERRIDE);
-  latestUpstreamModelChoices = Array.isArray(config.UPSTREAM_MODEL_CHOICES)
-    ? config.UPSTREAM_MODEL_CHOICES.map((value) => String(value))
-    : [];
   setRadioValue("NETWORK_PROXY_MODE", normalizeNetworkProxyMode(config.NETWORK_PROXY_MODE || config.WEB_SEARCH_PROXY_MODE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
@@ -4890,9 +4888,14 @@ function renderModelLock(model) {
 const MODEL_LOCK_ICON =
   '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725 1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>';
 
-/// Slugs the backend can actually pin; anything else would save nothing.
+/// Slugs the lock may pin: exactly the models the list is showing. Deriving this
+/// from `catalogModels()` instead of a separate payload snapshot keeps the lock
+/// from drifting out of step with the cards - a catalog refresh replaces the
+/// list long before the whole config payload is rendered again.
 function upstreamModelChoices() {
-  return Array.isArray(latestUpstreamModelChoices) ? latestUpstreamModelChoices : [];
+  return catalogModels()
+    .map((model) => String(model && model.slug ? model.slug : "").trim())
+    .filter(Boolean);
 }
 
 /// The lock reads as part of the badge above it, so it is centred on the badge's

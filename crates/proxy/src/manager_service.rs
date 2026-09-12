@@ -625,7 +625,6 @@ impl ManagerRuntime {
             "DEEPSEEK_BASE_URL": upstream_base_url,
             "DEEPSEEK_TRANSPORT": upstream_transport_to_ui(upstream.and_then(|value| value.transport).unwrap_or(config.upstream.transport)),
             "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(&model_override),
-            "UPSTREAM_MODEL_CHOICES": upstream_model_choices(&config),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
             "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
@@ -1942,20 +1941,6 @@ fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     }
 }
 
-/// The models an explicit upstream pin can name: every model the active catalog
-/// declares, so a catalog that gains a model gains a lock for it instead of the
-/// list being pinned to the two built-in slugs.
-fn upstream_model_choices(config: &AppConfig) -> Value {
-    let document = config.catalog_document();
-    Value::Array(
-        document
-            .models
-            .iter()
-            .map(|model| Value::String(model.slug.clone()))
-            .collect(),
-    )
-}
-
 fn reasoning_summary_mode_label(
     value: codeseex_core::config::ReasoningSummaryMode,
 ) -> &'static str {
@@ -2583,35 +2568,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_payload_lists_the_models_an_upstream_pin_can_name() {
-        let config = temp_config("upstream-model-choices");
+    async fn config_payload_round_trips_a_catalog_model_pin() {
+        let config = temp_config("upstream-model-pin");
+        let user_config = UserConfig {
+            model: Some(codeseex_core::UserModelConfig {
+                override_mode: Some(codeseex_core::UpstreamModelOverride::Custom(
+                    "test-placeholder-1".to_owned(),
+                )),
+                ..Default::default()
+            }),
+            ..UserConfig::default()
+        };
+        user_config
+            .write_atomic(&config.config_path())
+            .expect("write model config");
         let runtime = ManagerRuntime::open(config)
             .await
             .expect("open manager runtime");
 
         let payload = runtime.config_payload();
-        let choices = payload
-            .get("UPSTREAM_MODEL_CHOICES")
-            .and_then(Value::as_array)
-            .expect("choices array")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>();
 
-        // The lock is data driven: whatever the catalog declares may be pinned,
-        // otherwise the UI would offer a pin the save path silently drops.
-        let document = runtime.active_config().catalog_document();
-        let expected = document
-            .models
-            .iter()
-            .map(|model| model.slug.clone())
-            .collect::<Vec<_>>();
-        let actual = choices
-            .iter()
-            .map(|slug| (*slug).to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(actual, expected);
-        assert!(actual.contains(&"deepseek-v4-flash".to_owned()));
+        // Any catalog slug may be pinned, not only the two built-in presets.
+        assert_eq!(
+            payload
+                .get("UPSTREAM_MODEL_OVERRIDE")
+                .and_then(Value::as_str),
+            Some("test-placeholder-1")
+        );
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, Menu, MenuBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, Manager, RunEvent, Runtime, State, Theme, WebviewUrl, WebviewWindowBuilder,
@@ -907,7 +907,8 @@ fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 }
 
 fn build_tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<Menu<R>> {
-    let user_config = UserConfig::read_from(&AppConfig::load().config_path()).unwrap_or_default();
+    let config = AppConfig::load();
+    let user_config = UserConfig::read_from(&config.config_path()).unwrap_or_default();
     let i18n = TrayI18n::from_user_config(&user_config);
     let model = user_config
         .model
@@ -925,19 +926,30 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<Menu
         .and_then(|value| value.thinking.as_deref())
         .unwrap_or("auto");
 
-    let model_default =
+    // The menu mirrors the catalog, so a model that arrives with a remote refresh
+    // shows up here too instead of the tray being pinned to the built-in slugs.
+    let pinned = model.pinned_slug();
+    let mut model_items: Vec<CheckMenuItem<R>> = vec![
         CheckMenuItemBuilder::with_id("tray:model:default", i18n.text("modelDefault", &[]))
-            .checked(model == UpstreamModelOverride::Default)
-            .build(manager)?;
-    let model_flash =
-        CheckMenuItemBuilder::with_id("tray:model:flash", i18n.text("modelFlash", &[]))
-            .checked(model == UpstreamModelOverride::Flash)
-            .build(manager)?;
-    let model_pro = CheckMenuItemBuilder::with_id("tray:model:pro", i18n.text("modelPro", &[]))
-        .checked(model == UpstreamModelOverride::Pro)
-        .build(manager)?;
+            .checked(pinned.is_none())
+            .build(manager)?,
+    ];
+    for catalog_model in config.catalog_document().models.iter() {
+        model_items.push(
+            CheckMenuItemBuilder::with_id(
+                format!("tray:model:{}", catalog_model.slug),
+                catalog_model.display_name.clone(),
+            )
+            .checked(pinned == Some(catalog_model.slug.as_str()))
+            .build(manager)?,
+        );
+    }
+    let model_refs = model_items
+        .iter()
+        .map(|item| item as &dyn IsMenuItem<R>)
+        .collect::<Vec<_>>();
     let model_menu = SubmenuBuilder::new(manager, i18n.text("trayModel", &[]))
-        .items(&[&model_default, &model_flash, &model_pro])
+        .items(&model_refs)
         .build()?;
 
     let thinking_auto =
@@ -1140,9 +1152,10 @@ fn handle_tray_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
             request_app_exit(app);
             Ok(())
         }
-        "tray:model:default" => update_model_override(UpstreamModelOverride::Default),
-        "tray:model:flash" => update_model_override(UpstreamModelOverride::Flash),
-        "tray:model:pro" => update_model_override(UpstreamModelOverride::Pro),
+        // Both "follow the client" and every catalog slug arrive as `tray:model:*`.
+        id if id.starts_with("tray:model:") => update_model_override(
+            UpstreamModelOverride::from_label(id.trim_start_matches("tray:model:")),
+        ),
         "tray:thinking:auto" => update_thinking("auto"),
         "tray:thinking:enabled" => update_thinking("enabled"),
         "tray:thinking:disabled" => update_thinking("disabled"),

@@ -101,8 +101,8 @@
           </tbody>
         </table>
         <p>
-          只有后端确实支持的 slug 才会出现锁（由 <code>UPSTREAM_MODEL_CHOICES</code> 提供），
-          否则界面会显示一个点了也没用的按钮。
+          锁的可用集合直接取当前目录文档里的模型（<code>catalogModels()</code>），
+          所以目录里新增一个模型，它就自动带上锁，不会出现"有卡片、没按钮"。
         </p>
       </div>
     </div>
