@@ -1187,7 +1187,14 @@ impl Store {
     ) -> Result<()> {
         let level = level.trim().to_ascii_lowercase();
         let event_type = event_type.trim().to_owned();
-        let audience = event_audience_for_type(&event_type).to_owned();
+        // Anything that went wrong is worth showing, whatever its type; the
+        // hidden `safe_diagnostic` bucket is for successful bookkeeping chatter.
+        let audience = if matches!(level.as_str(), "warn" | "error") {
+            "user"
+        } else {
+            event_audience_for_type(&event_type)
+        }
+        .to_owned();
         if audience == "diagnostic" && !diagnostic_logs_enabled() {
             return Ok(());
         }
@@ -2479,13 +2486,34 @@ fn is_safe_diagnostic_event_type(event_type: &str) -> bool {
             | "context_compile_diagnostic"
             | "client_tool_handoff_guard_diagnostic"
             | "cost_risk_diagnostic"
+            // Per-request and per-round bookkeeping. It is still recorded (the
+            // usage view reads some of it), but a resident client's log page
+            // should not narrate every round trip of every turn.
+            | "catalog_remote_refresh"
             | "deepseek_tool_protocol_adapted"
             | "deepseek_tool_protocol_blocked"
             | "deepseek_tool_protocol_parse_failed"
+            | "native_pending_round_evicted"
+            | "native_pending_round_not_replayed"
+            | "native_pending_round_replayed"
+            | "native_pending_tool_group"
+            | "native_responses_compatibility_diagnostic"
+            | "native_responses_transport_diagnostic"
+            | "native_tool_namespace_reconciled"
+            | "native_tool_schema_repaired"
+            | "request_completed"
+            | "request_shape_diagnostic"
+            | "request_started"
             | "retry_cache_diagnostic"
+            | "runtime_config_changed"
+            | "service_request_diagnostic"
+            | "tool_call"
             | "tool_exposure_diagnostic"
+            | "tool_result"
             | "upstream_usage_chunk_diagnostic"
             | "upstream_call_usage_breakdown"
+            | "web_search_source_probe"
+            | "web_search_source_probe_lagged"
             | "codex_runtime_catalog_verified"
             | "codex_runtime_catalog_warning"
             | "codex_runtime_catalog_error"
@@ -8008,7 +8036,7 @@ mod tests {
         writer
             .record_event(
                 "info",
-                "request_started",
+                "proxy_started",
                 "Ledger event",
                 Some(&json!({ "id": "resp_ledger", "endpoint": "/v1/responses" })),
             )
@@ -8021,8 +8049,66 @@ mod tests {
             .expect("visible events");
         assert!(!has_more);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "request_started");
+        assert_eq!(events[0].event_type, "proxy_started");
         assert_eq!(events[0].message, "Ledger event");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The log page shows lifecycle and failures; the per-round bookkeeping of a
+    /// resident client stays out of it (while still being recorded, because the
+    /// usage view reads some of it).
+    #[tokio::test]
+    async fn bookkeeping_chatter_is_recorded_but_not_shown() {
+        let dir = temp_dir("log-noise");
+        let store = Store::open(&dir).await.expect("open store");
+        for (level, event_type) in [
+            ("info", "tool_call"),
+            ("info", "request_started"),
+            ("info", "request_completed"),
+            ("info", "native_responses_transport_diagnostic"),
+            ("warn", "tool_call"),
+            ("info", "proxy_started"),
+            ("error", "request_failed"),
+        ] {
+            store
+                .record_event(level, event_type, "test", None)
+                .await
+                .expect("record event");
+        }
+
+        let (visible, _) = store
+            .recent_visible_events(50, None)
+            .await
+            .expect("visible events");
+        let shown = visible
+            .iter()
+            .map(|event| (event.event_type.as_str(), event.level.as_str()))
+            .collect::<Vec<_>>();
+        assert!(shown.contains(&("proxy_started", "info")), "{shown:?}");
+        assert!(shown.contains(&("request_failed", "error")), "{shown:?}");
+        assert!(
+            shown.contains(&("tool_call", "warn")),
+            "a failing round is worth showing whatever its type: {shown:?}"
+        );
+        assert!(
+            !shown.iter().any(|(event_type, level)| {
+                *level == "info"
+                    && matches!(
+                        *event_type,
+                        "tool_call"
+                            | "request_started"
+                            | "request_completed"
+                            | "native_responses_transport_diagnostic"
+                    )
+            }),
+            "bookkeeping chatter leaked into the log page: {shown:?}"
+        );
+
+        let (all, _) = store.recent_events(50, None).await.expect("all events");
+        assert!(
+            all.iter().any(|event| event.event_type == "request_started"),
+            "chatter must still be recorded"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -8051,8 +8137,8 @@ mod tests {
         store
             .record_event(
                 "info",
-                "request_started",
-                "Responses request started.",
+                "proxy_started",
+                "CodeSeeX proxy started.",
                 Some(&json!({ "id": "resp_1", "model": "deepseek-v4-pro" })),
             )
             .await
@@ -8063,7 +8149,7 @@ mod tests {
             .await
             .expect("visible events");
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].event_type, "request_started");
+        assert_eq!(visible[0].event_type, "proxy_started");
         assert_eq!(visible[0].audience.as_deref(), Some("user"));
 
         let (all, _) = store.recent_events(10, None).await.expect("all events");
