@@ -3754,4 +3754,133 @@ mod tests {
         assert_eq!(upstream["input"][0]["summary"], json!([]));
     }
 
+    /// The stub must behave like a provider, not like a single canned blob: the
+    /// client has to receive marked frames one at a time with real gaps, or the
+    /// reasoning shape cannot be observed at all.
+    #[tokio::test]
+    async fn fake_upstream_answers_with_a_progressive_marked_stream() {
+        use futures_util::StreamExt;
+
+        let data_dir = temp_data_dir("fake-stream");
+        // The stub never dials the upstream, so this address stays untouched.
+        let mut config = config_for_fake(data_dir.clone(), "127.0.0.1:9".parse().unwrap());
+        config.experimental.fake_upstream = true;
+        let store = Store::open(&data_dir).await.unwrap();
+        let inspection = store.clone();
+        let state = ProxyState::for_test(config.clone(), store);
+
+        let input = request("resp_fake_stream", true, json!([]));
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the stub should answer the request");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+
+        let started = std::time::Instant::now();
+        let mut body = response.into_body().into_data_stream();
+        let mut frames: Vec<(std::time::Duration, String)> = Vec::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.expect("stream chunk");
+            frames.push((
+                started.elapsed(),
+                String::from_utf8(chunk.to_vec()).expect("utf-8 frame"),
+            ));
+        }
+        let total = started.elapsed();
+        let joined = frames
+            .iter()
+            .map(|(_, frame)| frame.as_str())
+            .collect::<String>();
+
+        assert!(
+            frames.len() >= 8,
+            "the stub must arrive as many frames, got {}: {joined}",
+            frames.len()
+        );
+        assert!(
+            total >= std::time::Duration::from_millis(1500),
+            "the stub must pace its frames instead of finishing at once, took {total:?}"
+        );
+        let first = frames.first().expect("first frame").0;
+        assert!(
+            first < total / 2,
+            "the first frame must arrive well before the last: {first:?} of {total:?}"
+        );
+
+        assert!(joined.contains("[FAKE UPSTREAM] reasoning: "), "{joined}");
+        assert!(joined.contains("[FAKE UPSTREAM] reply: "), "{joined}");
+        // The reasoning text and the codex-facing summary are both present, so
+        // the switches can be compared on the same stream.
+        assert!(joined.contains("\"type\":\"reasoning_text\""), "{joined}");
+        assert!(
+            joined.contains("event: response.reasoning_summary_text.delta"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("\"text\":\"[FAKE UPSTREAM] reasoning: "),
+            "the mark must lead the finished reasoning text: {joined}"
+        );
+
+        let (events, _) = inspection.recent_events(50, None).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "native_fake_upstream_answered"),
+            "the synthetic turn must be visible in the event log"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn fake_upstream_answers_with_marked_json_when_streaming_is_off() {
+        let data_dir = temp_data_dir("fake-json");
+        let mut config = config_for_fake(data_dir.clone(), "127.0.0.1:9".parse().unwrap());
+        config.experimental.fake_upstream = true;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+
+        let input = request("resp_fake_json", false, json!([]));
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the stub should answer the request");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let output = body.get("output").and_then(Value::as_array).unwrap();
+        assert_eq!(output[0]["type"], json!("reasoning"));
+        assert_eq!(output[1]["type"], json!("message"));
+        for item in output {
+            let text = item["content"][0]["text"]
+                .as_str()
+                .expect("marked content text");
+            assert!(text.starts_with("[FAKE UPSTREAM]"), "{item}");
+        }
+        let summary = output[0]["summary"][0]["text"]
+            .as_str()
+            .expect("summary text");
+        assert!(summary.starts_with("[FAKE UPSTREAM]"), "{summary}");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
 }
