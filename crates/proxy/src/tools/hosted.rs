@@ -376,11 +376,13 @@ fn compact_web_result_item(item: &Value) -> Value {
 }
 
 pub(crate) fn summarize_tool_result_for_log(result: &Value) -> String {
-    if let Some(summary) = semantic_tool_result_summary(result) {
-        return summary;
-    }
-    let text = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_owned());
-    compact_line(&redact_inline_data_urls(&text), 360)
+    let summary = semantic_tool_result_summary(result).unwrap_or_else(|| {
+        let text = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_owned());
+        compact_line(&redact_inline_data_urls(&text), 360)
+    });
+    // Log summaries are persisted for days, so apply the same credential scrub
+    // the model-facing path uses; tool output must not leak secrets into logs.
+    crate::tools::redact_sensitive_text(&summary).0
 }
 
 fn semantic_tool_result_summary(result: &Value) -> Option<String> {
@@ -724,5 +726,23 @@ mod tests {
             summary,
             "web_search search ok=false candidates=0 evidence=0 sources=[bing_html] deprioritized=[duckduckgo_lite] fallback_errors=1 source_diagnostics=0"
         );
+    }
+
+    #[test]
+    fn log_summary_redacts_credentials() {
+        let auth = summarize_tool_result_for_log(&json!({
+            "ok": true,
+            "tool": "vision_analyze",
+            "text": "Authorization: Bearer sk-abcdefghijklmnop"
+        }));
+        assert!(!auth.contains("sk-abcdefghijklmnop"), "{auth}");
+        assert!(auth.contains("[REDACTED]"), "{auth}");
+
+        let bare = summarize_tool_result_for_log(&json!({
+            "ok": true,
+            "notes": "leaked sk-abcdefghijklmnop here"
+        }));
+        assert!(!bare.contains("sk-abcdefghijklmnop"), "{bare}");
+        assert!(bare.contains("[REDACTED]"), "{bare}");
     }
 }

@@ -1076,7 +1076,7 @@ fn fit_tool_result(value: Value) -> Value {
     })
 }
 
-fn redact_sensitive_text(value: &str) -> (String, usize) {
+pub(crate) fn redact_sensitive_text(value: &str) -> (String, usize) {
     static ENV_ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
     static JSON_SECRET: OnceLock<Regex> = OnceLock::new();
     static AUTH_HEADER: OnceLock<Regex> = OnceLock::new();

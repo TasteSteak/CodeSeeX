@@ -80,7 +80,29 @@ pub(crate) fn clear_upstream_api_key(config: &AppConfig) -> Result<()> {
 }
 
 fn read_secret(target: &str) -> Option<String> {
-    secret_store_read(target).ok().flatten()
+    read_secret_with(target, secret_store_read)
+}
+
+/// Separate "no credential stored" from "the credential store failed".
+///
+/// A read failure must not masquerade as an unconfigured secret: silently
+/// dropping it makes the UI report "not configured" while the real cause (a
+/// locked or corrupted credential store) never reaches the logs.
+fn read_secret_with(
+    target: &str,
+    reader: impl Fn(&str) -> Result<Option<String>>,
+) -> Option<String> {
+    match reader(target) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                secret = %target,
+                error = %error,
+                "failed to read CodeSeeX credential; treating it as unconfigured"
+            );
+            None
+        }
+    }
 }
 
 fn upstream_secret_target(config: &AppConfig) -> String {
@@ -276,5 +298,21 @@ mod tests {
         assert!(write_vision_generate_api_key(&config, "secret-value").is_err());
         assert!(vision_analyze_api_key(&config).is_none());
         assert!(vision_generate_api_key(&config).is_none());
+    }
+
+    #[test]
+    fn credential_read_failure_is_kept_apart_from_missing_secret() {
+        let failed = read_secret_with("CodeSeeX/test/failing", |_| {
+            Err(anyhow::anyhow!("credential store unavailable"))
+        });
+        assert!(failed.is_none());
+
+        let missing = read_secret_with("CodeSeeX/test/missing", |_| Ok(None));
+        assert!(missing.is_none());
+
+        let present = read_secret_with("CodeSeeX/test/present", |_| {
+            Ok(Some("stored-value".to_owned()))
+        });
+        assert_eq!(present.as_deref(), Some("stored-value"));
     }
 }
