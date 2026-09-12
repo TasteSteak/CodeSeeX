@@ -38,6 +38,12 @@ impl SummaryProjector {
             return None;
         }
         self.text.push_str(delta);
+        if self.mode != ReasoningSummaryMode::Full && !touches_boundary(delta) {
+            // A projection only ever grows at a sentence or line boundary, so a
+            // delta without one cannot move it. Skipping the rescan keeps long
+            // reasoning linear instead of quadratic in the accumulated text.
+            return None;
+        }
         self.emit_up_to(streamable_len(&self.text, self.mode))
     }
 
@@ -212,6 +218,17 @@ fn is_boundary(character: char, followed_by_space: bool) -> bool {
     }
 }
 
+/// Whether a delta can create or move a boundary. `is_boundary` treats a `.` at
+/// the end of a delta as followed by whitespace, so it counts here too.
+fn touches_boundary(delta: &str) -> bool {
+    delta.chars().any(|character| {
+        matches!(
+            character,
+            '\n' | '.' | '!' | '?' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}'
+        )
+    })
+}
+
 /// The largest character boundary at or below `limit`.
 fn floor_char_boundary(text: &str, limit: usize) -> usize {
     if limit >= text.len() {
@@ -233,6 +250,26 @@ mod tests {
 
     fn mode(value: &str) -> ReasoningSummaryMode {
         codeseex_core::config::parse_reasoning_summary_mode(value).expect("known mode")
+    }
+
+    /// A delta without a boundary cannot move the projection, so it is skipped -
+    /// and nothing is lost: the next boundary still carries the held-back tail.
+    #[test]
+    fn a_delta_without_a_boundary_emits_nothing_and_loses_nothing() {
+        let mut projector = SummaryProjector::new(mode("smart"));
+
+        assert_eq!(projector.push("first sentence"), None);
+        assert_eq!(projector.summary(), "");
+        assert_eq!(
+            projector.push(". second"),
+            Some("first sentence.".to_owned())
+        );
+        assert_eq!(projector.summary(), "first sentence.");
+        assert_eq!(
+            projector.push(" sentence."),
+            Some(" second sentence.".to_owned())
+        );
+        assert_eq!(projector.summary(), "first sentence. second sentence.");
     }
 
     #[test]
