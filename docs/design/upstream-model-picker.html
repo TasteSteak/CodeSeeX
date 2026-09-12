@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>上游模型选择 — A 的三份变体</title>
+    <title>上游模型锁定 — 已选定方案</title>
     <link rel="stylesheet" href="../../apps/ui/public/styles/foundation/theme.css">
     <link rel="stylesheet" href="../../apps/ui/public/styles/foundation/base.css">
     <link rel="stylesheet" href="../../apps/ui/public/styles/components/buttons.css">
@@ -14,360 +14,93 @@
     <link rel="stylesheet" href="../../apps/ui/public/styles/features/config/billing.css">
     <link rel="stylesheet" href="../../apps/ui/public/styles/pages/config.css">
     <style>
-      /* Mock-only chrome. Everything inside .mock-surface uses the app's own CSS. */
-      /* The app shell pins the viewport and scrolls its own panes, so the mock
-         page has to undo that to scroll as a normal document. */
+      /* The app shell pins the viewport, so a plain document has to undo that. */
       html { height: auto; overflow: auto; }
       body.mock-page {
-        background: var(--bg-app);
-        color: var(--text-main);
-        margin: 0;
-        padding: 32px 24px 72px;
+        background: var(--bg-app); color: var(--text-main); margin: 0; padding: 32px 24px 72px;
         font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-        height: auto;
-        min-height: 100vh;
-        display: block;
-        overflow: visible;
-        user-select: text;
-        -webkit-user-select: text;
+        height: auto; min-height: 100vh; display: block; overflow: visible;
+        user-select: text; -webkit-user-select: text;
       }
-      .mock-wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
-      .mock-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+      .mock-wrap { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
       .mock-head h1 { margin: 0 0 6px; font-size: 22px; }
       .mock-head p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+      .mock-section {
+        background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 10px;
+        padding: 20px; display: flex; flex-direction: column; gap: 14px;
+      }
+      .mock-section h2 { margin: 0; font-size: 15px; }
+      .mock-section p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+      .mock-state { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-muted); }
+      /* Force the hover-only lock to show so both states are visible here. */
+      .mock-show-lock .model-lock { opacity: 1; }
+      .mock-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .mock-table th, .mock-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-color); line-height: 1.6; }
+      .mock-table th { color: var(--text-secondary); font-weight: 600; }
       .mock-badge {
         display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px;
         background: var(--ctrl-bg); color: var(--text-secondary); border: 1px solid var(--border-color);
+        cursor: pointer;
       }
-      .mock-section {
-        background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 10px;
-        padding: 20px; display: flex; flex-direction: column; gap: 16px;
-      }
-      .mock-section > header { display: flex; flex-direction: column; gap: 6px; }
-      .mock-section > header h2 { margin: 0; font-size: 16px; display: flex; align-items: center; gap: 8px; }
-      .mock-section > header p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
-      .mock-notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
-      .mock-note { border: 1px dashed var(--border-color); border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.7; }
-      .mock-note strong { display: block; margin-bottom: 4px; font-size: 12px; }
-      .mock-note.good strong { color: var(--success); }
-      .mock-note.bad strong { color: var(--warn); }
-      .mock-surface { background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; }
-      .mock-surface-title { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; }
-      .mock-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-      .mock-table th, .mock-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-color); vertical-align: top; line-height: 1.6; }
-      .mock-table th { color: var(--text-secondary); font-weight: 600; }
-
-      /* Proposed pieces, using the app's own tokens. */
-      .upstream-status {
-        display: flex; align-items: center; justify-content: space-between; gap: 10px;
-        font-size: 12px; color: var(--text-secondary); padding: 8px 10px; border: 1px solid var(--border-color);
-        border-radius: 8px; background: var(--ctrl-bg); margin-bottom: 12px;
-      }
-      .upstream-status strong { color: var(--text-main); font-weight: 600; }
-      .upstream-status.is-follow strong { color: var(--text-secondary); }
-      .upstream-tag {
-        display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px;
-        font-size: 11px; background: var(--tool-badge-bg); color: var(--tool); border: 1px solid transparent;
-      }
-      .upstream-row { display: flex; align-items: center; gap: 8px; }
-      .upstream-row .billing-model-card { flex: 1; }
-      .upstream-commit {
-        flex: none; font: inherit; font-size: 11px; padding: 5px 10px; border-radius: 7px; cursor: pointer;
-        border: 1px solid var(--primary); background: var(--primary); color: var(--primary-text);
-      }
-      .upstream-commit.ghost { background: transparent; color: var(--text-secondary); border-color: var(--border-color); }
-      .upstream-lock { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
-      .upstream-lock input { accent-color: var(--primary); }
-      .billing-rate-card .billing-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
-      .billing-rate-card .billing-row + .billing-row { margin-top: 6px; }
-      .mock-viewed-note { font-size: 11px; color: var(--text-muted); margin-top: 10px; }
     </style>
   </head>
   <body class="mock-page">
     <div class="mock-wrap">
       <div class="mock-head">
-        <div>
-          <h1>上游模型选择 — A 的三份变体</h1>
-          <p>
-            结论：A（列表即选择器）最干净，问题是「看一眼价格」和「改上游」是同一个动作。
-            下面三份都保留 A 的列表，把提交动作单独拎出来，区别只是它放在哪：状态行、选中行、还是计费卡片。
-            每份都能点着玩：点模型行只会切换查看，再走一遍提交按钮就能看明白差别。
-          </p>
+        <h1>上游模型锁定 — 已选定方案</h1>
+        <p>
+          模型列表卡片右下角一个锁按钮。平时隐藏，鼠标移到卡片上才出现（灰色）；点击后变红并常驻，表示这个模型被锁定为上游；
+          再点一次取消锁定，回到「跟随客户端」。下面是两个状态的静态示意，用的是 app 自己的样式和同一个 SVG。
+        </p>
+      </div>
+
+      <div class="mock-section">
+        <h2>状态一 · 未锁定（悬停时出现灰色锁）</h2>
+        <div class="billing-model-item mock-show-lock" style="max-width:280px">
+          <button type="button" class="billing-model-card">
+            <span class="billing-model-head"><span class="billing-model-name">DeepSeek V4 Pro</span></span>
+            <span class="billing-model-desc">deepseek-v4-pro</span>
+          </button>
+          <button type="button" class="model-lock" title="锁定为上游模型" aria-label="锁定为上游模型">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725a1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>
+          </button>
         </div>
-        <button type="button" class="mock-badge" id="themeToggle">切换深色</button>
+        <div class="mock-state">灰色 · 未锁定 · 实际使用时仅在卡片悬停时可见</div>
       </div>
 
       <div class="mock-section">
-        <header>
-          <h2>共同的语义</h2>
-          <p>三份变体完全一致，只有提交控件的位置不同。列表点击永远只是查看价格。</p>
-        </header>
+        <h2>状态二 · 已锁定（红色常驻）</h2>
+        <div class="billing-model-item" style="max-width:280px">
+          <button type="button" class="billing-model-card is-selected">
+            <span class="billing-model-head">
+              <span class="billing-model-name">DeepSeek V4 Flash</span>
+            </span>
+            <span class="billing-model-desc">deepseek-v4-flash</span>
+          </button>
+          <button type="button" class="model-lock is-locked" title="取消锁定，回到跟随客户端" aria-label="取消锁定，回到跟随客户端">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725a1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>
+          </button>
+        </div>
+        <div class="mock-state">红色 · 已锁定为上游 · 常驻显示，鼠标移开也在</div>
+      </div>
+
+      <div class="mock-section">
+        <h2>交互约定</h2>
         <table class="mock-table">
           <thead>
-            <tr><th>动作</th><th>含义</th><th>写入的配置</th></tr>
+            <tr><th>动作</th><th>结果</th><th>写入的配置</th></tr>
           </thead>
           <tbody>
-            <tr><td>点击模型行</td><td>查看该模型的计费卡片，不改动任何配置</td><td>无</td></tr>
-            <tr><td>提交「设为上游」</td><td>之后所有请求都用这个模型</td><td><code>override = "&lt;slug&gt;"</code></td></tr>
-            <tr><td>提交「跟随客户端」</td><td>回到请求里指定的模型（默认）</td><td><code>override = "default"</code></td></tr>
+            <tr><td>点击模型卡片</td><td>切换右侧计费卡片，不改动上游</td><td>无</td></tr>
+            <tr><td>点击灰色锁</td><td>该模型成为上游，锁变红常驻</td><td><code>override = "&lt;slug&gt;"</code></td></tr>
+            <tr><td>点击红色锁</td><td>取消锁定，回到跟随客户端</td><td><code>override = "default"</code></td></tr>
           </tbody>
         </table>
-      </div>
-
-      <div id="proposals" class="mock-wrap"></div>
-
-      <div class="mock-section">
-        <header><h2>对比</h2></header>
-        <table class="mock-table">
-          <thead>
-            <tr><th>变体</th><th>改上游的点击数</th><th>误操作风险</th><th>新增面积</th><th>位置问题</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>A1 选中行按钮</td><td>2</td><td>低</td><td>选中行右侧一个按钮</td><td>按钮跟着选中行跑，视线要回到列表</td></tr>
-            <tr><td>A2 状态行提交</td><td>2</td><td>低</td><td>状态行右侧一个按钮</td><td>位置固定；列表最多 4 行，距离不长</td></tr>
-            <tr><td>A3 卡片开关</td><td>2</td><td>最低，开关默认关闭</td><td>卡片头部一个开关</td><td>窄窗口下卡片换行，开关会离开视野</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="mock-section">
-        <header><h2>我的倾向</h2></header>
-        <p style="margin:0;font-size:13px;line-height:1.9;color:var(--text-secondary)">
-          A2。状态行本来就要说明「上游是谁」，把提交按钮放在同一个位置，状态与操作就不会分家；
-          它也天然承担「改回跟随客户端」的复位动作，列表里不需要额外加一行。
-          A3 的手感其实最顺，看价格和定上游在同一视野，如果你的习惯是先看价格再决定，选它更合适。
-          A1 相对弱一些：按钮跟着选中行走，反而让「选中」的含义更模糊。
-          定完方向我再落实现。
+        <p>
+          只有后端确实支持的 slug 才会出现锁（由 <code>UPSTREAM_MODEL_CHOICES</code> 提供），
+          否则界面会显示一个点了也没用的按钮。
         </p>
       </div>
     </div>
-
-    <script>
-      const FOLLOW = { slug: "default", name: "跟随客户端", desc: "使用请求里指定的模型", rates: [] };
-      const MODELS = [
-        { slug: "deepseek-v4-pro", name: "DeepSeek V4 Pro", rates: [["缓存命中", "¥0.025"], ["缓存未命中", "¥3.00"], ["输出", "¥6.00"]] },
-        { slug: "deepseek-v4-flash", name: "DeepSeek V4 Flash", rates: [["缓存命中", "¥0.02"], ["缓存未命中", "¥1.00"], ["输出", "¥2.00"]] },
-      ];
-      const ALL = [FOLLOW, ...MODELS];
-
-      const PROPOSALS = [
-        {
-          id: "A1",
-          title: "A1 · 选中行出现按钮",
-          desc: "点击行只查看价格；被选中的那一行右侧出现「设为上游」，点它才提交。同一时刻列表里只有一个按钮，所以不会变吵。",
-          commit: "row",
-          good: "提交点就在刚点过的位置，视线不用移动。",
-          bad: "按钮跟着选中行走，「选中」的含义变得模糊：既是在看它，也是可以把它设为上游。",
-        },
-        {
-          id: "A2",
-          title: "A2 · 状态行提交",
-          desc: "点击行只查看价格；顶部状态行显示当前上游，当查看的模型与上游不同时变成「设为上游」。锁定后同一位置提供「跟随客户端」复位。",
-          commit: "status",
-          good: "状态与操作合一，位置固定；复位动作也在这里，不需要列表多一行。",
-          bad: "列表较长时状态行与选中行之间有距离，不过列表本身最多显示 4 行。",
-        },
-        {
-          id: "A3",
-          title: "A3 · 计费卡片开关",
-          desc: "点击行只查看价格；右侧计费卡片头部放一个「锁定为上游」开关。看价格与决定用它处在同一视野，贴合先看价格再决定的习惯。",
-          commit: "card",
-          good: "误操作成本最低（开关默认关闭），决策信息与价格同屏。",
-          bad: "窄窗口下卡片会换到列表下方，开关跟着离开视野。",
-        },
-      ];
-
-      function renderProposal(proposal) {
-        const state = { viewed: FOLLOW.slug, upstream: FOLLOW.slug };
-        const section = document.createElement("div");
-        section.className = "mock-section";
-        section.innerHTML =
-          "<header><h2>" + proposal.title + ' <span class="mock-badge">基于 A</span></h2><p>' + proposal.desc + "</p></header>" +
-          '<div class="mock-surface">' +
-          '<div class="mock-surface-title">代理 → 模型行为</div>' +
-          '<div class="upstream-status is-follow" data-status>' +
-          "<span>上游：<strong data-upstream></strong></span>" +
-          '<span class="upstream-actions" data-actions></span>' +
-          "</div>" +
-          '<div class="billing-split">' +
-          '<div class="billing-catalog">' +
-          '<button type="button" class="btn btn-secondary btn-icon-label">更新模型列表</button>' +
-          '<div class="billing-model-list" data-list></div>' +
-          "</div>" +
-          '<div class="billing-card-panel">' +
-          '<div class="billing-rate-card">' +
-          '<div class="billing-card-header">' +
-          '<div class="billing-model-meta"><strong data-viewed></strong><small class="muted">每 100 万 Token</small></div>' +
-          "<span data-card-action></span>" +
-          "</div>" +
-          "<div data-rates></div>" +
-          '<div class="mock-viewed-note" data-note></div>' +
-          "</div></div></div></div>" +
-          '<div class="mock-notes">' +
-          '<div class="mock-note good"><strong>优点</strong>' + proposal.good + "</div>" +
-          '<div class="mock-note bad"><strong>代价</strong>' + proposal.bad + "</div>" +
-          "</div>";
-
-        const list = section.querySelector("[data-list]");
-        const status = section.querySelector("[data-status]");
-        const actions = section.querySelector("[data-actions]");
-        const cardAction = section.querySelector("[data-card-action]");
-        const viewedLabel = section.querySelector("[data-viewed]");
-        const ratesHost = section.querySelector("[data-rates]");
-        const note = section.querySelector("[data-note]");
-
-        const modelFor = (slug) => ALL.find((model) => model.slug === slug) || FOLLOW;
-        const wrapped = proposal.commit === "row";
-
-        // commit / locked / reset / idle drives whichever placement this variant uses.
-        function phase() {
-          if (state.viewed === FOLLOW.slug) {
-            return state.upstream === FOLLOW.slug ? "idle" : "reset";
-          }
-          return state.upstream === state.viewed ? "locked" : "commit";
-        }
-
-        function commit(target) {
-          state.upstream = target;
-          draw();
-        }
-
-        function actionButton(label, ghost, onClick) {
-          const element = document.createElement("button");
-          element.type = "button";
-          element.className = "upstream-commit" + (ghost ? " ghost" : "");
-          element.textContent = label;
-          element.addEventListener("click", (event) => {
-            event.stopPropagation();
-            onClick();
-          });
-          return element;
-        }
-
-        function modelRow(model) {
-          const card = document.createElement("button");
-          card.type = "button";
-          card.className = "billing-model-card" + (state.viewed === model.slug ? " is-selected" : "");
-          card.dataset.model = model.slug;
-          const head = document.createElement("span");
-          head.className = "billing-model-head";
-          const name = document.createElement("span");
-          name.className = "billing-model-name";
-          name.textContent = model.name;
-          head.append(name);
-          if (state.upstream === model.slug) {
-            const tag = document.createElement("span");
-            tag.className = "upstream-tag";
-            tag.textContent = "上游";
-            head.append(tag);
-          }
-          const desc = document.createElement("span");
-          desc.className = "billing-model-desc";
-          desc.textContent = model.desc || model.slug;
-          card.append(head, desc);
-          if (!wrapped) return card;
-          const row = document.createElement("div");
-          row.className = "upstream-row";
-          row.append(card);
-          return row;
-        }
-
-        function draw() {
-          const viewed = modelFor(state.viewed);
-          const current = phase();
-
-          list.textContent = "";
-          for (const model of ALL) list.append(modelRow(model));
-
-          status.classList.toggle("is-follow", state.upstream === FOLLOW.slug);
-          section.querySelector("[data-upstream]").textContent = modelFor(state.upstream).name;
-
-          actions.textContent = "";
-          if (proposal.commit === "status") {
-            if (current === "commit") actions.append(actionButton("设为上游", false, () => commit(state.viewed)));
-            if (current === "locked" || current === "reset") {
-              actions.append(actionButton("跟随客户端", true, () => commit(FOLLOW.slug)));
-            }
-          }
-
-          if (wrapped && current !== "idle") {
-            const selected = list.querySelector('[data-model="' + state.viewed + '"]');
-            const wrapper = selected ? selected.closest(".upstream-row") : null;
-            if (wrapper) {
-              const labels = { commit: "设为上游", locked: "已设为上游", reset: "跟随客户端" };
-              wrapper.append(actionButton(labels[current], current !== "commit", () =>
-                commit(current === "commit" ? state.viewed : FOLLOW.slug)));
-            }
-          }
-
-          cardAction.textContent = "";
-          if (proposal.commit === "card") {
-            if (current === "reset") {
-              cardAction.append(actionButton("跟随客户端", true, () => commit(FOLLOW.slug)));
-            } else if (current !== "idle") {
-              const label = document.createElement("label");
-              label.className = "upstream-lock";
-              const input = document.createElement("input");
-              input.type = "checkbox";
-              input.checked = current === "locked";
-              input.addEventListener("change", () => commit(input.checked ? state.viewed : FOLLOW.slug));
-              label.append(input, document.createTextNode("锁定为上游"));
-              cardAction.append(label);
-            }
-          }
-
-          viewedLabel.textContent = viewed.name;
-          ratesHost.textContent = "";
-          if (viewed.rates.length === 0) {
-            const row = document.createElement("div");
-            row.className = "billing-row";
-            row.textContent = "按每轮实际使用的模型计费";
-            ratesHost.append(row);
-          } else {
-            for (const [rateLabel, amount] of viewed.rates) {
-              const row = document.createElement("div");
-              row.className = "billing-row";
-              const left = document.createElement("span");
-              left.textContent = rateLabel;
-              const right = document.createElement("strong");
-              right.textContent = amount;
-              row.append(left, right);
-              ratesHost.append(row);
-            }
-          }
-
-          note.textContent =
-            state.viewed === FOLLOW.slug
-              ? "跟随客户端时，费用按每轮实际使用的模型计算。"
-              : current === "locked"
-                ? "已锁定为上游：所有请求都用这个模型。"
-                : "仅查看价格，尚未用于上游。";
-        }
-
-        list.addEventListener("click", (event) => {
-          const card = event.target.closest("[data-model]");
-          if (!card || !list.contains(card)) return;
-          state.viewed = card.dataset.model;
-          draw();
-        });
-
-        draw();
-        return section;
-      }
-
-      const host = document.getElementById("proposals");
-      for (const proposal of PROPOSALS) host.append(renderProposal(proposal));
-
-      const toggle = document.getElementById("themeToggle");
-      if (new URLSearchParams(location.search).get("theme") === "dark") {
-        document.documentElement.dataset.theme = "dark";
-        toggle.textContent = "切换浅色";
-      }
-      toggle.addEventListener("click", () => {
-        const dark = document.documentElement.dataset.theme === "dark";
-        document.documentElement.dataset.theme = dark ? "light" : "dark";
-        toggle.textContent = dark ? "切换深色" : "切换浅色";
-      });
-    </script>
   </body>
 </html>

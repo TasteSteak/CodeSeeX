@@ -625,6 +625,7 @@ impl ManagerRuntime {
             "DEEPSEEK_BASE_URL": upstream_base_url,
             "DEEPSEEK_TRANSPORT": upstream_transport_to_ui(upstream.and_then(|value| value.transport).unwrap_or(config.upstream.transport)),
             "UPSTREAM_MODEL_OVERRIDE": model_override_to_ui(model_override),
+            "UPSTREAM_MODEL_CHOICES": upstream_model_choices(),
             "DEEPSEEK_TEMPERATURE_PRESET": temperature_to_ui(temperature),
             "DEEPSEEK_THINKING": model.and_then(|value| value.thinking.as_deref()).unwrap_or("auto"),
             "NETWORK_PROXY_MODE": network_proxy_to_ui(config.network_proxy),
@@ -1941,6 +1942,18 @@ fn network_proxy_to_ui(value: codeseex_core::NetworkProxyMode) -> &'static str {
     }
 }
 
+/// The models an explicit upstream pin can name.
+///
+/// `UpstreamModelOverride` only carries the two built-in DeepSeek slugs today,
+/// so this is what the model list may offer a lock for; anything else would be
+/// accepted by the UI and then ignored on save.
+fn upstream_model_choices() -> Value {
+    json!([
+        codeseex_core::models::MODEL_FLASH,
+        codeseex_core::models::MODEL_PRO
+    ])
+}
+
 fn reasoning_summary_mode_label(
     value: codeseex_core::config::ReasoningSummaryMode,
 ) -> &'static str {
@@ -2565,6 +2578,33 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    #[tokio::test]
+    async fn config_payload_lists_the_models_an_upstream_pin_can_name() {
+        let config = temp_config("upstream-model-choices");
+        let runtime = ManagerRuntime::open(config)
+            .await
+            .expect("open manager runtime");
+
+        let payload = runtime.config_payload();
+        let choices = payload
+            .get("UPSTREAM_MODEL_CHOICES")
+            .and_then(Value::as_array)
+            .expect("choices array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        // Only the slugs `UpstreamModelOverride` can name may be offered a lock;
+        // anything else would be accepted by the UI and ignored on save.
+        assert_eq!(
+            choices,
+            vec![
+                codeseex_core::models::MODEL_FLASH,
+                codeseex_core::models::MODEL_PRO
+            ]
+        );
     }
 
     #[tokio::test]

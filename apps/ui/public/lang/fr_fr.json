@@ -364,6 +364,8 @@
   "reasoningSummaryMode_smart": "Intelligent",
   "reasoningSummaryMode_fixed": "Tronqué",
   "reasoningSummaryMode_full": "Complet",
+  "modelLockPin": "Épingler comme modèle amont",
+  "modelLockClear": "Détacher et suivre le modèle du client",
   "toolVisionAnalyzeName": "Compréhension d'image",
   "toolVisionAnalyzeDescription": "Analyser les images avec DeepSeek Vision ou un endpoint compatible OpenAI personnalisé.",
   "toolVisionGenerateName": "Génération d'images",

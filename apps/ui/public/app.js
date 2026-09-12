@@ -47,6 +47,7 @@ const READ_ONLY_CONFIG_KEYS = new Set([
   "CATALOG",
   "CATALOG_MODELS",
   "CATALOG_STATUS",
+  "UPSTREAM_MODEL_CHOICES",
 ]);
 const catalogState = {
   revision: "",
@@ -242,6 +243,7 @@ let lastUsageSourceSignature = "";
 let lastLogRenderSignature = "";
 let latestAdapter = null;
 let latestUpstreamModelOverride = null;
+let latestUpstreamModelChoices = [];
 let latestWebSearchBackend = "local";
 let latestCatalogRuntimeDiagnostic = null;
 let codexRuntimeVerificationInFlight = false;
@@ -1462,6 +1464,9 @@ function renderConfig(config) {
   latestUpstreamModelOverride = config.UPSTREAM_MODEL_OVERRIDE == null
     ? null
     : String(config.UPSTREAM_MODEL_OVERRIDE);
+  latestUpstreamModelChoices = Array.isArray(config.UPSTREAM_MODEL_CHOICES)
+    ? config.UPSTREAM_MODEL_CHOICES.map((value) => String(value))
+    : [];
   setRadioValue("NETWORK_PROXY_MODE", normalizeNetworkProxyMode(config.NETWORK_PROXY_MODE || config.WEB_SEARCH_PROXY_MODE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
@@ -4430,8 +4435,9 @@ function handleConfigInput(event) {
 }
 
 function refreshUsageForBillingConfigInput(event) {
-  const target = event && event.target;
-  const id = target && String(target.id || "");
+  // `handleConfigInput` is also called without an event (theme, model lock), so
+  // this must not assume one.
+  const id = String((event && event.target && event.target.id) || "");
   if (!id.startsWith("BILLING_")) return;
   lastUsageSignature = "";
   if (latestUsageRuntime) renderUsage(latestUsageRuntime);
@@ -4798,6 +4804,7 @@ function renderBillingCatalog() {
   const signature = stableStringify({
     models: models.map((model) => [model.slug, model.display_name, model.short_display_name, model.description]),
     selected: selectedCatalogModel,
+    upstream: latestUpstreamModelOverride,
     revision: catalogState.revision,
     currency: catalogState.currency,
   });
@@ -4827,6 +4834,8 @@ function renderBillingModelList(models) {
   }
   for (const model of models) {
     const selected = model.slug === selectedCatalogModel;
+    const item = document.createElement("div");
+    item.className = "billing-model-item";
     const card = document.createElement("button");
     card.type = "button";
     card.className = selected ? "billing-model-card is-selected" : "billing-model-card";
@@ -4853,8 +4862,45 @@ function renderBillingModelList(models) {
       desc.textContent = slug;
       card.append(desc);
     }
-    list.append(card);
+    item.append(card, renderModelLock(model));
+    list.append(item);
   }
+}
+
+/// The lock pins this model as the upstream one. It stays hidden until the row
+/// is hovered, and stays visible in red once it is the pinned model.
+function renderModelLock(model) {
+  const slug = String(model && model.slug ? model.slug : "").trim();
+  const lockable = upstreamModelChoices().includes(slug);
+  const locked = lockable && latestUpstreamModelOverride === slug;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = locked ? "model-lock is-locked" : "model-lock";
+  button.dataset.lockModel = slug;
+  button.setAttribute("aria-pressed", locked ? "true" : "false");
+  button.disabled = !lockable;
+  const label = t(locked ? "modelLockClear" : "modelLockPin");
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = MODEL_LOCK_ICON;
+  return button;
+}
+
+/// MingCute lock-fill (MIT); inline so the icon follows the button colour.
+const MODEL_LOCK_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a6 6 0 0 1 6 6h1a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1a6 6 0 0 1 6-6m-.107 10.005A1.998 1.998 0 0 0 11 15.729V17a1 1 0 1 0 2 0v-1.27a1.997 1.997 0 0 0-.894-3.725 1 1 0 0 0-.213 0M12 4a4 4 0 0 0-4 4h8a4 4 0 0 0-4-4"/></svg>';
+
+/// Slugs the backend can actually pin; anything else would save nothing.
+function upstreamModelChoices() {
+  return Array.isArray(latestUpstreamModelChoices) ? latestUpstreamModelChoices : [];
+}
+
+function toggleUpstreamModel(slug) {
+  const target = String(slug || "").trim();
+  if (!target || !upstreamModelChoices().includes(target)) return;
+  latestUpstreamModelOverride = latestUpstreamModelOverride === target ? "default" : target;
+  renderBillingCatalog();
+  handleConfigInput();
 }
 
 function renderBillingCard(model) {
@@ -4944,6 +4990,11 @@ function catalogPricingBadge(rate) {
 }
 
 function selectBillingModel(event) {
+  const lock = event.target && event.target.closest ? event.target.closest(".model-lock") : null;
+  if (lock) {
+    toggleUpstreamModel(lock.dataset ? lock.dataset.lockModel : "");
+    return;
+  }
   const card = event.target && event.target.closest ? event.target.closest(".billing-model-card") : null;
   if (!card) return;
   const slug = card.dataset ? card.dataset.model : "";

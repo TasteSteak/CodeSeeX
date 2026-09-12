@@ -7,6 +7,7 @@
 .billing-catalog { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .billing-catalog > .btn { width: 100%; min-height: 34px; padding: 8px 14px; font-size: 13px; }
 .billing-model-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
+.billing-model-item { position: relative; display: flex; flex-direction: column; flex: none; }
 .billing-model-card { display: flex; flex-direction: column; gap: 3px; flex: none; min-width: 0; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--hover-bg); color: inherit; font: inherit; text-align: left; cursor: pointer; box-shadow: var(--shadow-sm); transition: var(--theme-transition); }
 .billing-model-card:hover { border-color: var(--text-muted); box-shadow: var(--shadow-md); }
 .billing-model-card:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
@@ -15,6 +16,19 @@
 .billing-model-name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: var(--theme-transition); }
 .billing-model-desc { font-size: 11.5px; line-height: 1.4; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: var(--theme-transition); }
 .billing-model-card.is-selected .billing-model-badge { color: var(--primary-text); background: var(--primary); border-color: var(--primary); }
+/* Upstream lock: hidden until the row is hovered, red once it pins the model. */
+.model-lock {
+  position: absolute; right: 8px; bottom: 8px; width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border-color); border-radius: 7px;
+  background: var(--bg-panel); color: var(--text-muted);
+  opacity: 0; cursor: pointer; transition: var(--theme-transition);
+}
+.model-lock svg { width: 14px; height: 14px; display: block; }
+.billing-model-item:hover .model-lock, .model-lock:focus-visible { opacity: 1; }
+.model-lock:hover { color: var(--text-main); border-color: var(--text-muted); }
+.model-lock.is-locked { opacity: 1; color: var(--danger); border-color: var(--danger); }
+.model-lock[disabled] { display: none; }
 .billing-model-empty { padding: 40px 16px; border: 1px dashed var(--border-color); border-radius: var(--radius-md); text-align: center; color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
 .billing-model-empty small { display: block; margin-top: 4px; }
 .billing-card-panel { display: flex; min-width: 0; }

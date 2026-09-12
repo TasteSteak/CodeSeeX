@@ -317,6 +317,8 @@
   "reasoningSummaryMode_smart": "智能",
   "reasoningSummaryMode_fixed": "定长",
   "reasoningSummaryMode_full": "完整",
+  "modelLockPin": "锁定为上游模型",
+  "modelLockClear": "取消锁定，回到跟随客户端",
   "toolApplyPatchName": "应用补丁",
   "toolApplyPatchDescription": "Codex 原生补丁编辑工具，用于精确修改文件；作为系统工具跟随 Codex 设置。",
   "toolWebSearchName": "网页搜索",
