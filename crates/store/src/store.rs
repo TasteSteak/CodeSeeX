@@ -4215,6 +4215,13 @@ struct UsageFinalAnchor {
     prompt_cache_key: Option<String>,
 }
 
+/// The finished turn a handed-back round trip belongs to.
+///
+/// The same user turn is an exact summary match, and it may span as much time
+/// as the turn really took: a long agentic turn is still one turn. Everything
+/// weaker (the conversation-level prompt cache, or "the next turn within a few
+/// minutes") only fills in for a handoff that carries no user summary at all,
+/// so a parallel conversation can never adopt another turn's round trip.
 fn usage_final_anchor_for_handoff(
     handoff: &StoredRequest,
     finals: &[UsageFinalAnchor],
@@ -4227,21 +4234,24 @@ fn usage_final_anchor_for_handoff(
         if final_turn.created_at < handoff.created_at {
             continue;
         }
-        let delay = final_turn
-            .created_at
-            .signed_duration_since(handoff.created_at);
-        if delay > Duration::minutes(20) {
-            break;
-        }
         if summary_key.is_some() && summary_key == final_turn.summary_key {
             return Some(final_turn.id.clone());
         }
         if full_context_key.is_some() && full_context_key == final_turn.full_context_key {
             return Some(final_turn.id.clone());
         }
-        if (prompt_cache_key.is_some() && prompt_cache_key == final_turn.prompt_cache_key)
-            || (fallback.is_none() && delay <= Duration::minutes(3))
-        {
+        let delay = final_turn
+            .created_at
+            .signed_duration_since(handoff.created_at);
+        if delay > Duration::minutes(20) {
+            break;
+        }
+        if summary_key.is_some() || fallback.is_some() {
+            continue;
+        }
+        let same_conversation =
+            prompt_cache_key.is_some() && prompt_cache_key == final_turn.prompt_cache_key;
+        if same_conversation || delay <= Duration::minutes(3) {
             fallback = Some(final_turn.id.clone());
         }
     }
@@ -6628,6 +6638,107 @@ mod tests {
                 || row.label == "合计")
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A handoff as the store sees it, with the user summary Codex sends.
+    fn test_handoff(id: &str, user_text: Option<&str>, created_at: DateTime<Utc>) -> StoredRequest {
+        let input = match user_text {
+            Some(text) => json!({
+                "prompt_cache_key": "same-thread",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }]
+                }]
+            }),
+            None => json!({
+                "prompt_cache_key": "same-thread",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                }]
+            }),
+        };
+        StoredRequest {
+            id: id.to_owned(),
+            previous_response_id: None,
+            status: RequestStatus::Completed,
+            model: Some("deepseek-v4-flash".to_owned()),
+            input,
+            response: json!({}),
+            turn_messages: Vec::new(),
+            tool_facts: Vec::new(),
+            diagnostic: Some(json!({ "codeseex_lifecycle": "client_tool_handoff" })),
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    fn test_final_anchor(
+        id: &str,
+        created_at: DateTime<Utc>,
+        summary_key: Option<String>,
+    ) -> UsageFinalAnchor {
+        UsageFinalAnchor {
+            id: id.to_owned(),
+            created_at,
+            summary_key,
+            full_context_key: None,
+            prompt_cache_key: Some(stable_hash_hex(b"same-thread")),
+        }
+    }
+
+    /// A long agentic turn is still one turn: the summary match must not be
+    /// bounded by the window used for everything weaker.
+    #[test]
+    fn a_long_turn_still_owns_its_handoff() {
+        let created_at = Utc::now();
+        let handoff = test_handoff("resp_long_handoff", Some("long agentic turn"), created_at);
+        let finals = vec![test_final_anchor(
+            "resp_long_final",
+            created_at + Duration::minutes(45),
+            usage_summary_key(&handoff),
+        )];
+
+        assert_eq!(
+            usage_final_anchor_for_handoff(&handoff, &finals),
+            Some("resp_long_final".to_owned())
+        );
+    }
+
+    /// The conversation-level prompt cache is not turn identity: a handoff that
+    /// carries a user summary never adopts a different turn that happens to
+    /// share the thread.
+    #[test]
+    fn a_handoff_never_adopts_another_turn() {
+        let created_at = Utc::now();
+        let handoff = test_handoff("resp_other_turn_handoff", Some("turn A"), created_at);
+        let finals = vec![test_final_anchor(
+            "resp_other_final",
+            created_at + Duration::seconds(30),
+            Some("another turn".to_owned()),
+        )];
+
+        assert_eq!(usage_final_anchor_for_handoff(&handoff, &finals), None);
+    }
+
+    /// A continuation that carries no user message at all still belongs to the
+    /// turn that follows it.
+    #[test]
+    fn a_handoff_without_a_summary_uses_the_nearest_turn() {
+        let created_at = Utc::now();
+        let handoff = test_handoff("resp_summaryless_handoff", None, created_at);
+        let finals = vec![test_final_anchor(
+            "resp_summaryless_final",
+            created_at + Duration::seconds(20),
+            Some("whatever".to_owned()),
+        )];
+
+        assert_eq!(
+            usage_final_anchor_for_handoff(&handoff, &finals),
+            Some("resp_summaryless_final".to_owned())
+        );
     }
 
     #[tokio::test]
