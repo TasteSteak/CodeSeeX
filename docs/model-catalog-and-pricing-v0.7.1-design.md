@@ -72,7 +72,7 @@
 | 层 | 名称 | 载体 | 作用 | 是否可离线 |
 | --- | --- | --- | --- | --- |
 | L0 | 内置目录 | 二进制内嵌 JSON | 保底真值，必须自洽完整 | 是 |
-| L1 | 远程清单 | `docs/catalog/model-catalog.json`（GitHub raw，可换镜像） | 新模型 / 新价格 / 新窗口 | 否 |
+| L1 | 远程清单 | `catalog/model-catalog.json`（GitHub raw，可换镜像） | 新模型 / 新价格 / 新窗口 | 否 |
 | L2 | 本地缓存 | `~/.codeseex/cache/model-catalog.json` + `*.meta.json` | 远程结果的持久化快照与 ETag | 是 |
 | L3 | 用户覆盖 | `config.toml` 的 `[models.*]` / `[billing.*]` | 用户自己的 slug、别名与真实价格 | 是 |
 | L4 | 上游探测 | `GET {base_url}/models` | 仅可用性标记 | 否 |
@@ -143,7 +143,7 @@
 
 0.7.1 拆分：
 
-- **公开目录**：`docs/catalog/model-catalog.json`，进仓库、可远程分发、可被用户覆盖。
+- **公开目录**：`catalog/model-catalog.json`，进仓库、可远程分发、可被用户覆盖。
 - **私有 overlay**：`common_model_fields`（`base_instructions` 等），继续作为编译期私有输入，**不**进远程清单。
 
 合并时以 slug 为键做一次浅合并，overlay 只覆盖它声明的字段。远程清单永远不能改写本地 overlay 的提示词字段。
@@ -238,7 +238,7 @@
 ### 9.2 拉取时机与 URL
 
 - 启动后延迟拉取（不阻塞窗口打开与代理启动）；成功后若 `revision` 变化，通知 UI 并重写 `model-catalog.json`。
-- 默认源：与 release notes 同域的 GitHub raw 路径（`docs/catalog/model-catalog.json`），支持用户自定义镜像 URL。
+- 默认源：与 release notes 同域的 GitHub raw 路径（`catalog/model-catalog.json`），支持用户自定义镜像 URL。
 - 请求不携带任何上游凭据；`User-Agent: CodeSeeX`；重定向限制不超过 3 次。
 
 ### 9.3 校验（拒绝即回退）

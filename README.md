@@ -313,7 +313,7 @@ cargo test --workspace
 
 Source builds require a model catalog seed at build time. Set `CODESEEX_MODEL_CATALOG_SEED` to a local seed file, or place `model-catalog.seed.json` under `.private/`.
 
-The model list and pricing are data, not constants. CodeSeeX resolves them in layers — user overrides, the remote manifest `docs/catalog/model-catalog.json` (re-checked every six hours), the local cache under `<data dir>/cache/`, and the built-in document — so models and prices can change without a new build, and an offline machine always keeps a complete fallback. Point `CODESEEX_CATALOG_URL` at a mirror to use your own manifest, or set it to `off` to disable remote refresh. `GET /api/catalog`, `POST /api/catalog/refresh`, `GET /api/upstream/probe`, and `POST /api/upstream/test` expose this to the desktop manager.
+The model list and pricing are data, not constants. CodeSeeX resolves them in layers — user overrides, the remote manifest `catalog/model-catalog.json` (re-checked every six hours), the local cache under `<data dir>/cache/`, and the built-in document — so models and prices can change without a new build, and an offline machine always keeps a complete fallback. Point `CODESEEX_CATALOG_URL` at a mirror to use your own manifest, or set it to `off` to disable remote refresh. `GET /api/catalog`, `POST /api/catalog/refresh`, `GET /api/upstream/probe`, and `POST /api/upstream/test` expose this to the desktop manager.
 
 On Windows, helper scripts load MSVC Build Tools when available, import `.env`, and keep Cargo caches under a configurable local dev directory by default:
 

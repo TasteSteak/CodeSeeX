@@ -249,10 +249,7 @@ fn catalog_from_seed_and_document(
             .find(|candidate| candidate.slug == model.slug)
         {
             for (key, value) in &seed_model.extra {
-                model
-                    .extra
-                    .entry(key.clone())
-                    .or_insert_with(|| value.clone());
+                merge_seed_field(&mut model, key, value);
             }
         }
         models.push(model);
@@ -268,12 +265,19 @@ fn apply_common_model_fields(catalog: &mut Catalog, fields: &BTreeMap<String, Va
     }
     for model in &mut catalog.models {
         for (key, value) in fields {
-            model
-                .extra
-                .entry(key.clone())
-                .or_insert_with(|| value.clone());
+            merge_seed_field(model, key, value);
         }
     }
+}
+
+/// Prompt material always comes from the private seed; every other field lets
+/// the document win and only falls back to the seed.
+fn merge_seed_field(model: &mut CatalogModel, key: &str, value: &Value) {
+    if CATALOG_PROMPT_FIELDS.contains(&key) {
+        model.extra.insert(key.to_owned(), value.clone());
+        return;
+    }
+    model.extra.entry(key.to_owned()).or_insert_with(|| value.clone());
 }
 
 fn catalog_model_is_hidden(model: &CatalogModel) -> bool {
@@ -662,6 +666,11 @@ fn toml_path_string(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub const SUPPORTED_CATALOG_SCHEMA_VERSION: u32 = 1;
+/// Fields that may only ever come from the private, compile-time seed. A
+/// catalog document - remote, cached or user-written - that declares one of
+/// them would otherwise take over the shipped prompt material, so the parser
+/// rejects it outright instead of merging it.
+pub const CATALOG_PROMPT_FIELDS: [&str; 2] = ["base_instructions", "model_messages"];
 /// Remote catalog documents larger than this are rejected outright.
 pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
 const EMBEDDED_CATALOG_JSON: &str = include_str!("../assets/catalog.default.json");
@@ -676,6 +685,9 @@ static EMBEDDED_CATALOG: OnceLock<CatalogDocument> = OnceLock::new();
 pub struct CatalogDocument {
     pub schema_version: u32,
     pub revision: String,
+    /// Publication stamp of the remote manifest. Optional: the built-in
+    /// document has none, and the cache keeps whatever the remote declared.
+    pub issued_at: Option<String>,
     pub provider_name: String,
     pub default_model: String,
     pub min_app_version: Option<String>,
@@ -722,6 +734,12 @@ impl CatalogDocument {
             .filter(|value| !value.is_empty())
             .unwrap_or("CodeSeeX")
             .to_owned();
+        let issued_at = object
+            .get("issued_at")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
         let min_app_version = object
             .get("min_app_version")
             .and_then(Value::as_str)
@@ -776,6 +794,7 @@ impl CatalogDocument {
         Ok(Self {
             schema_version: SUPPORTED_CATALOG_SCHEMA_VERSION,
             revision,
+            issued_at,
             provider_name,
             default_model,
             min_app_version,
@@ -793,6 +812,7 @@ impl CatalogDocument {
         json!({
             "schema_version": self.schema_version,
             "revision": self.revision,
+            "issued_at": self.issued_at,
             "provider_name": self.provider_name,
             "default_model": self.default_model,
             "min_app_version": self.min_app_version,
@@ -916,6 +936,10 @@ impl CatalogDocument {
         CatalogDocument {
             schema_version: overlay.schema_version,
             revision: overlay.revision.clone(),
+            issued_at: overlay
+                .issued_at
+                .clone()
+                .or_else(|| self.issued_at.clone()),
             provider_name: if overlay.provider_name.trim().is_empty() {
                 self.provider_name.clone()
             } else {
@@ -1027,6 +1051,13 @@ fn validate_catalog_model(model: &CatalogModel) -> Result<(), String> {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
         return Err(format!("catalog model slug has unsupported characters: {slug}"));
+    }
+    for key in CATALOG_PROMPT_FIELDS {
+        if model.extra.contains_key(key) {
+            return Err(format!(
+                "catalog model {slug} must not declare {key}; prompt material is compiled into CodeSeeX"
+            ));
+        }
     }
     if model.display_name.trim().is_empty() {
         return Err(format!("catalog model {slug} needs a display_name"));
@@ -1231,14 +1262,14 @@ mod tests {
         assert!(slugs.contains(&"deepseek-v4-pro"));
     }
 
-    /// The published remote manifest (`docs/catalog/model-catalog.json`) is the
+    /// The published remote manifest (`catalog/model-catalog.json`) is the
     /// document every client fetches first; it must always parse with the same
     /// parser and validation rules as any other catalog document.
     #[test]
     fn published_remote_catalog_document_is_valid() {
         let document = CatalogDocument::from_json(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/catalog/model-catalog.json"
+            "/../../catalog/model-catalog.json"
         )))
         .expect("published catalog document must parse");
 
@@ -1286,6 +1317,8 @@ mod tests {
             document(&format!("{},{}", model("m1"), model("m1"))),
             valid.replace("\"default_model\":\"m1\"", "\"default_model\":\"missing\""),
             document(&windowless_model("m1")),
+            document(&model("m1").replace("\"priority\":1", "\"base_instructions\":\"x\",\"priority\":1")),
+            document(&model("m1").replace("\"priority\":1", "\"model_messages\":{},\"priority\":1")),
             "not json at all".to_owned(),
         ];
         for text in rejected {
@@ -1294,6 +1327,43 @@ mod tests {
                 "expected the document to be rejected: {text}"
             );
         }
+    }
+
+    /// Prompt material is compiled in from the seed. A document carrying it -
+    /// an older cache file, a hand-written overlay - must never win.
+    #[test]
+    fn seed_prompt_fields_beat_the_document() {
+        let mut document = embedded_catalog_document();
+        document.models[0]
+            .extra
+            .insert("base_instructions".to_owned(), Value::String("remote".to_owned()));
+
+        let catalog = catalog_from_seed_and_document(
+            r#"{"common_model_fields":{"base_instructions":"seed"},"models":[]}"#,
+            &document,
+        )
+        .expect("compact seed");
+
+        assert_eq!(
+            catalog.models[0]
+                .extra
+                .get("base_instructions")
+                .and_then(Value::as_str),
+            Some("seed")
+        );
+    }
+
+    #[test]
+    fn catalog_document_keeps_issued_at() {
+        let text = r#"{"schema_version":1,"revision":"r1","issued_at":"2026-09-01T00:00:00Z","provider_name":"DeepSeek","default_model":"m1","models":[{"slug":"m1","display_name":"m1","description":"d","context_window":1000,"effective_context_window_percent":95,"priority":1}]}"#;
+        let document = CatalogDocument::from_json(text).expect("document");
+
+        assert_eq!(document.issued_at.as_deref(), Some("2026-09-01T00:00:00Z"));
+        assert_eq!(
+            document.to_value().get("issued_at").and_then(Value::as_str),
+            Some("2026-09-01T00:00:00Z")
+        );
+        assert!(embedded_catalog_document().issued_at.is_none());
     }
 
     #[test]

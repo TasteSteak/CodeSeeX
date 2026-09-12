@@ -6,11 +6,11 @@
 
 | 类别 | 路径 | 作用 | 备注 |
 | --- | --- | --- | --- |
-| 公开远端清单（发布源） | `docs/catalog/model-catalog.json` | 被远程拉取的源文件；默认 URL 直接指向它 | 进 git、进 `main` 后才对线上生效；含 `issued_at`/`min_app_version` |
+| 公开远端清单（发布源） | `catalog/model-catalog.json` | 被远程拉取的源文件；默认 URL 直接指向它 | 独立目录，不再放在 `docs/`（`docs/website` 是 Pages 站点）；进 git、进 `main` 后才对线上生效；含 `issued_at`/`min_app_version` |
 | 内置保底（编译期） | `crates/core/assets/catalog.default.json` | `include_str!` 编进二进制，`embedded_catalog_document()` 读取 | 与公开清单只差 `issued_at`/`min_app_version` 两个键 |
 | 私有 overlay（编译期） | `.private/model-catalog.seed.json` | 私有提示词 `base_instructions`/`model_messages` 来源；`crates/core/build.rs` 拷贝进 `OUT_DIR` | 编译必须存在；可用 `CODESEEX_MODEL_CATALOG_SEED` 覆盖路径；**绝不进入远程清单** |
 | 运行时契约文件 | `<data_dir>/model-catalog.json` | Codex 客户端实际读取的文件（Codex 契约，`{ "models": [...] }`） | 由 `build_codeseex_catalog_from_document` 合并私有 overlay 后生成；磁盘契约保持兼容 |
-| 运行时远程缓存 | `<data_dir>/cache/model-catalog.json` | 远程文档落地缓存（层 2） | 原子写；与公开清单只差 `issued_at`（`CatalogDocument` 不保存它） |
+| 运行时远程缓存 | `<data_dir>/cache/model-catalog.json` | 远程文档落地缓存（层 2） | 原子写；`issued_at` 随文档一起保存与回读 |
 | 运行时日志 | `<data_dir>/logs/<yyyy-MM-dd>.jsonl` | `catalog_remote_refresh` / `request_failed` 等诊断事件 | 排障入口 |
 
 - `<data_dir>` 默认 `~/.codeseex`，可用 `CODESEEX_DATA_DIR` 覆盖。
@@ -18,7 +18,7 @@
 
 ## 2. 数据来源与配置
 
-- 默认远端 URL：`https://raw.githubusercontent.com/TasteSteak/CodeSeeX/main/docs/catalog/model-catalog.json`（`crates/proxy/src/catalog_service.rs:20-22` 的常量拼接）。
+- 默认远端 URL：`https://raw.githubusercontent.com/TasteSteak/CodeSeeX/main/catalog/model-catalog.json`（`crates/proxy/src/catalog_service.rs:20-22` 的常量拼接）。
 - 覆盖方式（优先级从低到高）：`[catalog] source_url`（`config.toml`，`crates/core/src/config.rs:150-155`）→ `CODESEEX_CATALOG_URL` 环境变量。值为 `off`/`none`/`disabled`/`false` 表示关闭远程拉取（`catalog_service.rs:107-108`）。
 - 开关：`[catalog] remote_enabled` / `CODESEEX_CATALOG_REMOTE`（默认开）。`[catalog] mode` 是旧字段，仅兼容解析、不参与逻辑。
 - 拉取时机：进程启动延迟 3 秒拉一次；之后每 6 小时自动复查（`CATALOG_REFRESH_INTERVAL`，`catalog_service.rs:27`）；设置页「Update now」走 `POST /api/catalog/refresh`。单次 8 秒超时，两次拉取间隔 60 秒节流（`CATALOG_REQUEST_TIMEOUT`/`CATALOG_FETCH_THROTTLE`）。
@@ -167,13 +167,13 @@
 
 - 全量：`cargo test --workspace`。
 - 定向：`cargo test -p codeseex-core --lib pricing::`、`cargo test -p codeseex-core --lib catalog::`、`cargo test -p codeseex-store --lib`、`cargo test -p codeseex-proxy --lib catalog_service::`、`cargo test -p codeseex-proxy --lib upstream::`。
-- 端到端烟测做法（本轮已跑通）：起一个本地静态服务托管 `docs/catalog/model-catalog.json`，用 `CODESEEX_CATALOG_URL` 指向它，观察 `<data_dir>/cache/model-catalog.json` 落盘、`<data_dir>/model-catalog.json` 重写、第二次刷新拿到 304；把 URL 指向不可达地址或非法文档，验证只记 `last_failure` 且回退到上一层。
+- 端到端烟测做法（本轮已跑通）：起一个本地静态服务托管 `catalog/model-catalog.json`，用 `CODESEEX_CATALOG_URL` 指向它，观察 `<data_dir>/cache/model-catalog.json` 落盘、`<data_dir>/model-catalog.json` 重写、第二次刷新拿到 304；把 URL 指向不可达地址或非法文档，验证只记 `last_failure` 且回退到上一层。
 - 构建/运行环境：`CARGO_TARGET_DIR` 建议复用 `D:\DevTools\CodeSeeXNext\CargoTarget`。
 
 ## 9. 已知限制与优化方向（给后续代理）
 
 1. **ETag 不持久化**：只在进程内存。可选优化：把 ETag 与 `last_success` 落到 `<data_dir>/cache/model-catalog.meta.json`（注意原子写与容错）。
-2. **默认 URL 指向 `main`**：`docs/catalog/model-catalog.json` 未推送到 `main` 之前，线上拉取会 404 并回退到缓存/内置（预期行为，不是缺陷）。
+2. **默认 URL 指向 `main`**：`catalog/model-catalog.json` 未推送到 `main` 之前，线上拉取会 404 并回退到缓存/内置（预期行为，不是缺陷）。
 3. **探测与真实流量身份不同**：`/api/upstream/probe`、`/api/upstream/test` 没有客户端请求可透传，对「按 Codex 客户端做白名单」的中转必然 401；已有 `probe_diagnostics`（`catalog_service.rs:454`）追加解释文案。若要更贴近真实链路，需谨慎评估是否在探测中合成身份（涉及语义正确性，不要擅自改）。
 4. **`pricing.groups` 当前为空**：分组回退链路已实现（`rate_for` 第二分支、UI `catalogRateFor`），但没有实际数据；新增分组时后端与 UI 都会自动生效。
 5. **未定价语义**：`rate_for` 返回 `None` 时 UI 显示「未定价」（`billingUnpriced`），绝不能回退到 Pro 价。
@@ -183,7 +183,7 @@
 
 ## 10. 红线（不要改）
 
-- 不要把私有提示词（`base_instructions`/`model_messages`）写进 `docs/catalog/model-catalog.json` 或任何远程清单。
+- 私有提示词（`base_instructions`/`model_messages`）只能来自 `.private/model-catalog.seed.json`。任何 catalog 文档（远程清单、缓存文件、用户 TOML）声明这两个键都会被 `CatalogDocument::from_value` 直接拒收（`CATALOG_PROMPT_FIELDS`，`crates/core/src/catalog.rs`），并且合并时 seed 永远优先于文档。
 - 不要让远程清单覆盖本地 overlay 的提示词字段。
 - 不要在拉取失败时删除模型、切换 transport 或让代理启动失败。
 - 不要把模型/定价重新写回 Rust 常量或前端常量。

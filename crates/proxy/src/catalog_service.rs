@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 const CODESEEX_CATALOG_RAW_BASE_URL: &str =
     "https://raw.githubusercontent.com/TasteSteak/CodeSeeX";
-const CODESEEX_CATALOG_DEFAULT_PATH: &str = "main/docs/catalog/model-catalog.json";
+const CODESEEX_CATALOG_DEFAULT_PATH: &str = "main/catalog/model-catalog.json";
 const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CATALOG_FETCH_THROTTLE: Duration = Duration::from_secs(60);
 /// CodeSeeX is a tray program that can stay open for days, so the manifest is
@@ -171,6 +171,7 @@ impl CatalogService {
             .collect::<Vec<_>>();
         json!({
             "revision": document.revision,
+            "issued_at": document.issued_at,
             "provider_name": document.provider_name,
             "default_model": document.default_slug(),
             "pricing": document.pricing.to_value(),
