@@ -5,6 +5,11 @@ use futures_util::StreamExt;
 use serde_json::json;
 use serde_json::Value;
 
+/// Hard cap for the local usage scan's frame buffer. The provider frame itself is
+/// always forwarded to the client, so this only bounds what CodeSeeX buffers
+/// while looking for the frame's end.
+const MAX_BUFFERED_SSE_BYTES: usize = 8 * 1024 * 1024;
+
 pub(crate) fn response_from_stream(
     status: reqwest::StatusCode,
     content_type: Option<HeaderValue>,
@@ -30,10 +35,11 @@ pub(crate) fn passthrough_stream_with_completion(
         let mut upstream = response.bytes_stream();
         let mut buffer = Vec::<u8>::new();
         let mut usage = Value::Null;
+        let mut dropped_oversized_frame = false;
         while let Some(chunk) = upstream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    capture_stream_usage(&bytes, &mut buffer, &mut usage);
+                    dropped_oversized_frame |= capture_stream_usage(&bytes, &mut buffer, &mut usage);
                     yield bytes;
                 }
                 Err(error) => {
@@ -50,6 +56,19 @@ pub(crate) fn passthrough_stream_with_completion(
                     Err(std::io::Error::other(error))?;
                 }
             }
+        }
+        if dropped_oversized_frame {
+            let _ = store
+                .record_event(
+                    "warn",
+                    "stream_frame_oversized",
+                    "A chat completion frame exceeded the local usage scan limit.",
+                    Some(&json!({
+                        "id": request_id,
+                        "limit_bytes": MAX_BUFFERED_SSE_BYTES
+                    })),
+                )
+                .await;
         }
         capture_remaining_stream_usage(&buffer, &mut usage);
         let response = (!usage.is_null()).then(|| json!({ "usage": usage }));
@@ -78,13 +97,22 @@ pub(crate) fn passthrough_stream_with_completion(
     }
 }
 
-fn capture_stream_usage(bytes: &Bytes, buffer: &mut Vec<u8>, usage: &mut Value) {
+/// Scans complete frames for usage. Returns `true` when an unfinished frame grew
+/// past the cap and had to be dropped from the scan.
+fn capture_stream_usage(bytes: &Bytes, buffer: &mut Vec<u8>, usage: &mut Value) -> bool {
     buffer.extend_from_slice(bytes);
     while let Some((index, delimiter_len)) = find_sse_frame_delimiter(buffer.as_slice()) {
         let frame = buffer.drain(..index).collect::<Vec<_>>();
         buffer.drain(..delimiter_len);
         capture_sse_frame_usage(&frame, usage);
     }
+    if buffer.len() > MAX_BUFFERED_SSE_BYTES {
+        // The frame has no delimiter in sight; keeping it would grow without
+        // bound, so the scan gives up (the bytes reached the client already).
+        buffer.clear();
+        return true;
+    }
+    false
 }
 
 fn capture_remaining_stream_usage(buffer: &[u8], usage: &mut Value) {
@@ -207,6 +235,27 @@ mod tests {
         );
         assert_eq!(usage["total_tokens"], 7);
         assert!(buffer.is_empty());
+    }
+
+    /// A frame without a delimiter cannot be scanned, so past the cap the scan
+    /// stops instead of buffering the response forever.
+    #[test]
+    fn an_unterminated_frame_past_the_cap_stops_the_scan() {
+        let mut buffer = Vec::new();
+        let mut usage = Value::Null;
+
+        let oversized = Bytes::from(vec![b'x'; MAX_BUFFERED_SSE_BYTES + 1]);
+        assert!(capture_stream_usage(&oversized, &mut buffer, &mut usage));
+        assert!(buffer.is_empty());
+
+        let mut buffer = Vec::new();
+        let mut usage = Value::Null;
+        assert!(!capture_stream_usage(
+            &Bytes::from_static(b"data: {\"usage\":{\"total_tokens\":9}}\n\n"),
+            &mut buffer,
+            &mut usage,
+        ));
+        assert_eq!(usage["total_tokens"], 9);
     }
 
     #[test]
