@@ -3526,17 +3526,17 @@ fn completed_conversation_turns(inner: &StoreInner) -> Vec<RequestTurn> {
 }
 
 fn completed_billable_requests(inner: &StoreInner) -> Vec<RequestTurn> {
-    let mut requests = inner
+    // Deliberately not truncated here: the sessions need the rows of every
+    // retained final, and `inner.requests` is already capped by
+    // MAX_RUNTIME_REQUESTS. `runtime_summary_from_inner` trims the serialized
+    // history instead.
+    inner
         .request_order
         .iter()
         .filter_map(|id| inner.requests.get(id))
         .filter(|request| request_is_completed_billable_request(request))
         .filter_map(turn_from_request)
-        .collect::<Vec<_>>();
-    if requests.len() > MAX_RUNTIME_TURNS {
-        requests.drain(0..requests.len() - MAX_RUNTIME_TURNS);
-    }
-    requests
+        .collect()
 }
 
 fn runtime_summary_from_inner(
@@ -3614,6 +3614,12 @@ fn runtime_summary_from_inner(
             .sum::<u64>()
             / u64::try_from(billable_totals.len()).unwrap_or(1)
     };
+    // The sessions were built from every retained row; only the history that
+    // goes out in the payload is trimmed to the turn window.
+    let mut billable_history = billable_history;
+    if billable_history.len() > MAX_RUNTIME_TURNS {
+        billable_history.drain(0..billable_history.len() - MAX_RUNTIME_TURNS);
+    }
     RuntimeSummary {
         usage_revision: inner.usage_revision,
         event_revision: inner.event_revision,
@@ -3711,12 +3717,30 @@ fn usage_session_summary(session: &UsageSession, pricing: &PricingTable) -> Usag
         billing_buckets: usage_billing_buckets_from_session(session, pricing),
         row_count: session.rows.len(),
         segment_count: session.segments.len(),
-        session_revision: stable_hash_hex(
-            serde_json::to_string(session)
-                .unwrap_or_default()
-                .as_bytes(),
-        ),
+        session_revision: usage_session_revision(session),
     }
+}
+
+/// Cheap change marker for one session: everything the session list shows,
+/// without serializing its rows and segments on every poll.
+fn usage_session_revision(session: &UsageSession) -> String {
+    stable_hash_hex(
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            session.id,
+            session.status,
+            session.rows.len(),
+            session.segments.len(),
+            session.total_tokens,
+            session.request_ms,
+            session
+                .rows
+                .last()
+                .map(|row| row.id.as_str())
+                .unwrap_or_default()
+        )
+        .as_bytes(),
+    )
 }
 
 fn usage_session_summary_cursor(session: &UsageSessionSummary) -> String {
@@ -4008,46 +4032,44 @@ fn usage_sessions_from_inner(
         ));
     }
 
-    let mut non_final_rows = billable_by_id
-        .values()
-        .filter(|turn| {
-            turn.lifecycle == "client_tool_handoff"
-                || request_has_guard_stopped_by_id(inner, &turn.id)
-        })
-        .filter_map(|turn| {
-            let request = inner.requests.get(&turn.id)?;
-            Some((
-                usage_non_final_session_key(request),
-                request.created_at,
-                turn.id.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    non_final_rows.sort_by(|left, right| left.1.cmp(&right.1).then(left.2.cmp(&right.2)));
-    let mut non_final_session_ids = HashSet::new();
-    for (session_key, _, _id) in non_final_rows {
-        if !non_final_session_ids.insert(session_key.clone()) {
+    // Rounds that were handed back but never got a finished turn of their own
+    // (an abandoned or interrupted user turn) still group by session key. One
+    // pass builds the groups instead of rescanning the billable rows per key.
+    let mut non_final_groups: HashMap<String, Vec<String>> = HashMap::new();
+    for turn in billable_by_id.values() {
+        let Some(request) = inner.requests.get(&turn.id) else {
+            continue;
+        };
+        if turn.lifecycle != "client_tool_handoff" && !request_has_guard_stopped(request) {
             continue;
         }
-        let ids = billable_by_id
-            .values()
-            .filter_map(|turn| {
-                let request = inner.requests.get(&turn.id)?;
-                (usage_non_final_session_key(request) == session_key).then_some(turn.id.clone())
-            })
-            .collect::<Vec<_>>();
+        non_final_groups
+            .entry(usage_non_final_session_key(request))
+            .or_default()
+            .push(turn.id.clone());
+    }
+    let mut non_final_groups = non_final_groups.into_iter().collect::<Vec<_>>();
+    non_final_groups.sort_by(|left, right| {
+        non_final_group_ts(inner, &left.1)
+            .cmp(&non_final_group_ts(inner, &right.1))
+            .then(left.0.cmp(&right.0))
+    });
+    for (_, ids) in non_final_groups {
+        let mut ids = ids;
+        ids.sort_by(|left, right| {
+            row_sort_ts(inner, left)
+                .cmp(&row_sort_ts(inner, right))
+                .then(left.cmp(right))
+        });
         let mut rows = Vec::new();
         for id in ids {
             if let Some(turn) = billable_by_id.remove(&id) {
                 rows.push(usage_session_row(&turn, false));
             }
         }
-        rows.sort_by(|left, right| {
-            row_sort_ts(inner, &left.id)
-                .cmp(&row_sort_ts(inner, &right.id))
-                .then(left.id.cmp(&right.id))
-        });
-        if let Some(anchor) = rows.last().cloned() {
+        // The first row anchors the session so its id stays put as more rounds
+        // arrive; `completed_at` still follows the newest row.
+        if let Some(anchor) = rows.first().cloned() {
             sessions.push(usage_non_final_session_from_rows(inner, anchor, rows));
         }
     }
@@ -4261,12 +4283,20 @@ fn usage_final_anchor_for_handoff(
     fallback
 }
 
+/// Earliest timestamp in one non-final group, used to order the groups.
+fn non_final_group_ts(inner: &StoreInner, ids: &[String]) -> DateTime<Utc> {
+    ids.iter()
+        .map(|id| row_sort_ts(inner, id))
+        .min()
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 fn row_sort_ts(inner: &StoreInner, request_id: &str) -> DateTime<Utc> {
     inner
         .requests
         .get(request_id)
         .map(|request| request.created_at)
-        .unwrap_or_else(Utc::now)
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
 fn usage_summary_key(request: &StoredRequest) -> Option<String> {
@@ -4482,7 +4512,10 @@ fn usage_non_final_session_from_rows(
         id: anchor_row.id.clone(),
         title,
         title_source,
-        completed_at: anchor_row.completed_at.clone(),
+        completed_at: rows
+            .last()
+            .map(|row| row.completed_at.clone())
+            .unwrap_or_else(|| anchor_row.completed_at.clone()),
         conversation_turn: false,
         status,
         cached_input_tokens: cached_input_tokens.saturating_add(vision_tokens.0),
@@ -6835,6 +6868,82 @@ mod tests {
         assert_eq!(session.rows[1].kind, "final_reply");
         assert_eq!(session.status, "completed");
         assert_eq!(session.cache_miss_input_tokens, 10);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A turn that has no finished request yet (abandoned or still running)
+    /// keeps one session id as further rounds arrive, so the list does not
+    /// rebuild and reload its detail on every round.
+    #[tokio::test]
+    async fn a_non_final_session_keeps_its_id() {
+        let dir = temp_dir("usage-session-stable-id");
+        let store = Store::open(&dir).await.expect("open store");
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "prompt_cache_key": "stable-id-thread",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "abandoned turn" }]
+            }]
+        });
+        let usage = json!({
+            "model": "deepseek-v4-flash",
+            "usage": {
+                "cached_input_tokens": 10,
+                "cache_miss_input_tokens": 2,
+                "output_tokens": 1,
+                "total_tokens": 13
+            }
+        });
+
+        for index in 0..2 {
+            let id = format!("resp_stable_id_{index}");
+            store
+                .checkpoint_request(&id, None, Some("deepseek-v4-flash"), &request)
+                .await
+                .expect("checkpoint round");
+            store
+                .finish_request(
+                    &id,
+                    RequestStatus::Completed,
+                    Some(&usage),
+                    Some(&json!({ "codeseex_lifecycle": "client_tool_handoff" })),
+                )
+                .await
+                .expect("finish round");
+        }
+
+        let first = store.runtime_summary(10).await.expect("first summary");
+        assert_eq!(first.usage_sessions.len(), 1);
+        let first_id = first.usage_sessions[0].id.clone();
+        assert_eq!(first_id, "resp_stable_id_0");
+        assert_eq!(first.usage_sessions[0].rows.len(), 2);
+
+        store
+            .checkpoint_request(
+                "resp_stable_id_2",
+                None,
+                Some("deepseek-v4-flash"),
+                &request,
+            )
+            .await
+            .expect("checkpoint extra round");
+        store
+            .finish_request(
+                "resp_stable_id_2",
+                RequestStatus::Completed,
+                Some(&usage),
+                Some(&json!({ "codeseex_lifecycle": "client_tool_handoff" })),
+            )
+            .await
+            .expect("finish extra round");
+
+        let second = store.runtime_summary(10).await.expect("second summary");
+        assert_eq!(second.usage_sessions.len(), 1);
+        assert_eq!(second.usage_sessions[0].id, first_id);
+        assert_eq!(second.usage_sessions[0].rows.len(), 3);
 
         let _ = std::fs::remove_dir_all(dir);
     }
