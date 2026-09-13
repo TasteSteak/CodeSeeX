@@ -30,7 +30,7 @@
   "catalogFetchModels": "Update model list",
   "catalogFetchUpToDate": "Already up to date",
   "catalogFetching": "Updating...",
-  "brandSubtitle": "DeepSeek Bridge",
+  "brandSubtitle": "Codex Runtime",
   "deepseekBaseUrl": "Upstream URL",
   "deepseekBaseUrlHint": "Leave blank to use the official DeepSeek API, a value is written to the Codex config.toml ([codeseex] upstream_base_url)",
   "deepseekTransport": "Upstream transport",
@@ -438,9 +438,9 @@
   "logCategorySecurity": "Security",
   "logCategorySystem": "System",
   "logCategoryError": "Error",
-  "aboutProductSubtitle": "Codex Bridge",
+  "aboutProductSubtitle": "Codex Runtime",
   "officialWebsite": "Official website",
-  "aboutProductDescription": "Local Codex bridge with a desktop manager, proxy, catalog, and tool controls.",
+  "aboutProductDescription": "Local Codex runtime with a desktop manager, proxy, catalog, and tool controls.",
   "aboutFooterNote": "Connect Codex to the configured model service through the local desktop manager. Use valid API credentials and follow the provider terms.",
   "websiteUnavailable": "No official website URL is configured for this version."
 }
