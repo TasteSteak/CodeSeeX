@@ -159,7 +159,7 @@ Prefer the generated TOML because the catalog path and local port are machine-sp
 
 ```toml
 model_provider = "custom"
-model = "deepseek-v4-pro"
+model = "deepseek-flash"
 disable_response_storage = true
 model_reasoning_effort = "xhigh"
 # CodeSeeX adds a machine-specific model_catalog_json path in the generated TOML.
@@ -169,12 +169,16 @@ name = "DeepSeek"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "http://127.0.0.1:8787/v1"
+
+# Optional: retarget the CodeSeeX upstream (defaults to the official DeepSeek API).
+[codeseex]
+upstream_base_url = "https://api.deepseek.com"
 ```
 
-To use the faster model, change:
+The generated TOML pins the Flash model by default. To switch to the larger model, change:
 
 ```toml
-model = "deepseek-v4-flash"
+model = "deepseek-v4-pro"
 ```
 
 ## Desktop Manager
@@ -184,7 +188,7 @@ The desktop app is the control plane for the local runtime:
 - Dashboard: proxy status, current port, balance, update status, and troubleshooting hints.
 - Usage: user-task-level records with model phases, tool phases, cache hit/miss, output, latency, and cost.
 - Logs: compact operational events and safe diagnostics.
-- Settings: upstream URL, model behavior, proxy mode, UI options, billing rates, and tools.
+- Settings: upstream URL (written into Codex's `config.toml`), model behavior, proxy mode, UI options, billing rates, and tools.
 - Adapter: generated Codex TOML and model catalog status.
 - Tools: built-in tool enablement, Web Search, separate image settings, and community tool discovery.
 
@@ -222,7 +226,14 @@ This matters because a direct relay can appear to work while silently resending 
 
 ## Upstream And Models
 
-CodeSeeX exposes `deepseek-v4-pro` and `deepseek-v4-flash` to Codex through its generated catalog. Leave the upstream URL blank to use the default DeepSeek-compatible upstream, or set a custom OpenAI-compatible upstream URL in `Settings -> Proxy`.
+CodeSeeX exposes `deepseek-v4-pro` and `deepseek-v4-flash` to Codex through its generated catalog. The upstream URL is configured in Codex's own `config.toml`, next to the provider it complements:
+
+```toml
+[codeseex]
+upstream_base_url = "https://api.deepseek.com"  # omit to use the official DeepSeek API
+```
+
+The CodeSeeX settings page edits that key in place, so the address stays in Codex's own file. CodeSeeX re-reads it on the next settings save, and `DEEPSEEK_BASE_URL` still overrides it for automation.
 
 The local Codex endpoint remains under `http://127.0.0.1:8787/v1` by default. If you change the listen port, copy the generated TOML again and restart Codex.
 

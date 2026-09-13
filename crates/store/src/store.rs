@@ -36,6 +36,7 @@ const MAX_CLIENT_HANDOFF_FAILURES: u32 = 3;
 const CLIENT_HANDOFF_SIGNATURE_REPEAT_DIAGNOSTIC_THRESHOLD: u32 = 3;
 const CLIENT_HANDOFF_VOLUME_DIAGNOSTIC_THRESHOLD: u32 = 48;
 const IN_PROGRESS_TTL_SECONDS: i64 = 6 * 60 * 60;
+const THROUGHPUT_WINDOW_SECONDS: i64 = 60;
 const LOG_TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 
 type EventViewPage = (Vec<EventViewRecord>, bool, Option<String>);
@@ -390,6 +391,8 @@ pub struct RuntimeSummary {
     pub request_count: u64,
     pub billable_request_count: u64,
     pub failed_request_count: u64,
+    pub rpm: u64,
+    pub tpm: u64,
     pub last_request_at: Option<String>,
     pub last_activity_at: Option<String>,
     pub last_turn: Option<RequestTurn>,
@@ -3597,6 +3600,7 @@ fn runtime_summary_from_inner(
             )
         })
         .count() as u64;
+    let (rpm, tpm) = throughput_rates(inner, Utc::now());
     let last_turn = turn_history.last().cloned();
     let last_billable_request = billable_history.last().cloned();
     let last_request_at = last_billable_request
@@ -3655,6 +3659,8 @@ fn runtime_summary_from_inner(
         request_count,
         billable_request_count,
         failed_request_count,
+        rpm,
+        tpm,
         last_request_at,
         last_activity_at,
         last_turn,
@@ -3667,6 +3673,30 @@ fn runtime_summary_from_inner(
         total_output_tokens,
         average_ms,
     }
+}
+
+/// Rolling one-minute throughput for the dashboard. Both numbers share the
+/// window but are measured at the timestamp that matches their name: a request
+/// counts toward RPM from the moment it *starts* (`created_at`), and its tokens
+/// count toward TPM once the request last finishes or updates (`updated_at`).
+/// Splitting the timestamps keeps one long streaming request from reading as a
+/// steady stream of fresh requests, while still attributing its tokens the
+/// moment they land. Both decay to zero after a minute of quiet.
+fn throughput_rates(inner: &StoreInner, now: DateTime<Utc>) -> (u64, u64) {
+    let window_start = now - Duration::seconds(THROUGHPUT_WINDOW_SECONDS);
+    let mut rpm = 0u64;
+    let mut tpm = 0u64;
+    for request in inner.requests.values() {
+        if request.created_at >= window_start {
+            rpm = rpm.saturating_add(1);
+        }
+        if request.updated_at >= window_start {
+            if let Some(turn) = turn_from_request(request) {
+                tpm = tpm.saturating_add(turn.total_tokens);
+            }
+        }
+    }
+    (rpm, tpm)
 }
 
 fn cached_usage_summary(inner: &mut StoreInner) -> RuntimeSummary {
@@ -4998,7 +5028,15 @@ fn usage_vision_segment_from_event(event: &EventRecord) -> Option<UsageSegment> 
             .unwrap_or_default()
             .to_owned(),
         reasoning_effort: String::new(),
-        lifecycle: "vision_tool".to_owned(),
+        lifecycle: if vision
+            .get("backend")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("deepseek"))
+        {
+            "vision_deepseek".to_owned()
+        } else {
+            "vision_external".to_owned()
+        },
         status: if detail.get("ok").and_then(Value::as_bool) == Some(false) {
             "failed".to_owned()
         } else {
@@ -5032,7 +5070,9 @@ fn usage_vision_segment_from_event(event: &EventRecord) -> Option<UsageSegment> 
 }
 
 fn vision_segment_is_deepseek_billable(segment: &UsageSegment) -> bool {
-    segment.kind == "vision" && segment.model == "deepseek-v4-flash-vision-exp"
+    // Billability comes from the producing tool (`backend = deepseek`), not from
+    // a hard-coded model slug, so a catalog change cannot silently drop usage.
+    segment.kind == "vision" && segment.lifecycle == "vision_deepseek"
 }
 
 fn usage_tool_call_segment_from_event(
@@ -5830,6 +5870,68 @@ mod tests {
                 .request_count,
             0
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The dashboard's RPM/TPM share a rolling one-minute window but key on the
+    /// timestamp that matches the name: RPM follows when a request started,
+    /// TPM when its tokens last landed, so the two can age out independently.
+    #[tokio::test]
+    async fn throughput_rates_count_only_the_last_minute() {
+        let dir = temp_dir("throughput");
+        let store = Store::open(&dir).await.expect("open store");
+
+        for (id, total) in [("resp_a", 9u64), ("resp_b", 21u64)] {
+            store
+                .checkpoint_request(
+                    id,
+                    None,
+                    Some("deepseek-v4-flash"),
+                    &json!({ "model": "deepseek-v4-flash", "input": "hello" }),
+                )
+                .await
+                .expect("checkpoint");
+            store
+                .finish_request(
+                    id,
+                    RequestStatus::Completed,
+                    Some(&json!({
+                        "model": "deepseek-v4-flash",
+                        "usage": { "input_tokens": total, "output_tokens": 0, "total_tokens": total }
+                    })),
+                    None,
+                )
+                .await
+                .expect("finish");
+        }
+
+        let fresh = store.runtime_summary(10).await.expect("summary");
+        assert_eq!(fresh.rpm, 2);
+        assert_eq!(fresh.tpm, 30);
+
+        // Started before the window but finished inside it: it drops out of RPM
+        // while its tokens still count toward TPM.
+        {
+            let mut inner = store.lock_inner().expect("lock");
+            let stale = inner.requests.get_mut("resp_a").expect("request");
+            stale.created_at = Utc::now() - Duration::seconds(THROUGHPUT_WINDOW_SECONDS + 1);
+        }
+
+        let started_earlier = store.runtime_summary(10).await.expect("summary");
+        assert_eq!(started_earlier.rpm, 1);
+        assert_eq!(started_earlier.tpm, 30);
+
+        // Once its completion also leaves the window, the tokens drop too.
+        {
+            let mut inner = store.lock_inner().expect("lock");
+            let stale = inner.requests.get_mut("resp_a").expect("request");
+            stale.updated_at = Utc::now() - Duration::seconds(THROUGHPUT_WINDOW_SECONDS + 1);
+        }
+
+        let aged = store.runtime_summary(10).await.expect("summary");
+        assert_eq!(aged.rpm, 1);
+        assert_eq!(aged.tpm, 21);
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

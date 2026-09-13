@@ -2,10 +2,11 @@
   "schema_version": 1,
   "revision": "0.7.1.4",
   "provider_name": "DeepSeek",
-  "default_model": "deepseek-v4-pro",
+  "default_model": "deepseek-flash",
   "models": [
     {
       "slug": "deepseek-flash",
+      "role": "chat",
       "display_name": "DeepSeek V4.1 Flash",
       "description": "DeepSeek-V4.1-Flash served through CodeSeeX.",
       "default_reasoning_level": "medium",
@@ -68,10 +69,11 @@
       ],
       "upstream_slug": "deepseek-v4-flash",
       "pricing_group": "flash",
-      "is_default": false
+      "is_default": true
     },
     {
       "slug": "deepseek-v4-pro",
+      "role": "chat",
       "display_name": "DeepSeek V4 Pro",
       "description": "DeepSeek-V4-Pro-0813 served through CodeSeeX.",
       "default_reasoning_level": "medium",
@@ -131,11 +133,12 @@
       ],
       "upstream_slug": "deepseek-v4-pro",
       "pricing_group": "pro",
-      "is_default": true
+      "is_default": false
     },
     {
       "slug": "deepseek-v4-flash-vision-exp",
       "kind": "billing_only",
+      "role": "vision",
       "display_name": "DeepSeek V4 Flash Vision",
       "short_display_name": "Vision",
       "description": "Retired DeepSeek image model; kept for usage pricing.",

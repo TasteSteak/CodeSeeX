@@ -11,8 +11,6 @@ const DEBUG_MANAGER_BASE_URL = "http://127.0.0.1:8787";
 const DEEPSEEK_RECHARGE_URL = "https://platform.deepseek.com/top_up";
 const CCS_IMPORT_URL = "ccswitch://v1/import";
 const DEFAULT_CCS_ENDPOINT = "http://127.0.0.1:8787/v1";
-const DEFAULT_CCS_MODEL = "deepseek-v4-pro";
-const DEFAULT_CCS_CONTEXT_WINDOW = 1000000;
 const CODEX_CONFIG_PATH_UNIX = "~/.codex/config.toml";
 const CODEX_CONFIG_PATH_WINDOWS = "%USERPROFILE%\\.codex\\config.toml";
 const REFRESH_RUNNING_MS = 2000;
@@ -75,7 +73,7 @@ const els = {
   aboutStatModel: byId("aboutStatModel"),
   aboutStatus: byId("aboutStatus"),
   aboutUpdateDot: byId("aboutUpdateDot"),
-  activeRequests: byId("activeRequests"),
+  avgLatency: byId("avgLatency"),
   appDescription: byId("appDescription"),
   appLicense: byId("appLicense"),
   appVersion: byId("appVersion"),
@@ -88,7 +86,7 @@ const els = {
   billingModelList: byId("billingModelList"),
   catalogRefreshButton: byId("catalogRefreshButton"),
   catalogRefreshLabel: byId("catalogRefreshLabel"),
-  completedTurns: byId("completedTurns"),
+  rpm: byId("rpm"),
   autoStart: byId("AUTO_START"),
   catalogNotice: byId("catalogNotice"),
   configTomlCode: byId("configTomlCode"),
@@ -102,7 +100,7 @@ const els = {
   ccsKeyCancel: byId("ccsKeyCancel"),
   ccsKeyConfirm: byId("ccsKeyConfirm"),
   ccsKeyModal: byId("ccsKeyModal"),
-  failedTurns: byId("failedTurns"),
+  tpm: byId("tpm"),
   loadingDetail: byId("loadingDetail"),
   loadingOverlay: byId("loadingOverlay"),
   loadingTitle: byId("loadingTitle"),
@@ -214,7 +212,7 @@ let logNextCursor = null;
 let logLatestCursor = null;
 let logLatestEventRevision = null;
 let logFilterTimer = null;
-let logFilters = { audience: "safe", category: "all", level: "all", request_id: "", q: "" };
+let logFilters = { audience: "user", category: "all", level: "all", request_id: "", q: "" };
 let logAutoFollow = true;
 let logRefreshController = null;
 let logRefreshSequence = 0;
@@ -431,6 +429,10 @@ function bind() {
   onRadioChange("DEEPSEEK_TRANSPORT", handleConfigInput);
   onRadioChange("NETWORK_PROXY_MODE", handleConfigInput);
   onRadioChange("LOG_RETENTION_DAYS", handleConfigInput);
+  onRadioChange("LOG_VERBOSITY", (value) => {
+    handleConfigInput(value);
+    handleLogFilterChange();
+  });
   onRadioChange("UI_CLOSE_BEHAVIOR", handleConfigInput);
   onRadioChange("EXPERIMENT_REASONING_SUMMARY_MODE", handleConfigInput);
   onRadioChange("UI_THEME", (value) => {
@@ -936,7 +938,7 @@ function logEventsUrl(limit, cursor, options = {}) {
 
 function readLogFiltersFromUi() {
   return {
-    audience: "safe",
+    audience: normalizeLogVerbosity(getRadioValue("LOG_VERBOSITY")) === "debug" ? "safe" : "user",
     category: els.logCategoryFilter ? els.logCategoryFilter.value || "all" : "all",
     level: els.logLevelFilter ? els.logLevelFilter.value || "all" : "all",
     request_id: els.logRequestFilter ? String(els.logRequestFilter.value || "").trim() : "",
@@ -1301,7 +1303,7 @@ function scheduleNextRefresh(delayMs) {
 
 function nextRefreshDelay() {
   if (document.hidden) return REFRESH_HIDDEN_MS;
-  const active = Number(els.activeRequests && els.activeRequests.textContent ? String(els.activeRequests.textContent).replace(/\D/g, "") : 0);
+  const active = Number((latestStatus && latestStatus.runtime && latestStatus.runtime.active_requests) || 0);
   return latestRunning || active > 0 ? REFRESH_RUNNING_MS : REFRESH_IDLE_MS;
 }
 
@@ -1371,8 +1373,9 @@ function renderStatus(data) {
     pid: data.pid || "",
     process_label: data.process_label || "",
     active_requests: runtime.active_requests || 0,
-    request_count: runtime.request_count || 0,
-    failed_request_count: runtime.failed_request_count || 0,
+    rpm: runtime.rpm || 0,
+    tpm: runtime.tpm || 0,
+    average_ms: runtime.average_ms || 0,
     last_request_at: runtime.last_request_at || "",
   });
   if (signature === lastStatusSignature) return;
@@ -1387,9 +1390,9 @@ function renderStatus(data) {
     : (isStopping ? t("stopping") : (latestStarting ? t("starting") : t("stopped")));
   els.pidLabel.textContent = data.process_label || (data.process_mode === "inline" ? t("appPid") : t("proxyPid"));
   els.pid.textContent = data.pid || "-";
-  els.activeRequests.textContent = formatNumber(runtime.active_requests || 0);
-  els.completedTurns.textContent = formatNumber(runtime.request_count || 0);
-  els.failedTurns.textContent = formatNumber(runtime.failed_request_count || 0);
+  els.rpm.textContent = formatNumber(runtime.rpm || 0);
+  els.tpm.textContent = formatNumber(runtime.tpm || 0);
+  els.avgLatency.textContent = formatDuration(runtime.average_ms || 0);
   renderDashboardReadiness(data, runtime, { isStarting, isStopping });
   if (els.troubleshootModal && !els.troubleshootModal.hidden) renderTroubleshootModal();
   renderButtons();
@@ -1467,6 +1470,7 @@ function renderConfig(config) {
     : String(config.UPSTREAM_MODEL_OVERRIDE);
   setRadioValue("NETWORK_PROXY_MODE", normalizeNetworkProxyMode(config.NETWORK_PROXY_MODE || config.WEB_SEARCH_PROXY_MODE));
   setRadioValue("LOG_RETENTION_DAYS", normalizeRetentionDays(config.LOG_RETENTION_DAYS));
+  setRadioValue("LOG_VERBOSITY", normalizeLogVerbosity(config.LOG_VERBOSITY));
   setRadioValue("UI_CLOSE_BEHAVIOR", normalizeCloseBehavior(config.UI_CLOSE_BEHAVIOR));
   const nextTheme = config.UI_THEME || "system";
   setRadioValue("UI_THEME", nextTheme);
@@ -1998,7 +2002,7 @@ function escapeHtml(value) {
 function ccsImportUrl(toml, options = {}) {
   const apiKey = String(options.apiKey || "").trim();
   const endpoint = parseTomlStringValue(toml, "base_url") || DEFAULT_CCS_ENDPOINT;
-  const model = parseTomlStringValue(toml, "model") || catalogState.defaultModel || DEFAULT_CCS_MODEL;
+  const model = parseTomlStringValue(toml, "model") || catalogState.defaultModel || "";
   const config = {
     auth: { OPENAI_API_KEY: apiKey },
     config: String(toml || ""),
@@ -2025,14 +2029,14 @@ function ccsModelCatalogModels() {
     known.set(model, {
       model,
       displayName: String((entry && entry.display_name) || model),
-      contextWindow: Number(entry && entry.context_window) || DEFAULT_CCS_CONTEXT_WINDOW,
+      contextWindow: Number(entry && entry.context_window) || 0,
     });
   }
   const adapterModels = Array.isArray(latestAdapter && latestAdapter.models) ? latestAdapter.models : [];
   for (const slug of adapterModels) {
     const model = String(slug || "").trim();
     if (!model || known.has(model)) continue;
-    known.set(model, { model, displayName: model, contextWindow: DEFAULT_CCS_CONTEXT_WINDOW });
+    known.set(model, { model, displayName: model, contextWindow: 0 });
   }
   return Array.from(known.values());
 }
@@ -4492,6 +4496,7 @@ function buildConfigPayload() {
     DEEPSEEK_BASE_URL: normalizeDeepSeekBaseUrl(els.deepseekBaseUrl ? els.deepseekBaseUrl.value : ""),
     PROXY_PORT: normalizePort(els.proxyPort ? els.proxyPort.value : "", 8787),
     LOG_RETENTION_DAYS: getRadioValue("LOG_RETENTION_DAYS") || "7",
+    LOG_VERBOSITY: normalizeLogVerbosity(getRadioValue("LOG_VERBOSITY")),
     CATALOG_PRICING: catalogPeakPricingPayload(),
   };
   if (latestUpstreamModelOverride) payload.UPSTREAM_MODEL_OVERRIDE = latestUpstreamModelOverride;
@@ -5191,6 +5196,10 @@ function normalizeDeepSeekBaseUrl(value) {
 function normalizeRetentionDays(value) {
   const raw = String(value || "7");
   return raw === "1" || raw === "3" || raw === "7" || raw === "30" ? raw : "7";
+}
+
+function normalizeLogVerbosity(value) {
+  return String(value || "").trim().toLowerCase() === "debug" ? "debug" : "user";
 }
 
 function normalizeReasoningSummaryMode(value) {

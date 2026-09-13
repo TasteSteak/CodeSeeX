@@ -19,18 +19,11 @@ pub(crate) fn user_config_from_payload(
         proxy.port = value_u16(payload, "PROXY_PORT");
     }
 
-    if payload.get("DEEPSEEK_BASE_URL").is_some()
-        || payload.get("DEEPSEEK_TRANSPORT").is_some()
-    {
+    if payload.get("DEEPSEEK_TRANSPORT").is_some() {
         let upstream = config
             .upstream
             .get_or_insert_with(UserUpstreamConfig::default);
-        if payload.get("DEEPSEEK_BASE_URL").is_some() {
-            upstream.base_url = value_string(payload, "DEEPSEEK_BASE_URL");
-        }
-        if payload.get("DEEPSEEK_TRANSPORT").is_some() {
-            upstream.transport = value_upstream_transport(payload, "DEEPSEEK_TRANSPORT");
-        }
+        upstream.transport = value_upstream_transport(payload, "DEEPSEEK_TRANSPORT");
     }
 
     if payload.get("UPSTREAM_MODEL_OVERRIDE").is_some()
@@ -75,6 +68,9 @@ pub(crate) fn user_config_from_payload(
         }
         if payload.get("LOG_RETENTION_DAYS").is_some() {
             ui.log_retention_days = value_u16(payload, "LOG_RETENTION_DAYS");
+        }
+        if payload.get("LOG_VERBOSITY").is_some() {
+            ui.log_verbosity = value_string(payload, "LOG_VERBOSITY");
         }
     }
 
@@ -802,7 +798,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn payload_does_not_persist_api_key_or_catalog_mode() {
+    fn payload_does_not_persist_api_key_catalog_mode_or_upstream_url() {
         let config = user_config_from_payload(
             &json!({
                 "DEEPSEEK_BASE_URL": "http://127.0.0.1:9000/v1",
@@ -813,18 +809,9 @@ mod tests {
             &AppConfig::default(),
         );
 
-        assert_eq!(
-            config
-                .upstream
-                .as_ref()
-                .and_then(|upstream| upstream.base_url.as_deref()),
-            Some("http://127.0.0.1:9000/v1")
-        );
-        assert!(config
-            .upstream
-            .as_ref()
-            .and_then(|upstream| upstream.api_key.as_ref())
-            .is_none());
+        // The upstream URL moved to Codex's config.toml; a stale payload key
+        // must not recreate a CodeSeeX-side field.
+        assert!(config.upstream.is_none());
         assert!(config.catalog.is_none());
     }
 

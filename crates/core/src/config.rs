@@ -45,6 +45,12 @@ pub struct AppConfig {
     /// Reasoning presentation options.
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+    /// Path to Codex's own `config.toml`, set by [`AppConfig::load`]. The
+    /// upstream override (`[codeseex] upstream_base_url`) is read straight from
+    /// this file; tests leave it `None` so they never touch a developer's real
+    /// Codex config.
+    #[serde(skip)]
+    pub codex_config_path: Option<PathBuf>,
 }
 
 /// Which catalog layer is actually in use.
@@ -170,6 +176,8 @@ pub enum UpstreamTransport {
     /// Native Responses API transport. This is the default for every
     /// upstream; Chat API compatibility is an explicit user opt-in.
     #[default]
+    // `auto` is a legacy read alias from before the mode was removed; it maps
+    // straight onto the default and is never written back.
     #[serde(alias = "auto", alias = "native", alias = "responses")]
     NativeResponses,
     #[serde(alias = "chat", alias = "compat")]
@@ -214,7 +222,6 @@ pub struct UserProxyConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserUpstreamConfig {
-    pub base_url: Option<String>,
     pub transport: Option<UpstreamTransport>,
     pub credential: Option<UpstreamCredentialSource>,
     // Kept to deserialize legacy TOML, but ignored when applying user config.
@@ -316,6 +323,18 @@ pub struct UserUiConfig {
     pub codex_app_model_list_injection: Option<bool>,
     pub close_behavior: Option<String>,
     pub log_retention_days: Option<u16>,
+    /// Log page verbosity: `user` keeps the page to necessary messages, `debug`
+    /// also shows the per-round bookkeeping chatter.
+    pub log_verbosity: Option<String>,
+}
+
+/// Canonical label shared by `config.toml`, the settings payload and the UI.
+/// Unknown or empty values fall back to `user` so the log page stays quiet.
+pub fn parse_log_verbosity(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "debug" | "verbose" | "all" => "debug",
+        _ => "user",
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -423,6 +442,7 @@ impl Default for AppConfig {
             catalog_remote: None,
             catalog_cache: None,
             experimental: ExperimentalConfig::default(),
+            codex_config_path: None,
         }
     }
 }
@@ -459,11 +479,28 @@ impl AppConfig {
         let mut config = Self::load_base();
         config.load_cached_catalog();
         let path = config.config_path();
-        let Ok(user_config) = UserConfig::read_from(&path) else {
-            return config;
-        };
-        config.apply_user_config(user_config);
+        if let Ok(user_config) = UserConfig::read_from(&path) {
+            config.apply_user_config(user_config);
+        }
+        config.codex_config_path = crate::codex_auth::resolve_codex_config_path();
+        config.apply_codex_config();
         config
+    }
+
+    /// Applies the upstream override that lives in Codex's own `config.toml`
+    /// (`[codeseex] upstream_base_url`). CodeSeeX keeps no upstream URL field of
+    /// its own: the address sits next to the Codex provider it complements. An
+    /// explicit `DEEPSEEK_BASE_URL` environment variable still wins, and an
+    /// unset value keeps the built-in default.
+    pub fn apply_codex_config(&mut self) {
+        if env::var("DEEPSEEK_BASE_URL").is_ok() {
+            return;
+        }
+        let Some(path) = self.codex_config_path.as_deref() else {
+            return;
+        };
+        let base_url = crate::codex_config::read_upstream_base_url_from(path).unwrap_or_default();
+        self.upstream.base_url = normalize_base_url(&base_url);
     }
 
     /// Reads the cached remote catalog document (layer 2). Never touches the
@@ -561,11 +598,6 @@ impl AppConfig {
         }
 
         if let Some(upstream) = user_config.upstream {
-            if env::var("DEEPSEEK_BASE_URL").is_err() {
-                if let Some(base_url) = upstream.base_url.filter(|value| !value.trim().is_empty()) {
-                    self.upstream.base_url = normalize_base_url(&base_url);
-                }
-            }
             if env::var("DEEPSEEK_TRANSPORT").is_err() {
                 if let Some(transport) = upstream.transport {
                     self.upstream.transport = transport;
@@ -977,7 +1009,10 @@ fn env_upstream_transport() -> UpstreamTransport {
 
 pub fn parse_upstream_transport(value: &str) -> Option<UpstreamTransport> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "" | "auto" | "native" | "native_responses" | "responses" => {
+        // There is no `auto` mode: an unset or blank value means the default,
+        // Native Responses. `auto` only survives as a legacy read alias so an
+        // old `config.toml` still loads; it is never written back.
+        "" | "native" | "native_responses" | "responses" => {
             Some(UpstreamTransport::NativeResponses)
         }
         "chat" | "chat_compat" | "compat" => Some(UpstreamTransport::ChatCompat),
@@ -1235,7 +1270,6 @@ mod tests {
         };
         config.apply_user_config(UserConfig {
             upstream: Some(UserUpstreamConfig {
-                base_url: Some("https://api.deepseek.com".to_owned()),
                 transport: None,
                 credential: None,
                 api_key: None,
@@ -1249,8 +1283,14 @@ mod tests {
 
     #[test]
     fn legacy_transport_aliases_resolve_to_native_or_chat() {
+        // There is no `auto` mode any more: it is not a recognised value, so an
+        // unset/blank transport is what resolves to the Native default.
         assert_eq!(
             parse_upstream_transport("auto"),
+            None
+        );
+        assert_eq!(
+            parse_upstream_transport(""),
             Some(UpstreamTransport::NativeResponses)
         );
         assert_eq!(

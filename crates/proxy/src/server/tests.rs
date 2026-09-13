@@ -544,7 +544,7 @@ async fn codex_model_catalog_route_returns_injected_model_choices() {
     assert_eq!(body.get("status").and_then(Value::as_str), Some("ok"));
     assert_eq!(
         body.get("default_model").and_then(Value::as_str),
-        Some("deepseek-v4-pro")
+        Some("deepseek-flash")
     );
     assert_eq!(
         body.get("models").and_then(Value::as_array).map(Vec::len),

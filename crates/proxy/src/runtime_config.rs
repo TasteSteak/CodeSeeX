@@ -199,6 +199,9 @@ impl RuntimeConfigService {
         if let Ok(user_config) = UserConfig::read_from(&path) {
             config.apply_user_config(user_config);
         }
+        // Re-read Codex's config.toml so a settings save applies without a
+        // restart; the path itself comes from the base config.
+        config.apply_codex_config();
         RuntimeConfigSnapshot::from_config(config)
     }
 

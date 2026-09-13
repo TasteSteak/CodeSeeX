@@ -553,14 +553,20 @@ pub fn catalog_file_is_compatible(path: &Path) -> bool {
     catalog_value_is_compatible(&value)
 }
 
-pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str) -> String {
-    codex_toml_snippet_for_document(&embedded_catalog_document(), catalog_path, base_url)
+pub fn codex_toml_snippet(catalog_path: &Path, base_url: &str, upstream_base_url: &str) -> String {
+    codex_toml_snippet_for_document(
+        &embedded_catalog_document(),
+        catalog_path,
+        base_url,
+        upstream_base_url,
+    )
 }
 
 pub fn codex_toml_snippet_for_document(
     document: &CatalogDocument,
     catalog_path: &Path,
     base_url: &str,
+    upstream_base_url: &str,
 ) -> String {
     [
         "model_provider = \"custom\"".to_owned(),
@@ -577,6 +583,9 @@ pub fn codex_toml_snippet_for_document(
         "wire_api = \"responses\"".to_owned(),
         "requires_openai_auth = true".to_owned(),
         format!("base_url = {}", toml_string(base_url)),
+        "".to_owned(),
+        "[codeseex]".to_owned(),
+        format!("upstream_base_url = {}", toml_string(upstream_base_url)),
     ]
     .join("\n")
 }
@@ -888,6 +897,16 @@ impl CatalogDocument {
             })
     }
 
+    /// First model declaring `role`, used to resolve capability defaults (the
+    /// vision model, for example) without hard-coding a slug.
+    pub fn model_with_role(&self, role: &str) -> Option<&CatalogModel> {
+        self.models.iter().find(|model| {
+            model
+                .role()
+                .is_some_and(|value| value.eq_ignore_ascii_case(role))
+        })
+    }
+
     pub fn default_slug(&self) -> &str {
         if self.default_model.trim().is_empty() {
             self.models
@@ -1012,6 +1031,17 @@ impl CatalogModel {
 
     pub fn is_billing_only(&self) -> bool {
         self.kind() == CatalogModelKind::BillingOnly
+    }
+
+    /// Optional semantic role the catalog declares for this entry (`chat`,
+    /// `vision`, ...). Capability defaults resolve through this instead of
+    /// hard-coding a slug, so a catalogue change carries over on its own.
+    pub fn role(&self) -> Option<&str> {
+        self.extra
+            .get("role")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 
     pub fn aliases(&self) -> impl Iterator<Item = &str> {
@@ -1738,7 +1768,7 @@ mod tests {
         assert_eq!(pro.display_name, "DeepSeek V4 Pro");
         assert_eq!(pro.short_display_name.as_deref(), Some("Pro"));
         assert!(!pro.hidden);
-        assert!(pro.is_default);
+        assert!(!pro.is_default);
         assert_eq!(pro.default_reasoning_effort, "medium");
         // The official DeepSeek V4 Pro does not accept images.
         assert_eq!(pro.input_modalities, vec!["text"]);
@@ -1761,6 +1791,7 @@ mod tests {
             .expect("flash model");
         assert_eq!(flash.display_name, "DeepSeek V4.1 Flash");
         assert_eq!(flash.short_display_name.as_deref(), Some("Flash"));
+        assert!(flash.is_default);
     }
 
     #[test]
@@ -1808,6 +1839,7 @@ mod tests {
         let snippet = codex_toml_snippet(
             Path::new(r"C:\Users\test\.codeseex\model-catalog.json"),
             "http://127.0.0.1:8787/v1",
+            "https://relay.example.com/v1",
         );
         assert!(
             snippet.contains(r"model_catalog_json = 'C:\Users\test\.codeseex\model-catalog.json'")
@@ -1815,6 +1847,14 @@ mod tests {
         assert!(!snippet.contains("model_context_window"));
         assert!(!snippet.contains("model_auto_compact_token_limit"));
         assert!(snippet.contains(r#"base_url = "http://127.0.0.1:8787/v1""#));
+        // The generated config pins the catalog's default model, which is the
+        // Flash entry (slug, not the upstream alias).
+        assert_eq!(embedded_catalog_document().default_slug(), "deepseek-flash");
+        assert!(snippet.contains(r#"model = "deepseek-flash""#));
+        // The upstream URL rides along so one paste configures Codex and
+        // CodeSeeX together.
+        assert!(snippet.contains("[codeseex]"));
+        assert!(snippet.contains(r#"upstream_base_url = "https://relay.example.com/v1""#));
     }
 
     #[test]
@@ -1822,6 +1862,7 @@ mod tests {
         let snippet = codex_toml_snippet(
             Path::new("C:/Users/test/.codeseex/model-catalog.json"),
             "http://127.0.0.1:8787/v1",
+            "https://api.deepseek.com",
         );
         assert!(snippet.contains("model_catalog_json"));
         assert!(snippet.contains("http://127.0.0.1:8787/v1"));

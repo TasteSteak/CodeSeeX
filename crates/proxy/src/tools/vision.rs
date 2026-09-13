@@ -26,7 +26,6 @@ pub(crate) const GENERATE_MODEL_KEY: &str = "VISION_GENERATE_MODEL";
 pub(crate) const ANALYZE_API_KEY_KEY: &str = "VISION_ANALYZE_API_KEY";
 pub(crate) const GENERATE_API_KEY_KEY: &str = "VISION_GENERATE_API_KEY";
 pub(crate) const API_KEY_KEY: &str = "VISION_API_KEY";
-const DEEPSEEK_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
 const DEEPSEEK_VISION_ENDPOINT: &str = "https://api.deepseek.com/responses";
 
 const MAX_IMAGE_REFERENCES: usize = 4;
@@ -123,7 +122,7 @@ pub(crate) fn analyze_registry_config_fields(
             "descriptionKey": "visionDeepSeekModelHint",
             "description": "Leave empty to use the built-in image understanding model. The dedicated image model is never added to the main Agent model catalog.",
             "placeholderKey": "visionDeepSeekModelPlaceholder",
-            "placeholder": DEEPSEEK_VISION_MODEL,
+            "placeholder": "",
             "width": "compact",
             "visibleWhen": { "key": ANALYZE_BACKEND_KEY, "value": "deepseek" },
             "value": setting_value(settings, ANALYZE_DEEPSEEK_MODEL_KEY)
@@ -478,7 +477,7 @@ impl VisionAnalyzeConfig {
             let request_url = vision_upstream_request_url(app_config);
             let api_key = vision_upstream_api_key(app_config);
             let model = setting_value_opt(&settings, ANALYZE_DEEPSEEK_MODEL_KEY)
-                .unwrap_or_else(|| DEEPSEEK_VISION_MODEL.to_owned());
+                .unwrap_or_else(|| deepseek_vision_model(app_config));
             let (missing, hint) = if crate::upstream::upstream_is_official(&app_config.upstream) {
                 (
                     vec!["DEEPSEEK_API_KEY"],
@@ -535,6 +534,16 @@ impl VisionAnalyzeConfig {
 /// upstream it targets the configured upstream with the same credential the
 /// chat path uses, because on a relay the client key is the only one that
 /// exists; the explicit `external` backend supplies its own URL and key.
+/// Default DeepSeek vision model, resolved from the catalog's `role = "vision"`
+/// entry so a catalog change carries over without touching code.
+fn deepseek_vision_model(app_config: &AppConfig) -> String {
+    app_config
+        .catalog_document()
+        .model_with_role("vision")
+        .map(|model| model.slug.clone())
+        .unwrap_or_default()
+}
+
 fn vision_upstream_request_url(app_config: &AppConfig) -> String {
     codeseex_core::urls::responses_url(&app_config.upstream.base_url)
         .unwrap_or_else(|_| DEEPSEEK_VISION_ENDPOINT.to_owned())
@@ -2032,7 +2041,9 @@ mod tests {
         };
         let vision = VisionAnalyzeConfig::load(&config).expect("custom upstream vision config");
         assert_eq!(vision.request_url, "https://relay.example.com/v1/responses");
-        assert_eq!(vision.model, DEEPSEEK_VISION_MODEL);
+        // The default deepseek vision model now comes from the catalog's
+        // `role = "vision"` entry rather than a compiled-in slug.
+        assert_eq!(vision.model, "deepseek-v4-flash-vision-exp");
         assert_eq!(vision.api_key, "relay-key");
     }
 
@@ -2107,7 +2118,7 @@ mod tests {
         assert_eq!(field.get("type").and_then(Value::as_str), Some("text"));
         assert_eq!(
             field.get("placeholder").and_then(Value::as_str),
-            Some(DEEPSEEK_VISION_MODEL)
+            Some("")
         );
     }
 

@@ -124,23 +124,88 @@ fn codex_auth_path_candidates() -> Vec<PathBuf> {
         return vec![resolve_auth_path(&explicit)];
     }
 
+    codex_home_candidates()
+        .into_iter()
+        .map(|home| home.join("auth.json"))
+        .collect()
+}
+
+/// Directories that may hold Codex's own home (`config.toml`, `auth.json`), in
+/// the same precedence Codex uses: an explicit `CODEX_HOME`, then `~/.codex`,
+/// then the Windows `%APPDATA%\codex` fallback.
+fn codex_home_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(codex_home) = env_value("CODEX_HOME") {
-        candidates.push(resolve_auth_path(&codex_home).join("auth.json"));
+        candidates.push(resolve_auth_path(&codex_home));
     }
 
     if let Some(home) = env_value("USERPROFILE")
         .or_else(|| env_value("HOME"))
         .or_else(|| dirs_next::home_dir().map(|path| path.to_string_lossy().to_string()))
     {
-        candidates.push(resolve_auth_path(&home).join(".codex").join("auth.json"));
+        candidates.push(resolve_auth_path(&home).join(".codex"));
     }
 
     if let Some(app_data) = env_value("APPDATA") {
-        candidates.push(resolve_auth_path(&app_data).join("codex").join("auth.json"));
+        candidates.push(resolve_auth_path(&app_data).join("codex"));
     }
 
     unique_paths(candidates)
+}
+
+/// Candidate paths for Codex's `config.toml`, where CodeSeeX reads the upstream
+/// override (`[codeseex] upstream_base_url`).
+pub fn codex_config_path_candidates() -> Vec<PathBuf> {
+    codex_home_candidates()
+        .into_iter()
+        .map(|home| home.join("config.toml"))
+        .collect()
+}
+
+/// Resolves Codex's `config.toml`, honouring an explicit `CODESEEX_CODEX_CONFIG`
+/// override. `off`/`none`/`disabled`/`false` disables the lookup so tests and
+/// embedded builds stay hermetic; a missing file resolves to `None`.
+pub fn resolve_codex_config_path() -> Option<PathBuf> {
+    if let Some(path) = explicit_codex_config_path() {
+        return path.try_exists().unwrap_or(false).then_some(path);
+    }
+    if codex_config_disabled() {
+        return None;
+    }
+    codex_config_path_candidates()
+        .into_iter()
+        .find(|path| path.try_exists().unwrap_or(false))
+}
+
+/// Path to write Codex's `config.toml`: the existing file, otherwise the primary
+/// candidate so the first write can create it.
+pub fn codex_config_write_path() -> Option<PathBuf> {
+    if let Some(path) = explicit_codex_config_path() {
+        return Some(path);
+    }
+    if codex_config_disabled() {
+        return None;
+    }
+    resolve_codex_config_path().or_else(|| codex_config_path_candidates().into_iter().next())
+}
+
+fn explicit_codex_config_path() -> Option<PathBuf> {
+    let explicit = env_value("CODESEEX_CODEX_CONFIG")?;
+    if is_disabling_value(&explicit) {
+        return None;
+    }
+    Some(resolve_auth_path(&explicit))
+}
+
+fn codex_config_disabled() -> bool {
+    env_value("CODESEEX_CODEX_CONFIG").is_some_and(|value| is_disabling_value(&value))
+}
+
+fn is_disabling_value(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "off" | "none" | "disabled" | "false"
+    )
 }
 
 fn resolve_auth_path(value: &str) -> PathBuf {

@@ -159,7 +159,7 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 
 ```toml
 model_provider = "custom"
-model = "deepseek-v4-pro"
+model = "deepseek-flash"
 disable_response_storage = true
 model_reasoning_effort = "xhigh"
 # CodeSeeX 会在生成的 TOML 中加入机器相关的 model_catalog_json 路径。
@@ -169,12 +169,16 @@ name = "DeepSeek"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "http://127.0.0.1:8787/v1"
+
+# 可选：改写 CodeSeeX 上游地址（默认使用官方 DeepSeek API）。
+[codeseex]
+upstream_base_url = "https://api.deepseek.com"
 ```
 
-如果要使用更快的模型，将模型改为：
+生成的 TOML 默认固定为 Flash 模型。要切换到更大的模型，改为：
 
 ```toml
-model = "deepseek-v4-flash"
+model = "deepseek-v4-pro"
 ```
 
 ## 桌面管理器
@@ -184,7 +188,7 @@ model = "deepseek-v4-flash"
 - Dashboard：代理状态、当前端口、余额、更新状态和故障排查提示。
 - Usage：按用户任务展示模型阶段、工具阶段、缓存命中/未命中、输出、耗时和费用。
 - Logs：紧凑运行日志和安全诊断。
-- Settings：上游 URL、模型行为、代理模式、UI 选项、计费单价和工具设置。
+- Settings：上游 URL（写入 Codex 的 `config.toml`）、模型行为、代理模式、UI 选项、计费单价和工具设置。
 - Adapter：生成 Codex TOML 并展示模型目录状态。
 - Tools：内置工具开关、Web Search、独立图像设置和 community tool discovery。
 
@@ -222,7 +226,14 @@ CodeSeeX 会重点处理：
 
 ## 上游与模型
 
-CodeSeeX 通过生成的 catalog 向 Codex 暴露 `deepseek-v4-pro` 和 `deepseek-v4-flash`。默认可使用 DeepSeek 兼容上游；也可以在 `Settings -> Proxy` 中设置自定义 OpenAI 兼容上游 URL。
+CodeSeeX 通过生成的 catalog 向 Codex 暴露 `deepseek-v4-pro` 和 `deepseek-v4-flash`。上游地址改在 Codex 自己的 `config.toml` 中配置，紧挨它服务的 provider：
+
+```toml
+[codeseex]
+upstream_base_url = "https://api.deepseek.com"  # 省略则使用官方 DeepSeek API
+```
+
+CodeSeeX 设置页会就地编辑该键，地址仍保存在 Codex 自己的文件里。下次保存设置时 CodeSeeX 会重新读取，`DEEPSEEK_BASE_URL` 环境变量仍可覆盖它，用于自动化。
 
 默认本地 Codex endpoint 是 `http://127.0.0.1:8787/v1`。如果修改监听端口，请重新复制生成的 TOML 并重启 Codex。
 

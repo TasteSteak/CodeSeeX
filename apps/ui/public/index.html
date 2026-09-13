@@ -78,16 +78,16 @@ LICENSE AGPL-3.0-only</div>
               <strong class="metric-value tabular-nums" id="pid">-</strong>
             </div>
             <div class="metric-card">
-              <span class="metric-label" data-i18n="activeRequests">Active requests</span>
-              <strong class="metric-value tabular-nums" id="activeRequests">0</strong>
+              <span class="metric-label" data-i18n="rpm">RPM</span>
+              <strong class="metric-value tabular-nums" id="rpm">0</strong>
             </div>
             <div class="metric-card">
-              <span class="metric-label" data-i18n="completedTurns">Completed turns</span>
-              <strong class="metric-value tabular-nums" id="completedTurns">0</strong>
+              <span class="metric-label" data-i18n="tpm">TPM</span>
+              <strong class="metric-value tabular-nums" id="tpm">0</strong>
             </div>
             <div class="metric-card">
-              <span class="metric-label" data-i18n="failedTurns">Failed requests</span>
-              <strong class="metric-value tabular-nums" id="failedTurns">0</strong>
+              <span class="metric-label" data-i18n="averageMs">Average latency</span>
+              <strong class="metric-value tabular-nums" id="avgLatency">-</strong>
             </div>
           </div>
 
@@ -364,6 +364,20 @@ LICENSE AGPL-3.0-only</div>
                     <label for="log_retention_7" data-i18n="logRetention7d">7 days</label>
                     <input type="radio" name="LOG_RETENTION_DAYS" id="log_retention_30" value="30">
                     <label for="log_retention_30" data-i18n="logRetention30d">30 days</label>
+                  </div>
+                </div>
+                <div class="setting-divider"></div>
+
+                <div class="setting-item">
+                  <span>
+                    <label data-i18n="logVerbosity">Log detail</label>
+                    <small class="muted" data-i18n="logVerbosityHint">User keeps the log to necessary messages, debug also shows per-round diagnostics</small>
+                  </span>
+                  <div class="segmented-control">
+                    <input type="radio" name="LOG_VERBOSITY" id="log_verbosity_user" value="user" checked>
+                    <label for="log_verbosity_user" data-i18n="logVerbosity_user">User</label>
+                    <input type="radio" name="LOG_VERBOSITY" id="log_verbosity_debug" value="debug">
+                    <label for="log_verbosity_debug" data-i18n="logVerbosity_debug">Debug</label>
                   </div>
                 </div>
               </div>

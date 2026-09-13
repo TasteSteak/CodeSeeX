@@ -868,7 +868,7 @@ async fn desktop_manager_runtime(
         return Err("desktop manager runtime lock was poisoned".to_owned());
     }
 
-    let manager = codeseex_proxy::ManagerRuntime::open(AppConfig::load_base())
+    let manager = codeseex_proxy::ManagerRuntime::open(AppConfig::load())
         .await
         .map_err(|error| format!("{error:#}"))?;
     let mut guard = state

@@ -501,6 +501,8 @@ impl ManagerRuntime {
                 "request_count": runtime.as_ref().map(|value| value.request_count).unwrap_or(0),
                 "billable_request_count": runtime.as_ref().map(|value| value.billable_request_count).unwrap_or(0),
                 "failed_request_count": runtime.as_ref().map(|value| value.failed_request_count).unwrap_or(0),
+                "rpm": runtime.as_ref().map(|value| value.rpm).unwrap_or(0),
+                "tpm": runtime.as_ref().map(|value| value.tpm).unwrap_or(0),
                 "last_request_at": runtime.as_ref().and_then(|value| value.last_request_at.clone()),
                 "last_activity_at": runtime.as_ref().and_then(|value| value.last_activity_at.clone()),
                 "total_cached_input_tokens": runtime.as_ref().map(|value| value.total_cached_input_tokens).unwrap_or(0),
@@ -605,10 +607,13 @@ impl ManagerRuntime {
             .and_then(|value| value.source_url.clone())
             .or_else(|| config.catalog_source_url.clone())
             .unwrap_or_default();
-        let upstream_base_url = upstream
-            .and_then(|value| value.base_url.as_deref())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("");
+        // The upstream URL lives in Codex's config.toml; echo the raw value so a
+        // blank field stays blank instead of showing the resolved default.
+        let upstream_base_url = config
+            .codex_config_path
+            .as_deref()
+            .and_then(codeseex_core::codex_config::read_upstream_base_url_from)
+            .unwrap_or_default();
         let mut payload = json!({
             "config_version": config_version(&config),
             "PROXY_PORT": proxy.and_then(|value| value.port).unwrap_or(config.port).to_string(),
@@ -630,6 +635,9 @@ impl ManagerRuntime {
             "UI_LANGUAGE": ui.and_then(|value| value.language.as_deref()).unwrap_or("system"),
             "UI_CLOSE_BEHAVIOR": ui.and_then(|value| value.close_behavior.as_deref()).unwrap_or("exit"),
             "LOG_RETENTION_DAYS": ui.and_then(|value| value.log_retention_days).unwrap_or(7).to_string(),
+            "LOG_VERBOSITY": codeseex_core::config::parse_log_verbosity(
+                ui.and_then(|value| value.log_verbosity.as_deref()).unwrap_or_default(),
+            ),
             "EXPERIMENT_REASONING_SUMMARY_MODE": reasoning_summary_mode_label(config.experimental.reasoning_summary_mode),
             "DEEPSEEK_CREDENTIAL_SOURCE": upstream
                 .and_then(|value| value.credential)
@@ -740,6 +748,32 @@ impl ManagerRuntime {
         let mut user_config = user_config_from_payload(&payload, existing_config, &config);
         if let Err(error) = migrate_legacy_vision_secret(&config, &mut user_config) {
             return status(500, json!({ "ok": false, "error": error.to_string() }));
+        }
+        // The upstream URL lives in Codex's config.toml; editing it here updates
+        // that file in place, leaving the rest of Codex's config untouched.
+        if let Some(raw) = payload.get("DEEPSEEK_BASE_URL").and_then(Value::as_str) {
+            let trimmed = raw.trim();
+            let normalized = if trimmed.is_empty() {
+                String::new()
+            } else {
+                codeseex_core::urls::normalize_base_url(trimmed)
+            };
+            let result = match config.codex_config_path.as_deref() {
+                Some(path) => {
+                    codeseex_core::codex_config::upsert_upstream_base_url(path, &normalized)
+                }
+                None => codeseex_core::codex_config::write_upstream_base_url(&normalized),
+            };
+            if let Err(error) = result {
+                return status(
+                    500,
+                    json!({
+                        "ok": false,
+                        "code": "codex_config_write_failed",
+                        "error": format!("Could not update Codex config.toml: {error}")
+                    }),
+                );
+            }
         }
         match user_config.write_atomic(&config.config_path()) {
             Ok(()) => {
@@ -1084,7 +1118,12 @@ impl ManagerRuntime {
             audience: query
                 .and_then(|value| value.get("audience"))
                 .and_then(Value::as_str)
-                .map(str::to_owned),
+                .map(str::trim)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                // The log page defaults to necessary messages only; the debug
+                // view asks for `safe` explicitly.
+                .or_else(|| Some("user".to_owned())),
             category: query
                 .and_then(|value| value.get("category"))
                 .and_then(Value::as_str)
@@ -1159,8 +1198,11 @@ impl ManagerRuntime {
         let before = catalog_file_state(&config);
         match ensure_catalog(&config) {
             Ok(()) => {
-                let toml_snippet =
-                    codex_toml_snippet(&config.catalog_path(), &config.proxy_base_url());
+                let toml_snippet = codex_toml_snippet(
+                    &config.catalog_path(),
+                    &config.proxy_base_url(),
+                    &config.upstream.base_url,
+                );
                 let after = catalog_file_state(&config);
                 ok(json!({
                     "ok": true,
@@ -2154,6 +2196,43 @@ mod tests {
                 .join(format!("codeseex-manager-{label}-{}", Uuid::new_v4())),
             ..Default::default()
         }
+    }
+
+    /// Editing the upstream in CodeSeeX writes it into Codex's own config.toml
+    /// (changing the key when present) and leaves the rest of that file alone.
+    #[tokio::test]
+    async fn save_config_writes_the_upstream_into_codex_config() {
+        let config = temp_config("codex-upstream");
+        let runtime = ManagerRuntime::open(config.clone())
+            .await
+            .expect("open manager runtime");
+
+        let codex_home = config.data_dir.join("codex-home");
+        std::fs::create_dir_all(&codex_home).expect("codex home");
+        let codex_config = codex_home.join("config.toml");
+        std::fs::write(&codex_config, "# keep me\nmodel = \"deepseek-flash\"\n")
+            .expect("write codex config");
+
+        let previous = std::env::var_os("CODESEEX_CODEX_CONFIG");
+        std::env::set_var("CODESEEX_CODEX_CONFIG", &codex_config);
+        let response = runtime
+            .save_config(json!({ "DEEPSEEK_BASE_URL": "https://relay.example.com/v1/" }))
+            .await;
+        match previous {
+            Some(value) => std::env::set_var("CODESEEX_CODEX_CONFIG", value),
+            None => std::env::remove_var("CODESEEX_CODEX_CONFIG"),
+        }
+
+        assert_eq!(response.status, 200, "{:?}", response.body);
+        let text = std::fs::read_to_string(&codex_config).expect("read codex config");
+        assert!(text.contains("# keep me"), "{text}");
+        assert!(text.contains("model = \"deepseek-flash\""), "{text}");
+        assert!(
+            text.contains("upstream_base_url = \"https://relay.example.com/v1\""),
+            "{text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&config.data_dir);
     }
 
     #[test]
