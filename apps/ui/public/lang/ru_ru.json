@@ -117,7 +117,6 @@
   "managerStopped": "Служба управления остановлена.",
   "managerStopRequested": "Пользователь запросил остановку агента.",
   "mode": "Режим",
-  "model": "Модель",
   "modelAliasApplied": "Запрос модели был сопоставлен.",
   "modelDefault": "По умолчанию",
   "modelFlash": "Flash",
@@ -158,7 +157,6 @@
   "restartRequired": "Некоторые изменения требуют перезапуска прокси",
   "running": "Агент запущен",
   "runtimeEvent": "Событие выполнения.",
-  "runtimeStats": "Статистика выполнения",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "Посмотреть исходный код",
   "sourceUnavailable": "В текущей версии не настроен URL репозитория исходного кода.",
@@ -221,7 +219,6 @@
   "viewLogsTitle": "Журналы",
   "viewUsageSubtitle": "Просматривайте завершённые диалоги, расход токенов, задержку и оценку стоимости.",
   "viewUsageTitle": "Использование",
-  "codexAdapter": "Адаптер Codex",
   "modelBehavior": "Поведение модели",
   "proxyConnection": "Подключение",
   "toolApplyPatchName": "Применить патч",
@@ -444,7 +441,6 @@
   "logCategoryError": "Ошибка",
   "officialWebsite": "Официальный сайт",
   "websiteUnavailable": "Для этой версии официальный сайт не указан.",
-  "aboutRuntimeAdapter": "Каталог Responses API",
   "billingGroupPriced": "Цена по группе",
   "billingUnpriced": "Без цены"
 }

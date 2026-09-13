@@ -117,7 +117,6 @@
   "managerStopped": "Service de gestion arrêté.",
   "managerStopRequested": "Arrêt de l'agent demandé par l'utilisateur.",
   "mode": "Mode",
-  "model": "Modèle",
   "modelAliasApplied": "La requête de modèle a été associée.",
   "modelDefault": "Par défaut",
   "modelFlash": "Flash",
@@ -158,7 +157,6 @@
   "restartRequired": "Certaines modifications nécessitent un redémarrage du proxy",
   "running": "Agent en cours d'exécution",
   "runtimeEvent": "Événement d'exécution.",
-  "runtimeStats": "Statistiques d'exécution",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "Voir le code source",
   "sourceUnavailable": "L'URL du dépôt de code source n'est pas configurée dans cette version.",
@@ -221,7 +219,6 @@
   "viewLogsTitle": "Journaux",
   "viewUsageSubtitle": "Consultez les conversations terminées, la consommation de tokens, la latence et le coût estimé.",
   "viewUsageTitle": "Utilisation",
-  "codexAdapter": "Adaptateur Codex",
   "modelBehavior": "Comportement du modèle",
   "proxyConnection": "Connexion",
   "toolApplyPatchName": "Appliquer un patch",
@@ -444,7 +441,6 @@
   "logCategoryError": "Erreur",
   "officialWebsite": "Site officiel",
   "websiteUnavailable": "Aucune URL de site officiel n'est configurée pour cette version.",
-  "aboutRuntimeAdapter": "Catalogue de l'API Responses",
   "billingGroupPriced": "Prix par groupe",
   "billingUnpriced": "Non tarifé"
 }

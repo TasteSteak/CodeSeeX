@@ -117,7 +117,6 @@
   "managerStopped": "管理服務已停止。",
   "managerStopRequested": "用戶請求停止代理程式。",
   "mode": "模式",
-  "model": "模型",
   "modelAliasApplied": "模型請求已映射。",
   "modelDefault": "預設",
   "modelFlash": "Flash",
@@ -158,7 +157,6 @@
   "restartRequired": "部分變更需要重新啟動代理後生效",
   "running": "代理程式執行中",
   "runtimeEvent": "執行時期事件。",
-  "runtimeStats": "執行統計",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "檢視原始碼",
   "sourceUnavailable": "現時版本尚未設定原始碼倉庫網址。",
@@ -221,7 +219,6 @@
   "viewLogsTitle": "記錄台",
   "viewUsageSubtitle": "查看完整對話記錄、token 消耗、耗時和費用估算。",
   "viewUsageTitle": "用量資訊",
-  "codexAdapter": "Codex 適配",
   "modelBehavior": "模型行為",
   "proxyConnection": "連線",
   "toolApplyPatchName": "套用補丁",
@@ -444,7 +441,6 @@
   "logCategoryError": "錯誤",
   "officialWebsite": "官方網站",
   "websiteUnavailable": "現時版本尚未設定官方網站網址。",
-  "aboutRuntimeAdapter": "Responses API 目錄",
   "billingGroupPriced": "按組定價",
   "billingUnpriced": "未定價"
 }

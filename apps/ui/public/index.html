@@ -5,26 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodeSeeX</title>
   <link rel="icon" href="/assets/icons/app.png" type="image/png">
-  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/panels.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/cards.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/forms.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/lists.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/menus.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/toast.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/components/toml.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/pages/config.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/pages/about.css?v=0.7.1">
-  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/foundation/theme.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/foundation/base.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/layout/app-shell.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/layout/sidebar.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/buttons.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/panels.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/cards.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/forms.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/lists.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/menus.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/overlays.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/toast.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/components/toml.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/pages/dashboard.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/pages/config.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/pages/logs.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/pages/about.css?v=0.8.0">
+  <link rel="stylesheet" href="/styles/pages/usage.css?v=0.8.0">
 </head>
 <body>
   <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
@@ -509,7 +509,7 @@ LICENSE AGPL-3.0-only</div>
                   <h2 class="about-product-name" data-product-name>CodeSeeX</h2>
                   <p class="about-product-subtitle" data-i18n="aboutProductSubtitle">Codex Bridge</p>
                   <p class="about-product-description" id="appDescription" data-i18n="aboutProductDescription">Local Codex bridge with a desktop manager, proxy, catalog, and tool controls.</p>
-                  <span class="about-version-chip tabular-nums" id="appVersion">v-</span>
+                  <span class="about-version-chip tabular-nums" id="appVersion">-</span>
                 </div>
                 <div class="about-product-actions">
                   <button class="about-action-button about-product-action" type="button" data-about-action="website">
@@ -559,24 +559,6 @@ LICENSE AGPL-3.0-only</div>
                   </div>
                   <button class="btn btn-secondary" type="button" id="updateBackgroundOpen" data-i18n="viewUpdateProgress">View</button>
                 </div>
-
-                <section class="about-group">
-                  <h3 class="about-group-title" data-i18n="runtimeStats">Runtime stats</h3>
-                  <div class="about-row-list">
-                    <div class="about-row">
-                      <span class="about-row-label" data-i18n="model">Model</span>
-                      <span class="about-row-value" id="aboutStatModel">-</span>
-                    </div>
-                    <div class="about-row">
-                      <span class="about-row-label" data-i18n="codexAdapter">Codex adapter</span>
-                      <span class="about-row-value" data-i18n="aboutRuntimeAdapter">Responses API catalog</span>
-                    </div>
-                    <div class="about-row">
-                      <span class="about-row-label" data-i18n="proxyConnection">Connection</span>
-                      <span class="about-row-value" id="aboutStatConnection">-</span>
-                    </div>
-                  </div>
-                </section>
 
                 <section class="about-group">
                   <h3 class="about-group-title" data-i18n="projectSupport">Project &amp; support</h3>
@@ -686,7 +668,7 @@ LICENSE AGPL-3.0-only</div>
   </div>
 
   <script>
-    const assetVersion = "0.7.1";
+    const assetVersion = "0.8.0";
     ["/app-utils.js", "/app.js"].forEach((src) => {
       const script = document.createElement("script");
       script.async = false;

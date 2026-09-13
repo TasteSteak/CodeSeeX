@@ -117,7 +117,6 @@
   "managerStopped": "관리 서비스가 중지되었습니다.",
   "managerStopRequested": "사용자가 에이전트 중지를 요청했습니다.",
   "mode": "모드",
-  "model": "모델",
   "modelAliasApplied": "모델 요청이 매핑되었습니다.",
   "modelDefault": "기본값",
   "modelFlash": "Flash",
@@ -158,7 +157,6 @@
   "restartRequired": "일부 변경 사항은 프록시 재시작이 필요합니다",
   "running": "에이전트 실행 중",
   "runtimeEvent": "런타임 이벤트.",
-  "runtimeStats": "런타임 통계",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "소스 코드 보기",
   "sourceUnavailable": "현재 버전에 소스 코드 저장소 URL이 설정되지 않았습니다.",
@@ -221,7 +219,6 @@
   "viewLogsTitle": "로그",
   "viewUsageSubtitle": "완료된 대화 기록, 토큰 사용량, 지연 시간, 예상 비용을 확인합니다.",
   "viewUsageTitle": "사용량",
-  "codexAdapter": "Codex 어댑터",
   "modelBehavior": "모델 동작",
   "proxyConnection": "연결",
   "toolApplyPatchName": "패치 적용",
@@ -444,7 +441,6 @@
   "logCategoryError": "오류",
   "officialWebsite": "공식 웹사이트",
   "websiteUnavailable": "현재 버전에 공식 웹사이트 URL이 설정되지 않았습니다.",
-  "aboutRuntimeAdapter": "Responses API 카탈로그",
   "billingGroupPriced": "그룹 요금",
   "billingUnpriced": "가격 미설정"
 }

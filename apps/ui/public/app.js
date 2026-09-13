@@ -69,8 +69,6 @@ const FALLBACK_LANGUAGE = "en_us";
 const DEFAULT_LANGUAGE = SYSTEM_LANGUAGE;
 
 const els = {
-  aboutStatConnection: byId("aboutStatConnection"),
-  aboutStatModel: byId("aboutStatModel"),
   aboutStatus: byId("aboutStatus"),
   aboutUpdateDot: byId("aboutUpdateDot"),
   avgLatency: byId("avgLatency"),
@@ -1528,7 +1526,6 @@ function renderConfig(config) {
   lastUsageSignature = "";
   if (!restartRequired) renderConfigSaveState("clean");
   renderCodexAdapter(latestAdapter || {});
-  renderAboutStats();
 }
 
 function renderCodexAdapter(adapter) {
@@ -4149,19 +4146,9 @@ function renderAppInfo(info) {
   });
   document.title = productName;
   els.appDescription.textContent = t("aboutProductDescription");
-  els.appVersion.textContent = "v" + version;
+  els.appVersion.textContent = version;
   els.aboutVersion.textContent = version;
   els.appLicense.textContent = info.license || t("notDeclared");
-  renderAboutStats();
-}
-
-/// About 页的运行摘要只展示真实数据：目录里的默认模型与本机端点，不再写死模型名和端口。
-function renderAboutStats() {
-  if (els.aboutStatModel) els.aboutStatModel.textContent = catalogState.defaultModel || "-";
-  if (els.aboutStatConnection) {
-    const port = (lastSavedConfig && lastSavedConfig.PROXY_PORT) || "8787";
-    els.aboutStatConnection.textContent = "127.0.0.1:" + port + "/v1";
-  }
 }
 
 function renderBalance(data) {
@@ -5192,7 +5179,6 @@ function applyCatalogPayload(catalog, status = {}) {
   catalogState.currency = String((catalog && catalog.pricing && catalog.pricing.currency) || "CNY");
   catalogState.unit = String((catalog && catalog.pricing && catalog.pricing.unit) || "per_1m_tokens");
   catalogState.status = status || {};
-  renderAboutStats();
 }
 
 function catalogModels() {

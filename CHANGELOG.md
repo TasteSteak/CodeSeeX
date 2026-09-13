@@ -2,7 +2,7 @@
 
 ## 0.8.0 - 2026-09-13
 
-CodeSeeX 0.8.0 moves the upstream address into Codex's own configuration, makes the catalog the single source of model truth, and trims the resident runtime surface down to what a long-running client should show. It aggregates the whole 0.7.0 → 0.8.0 line, including the catalog and pricing groundwork first published in 0.7.1.
+CodeSeeX 0.8.0 covers every change since 0.7.0: the upstream address moves into Codex's own `config.toml`, the catalog becomes the single source of model truth, and the proxy's defaults — transport, logging and feedback — are re-tuned for a resident client.
 
 ### Highlights
 

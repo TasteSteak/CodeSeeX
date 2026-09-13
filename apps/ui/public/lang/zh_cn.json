@@ -178,7 +178,6 @@
   "managerStopped": "管理服务已停止。",
   "managerStopRequested": "用户请求停止代理。",
   "mode": "模式",
-  "model": "模型",
   "modelAliasApplied": "模型请求已映射。",
   "modelDefault": "默认",
   "modelFlash": "Flash",
@@ -226,7 +225,6 @@
   "configSaveConflict": "配置已被此编辑器外部修改，请刷新后再保存。",
   "running": "代理运行中",
   "runtimeEvent": "运行事件。",
-  "runtimeStats": "运行统计",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "查看源代码",
   "sourceUnavailable": "当前版本还没有配置源代码仓库地址。",
@@ -311,7 +309,6 @@
   "viewLogsTitle": "日志台",
   "viewUsageSubtitle": "查看完整对话记录、token 消费、耗时和费用估算。",
   "viewUsageTitle": "用量信息",
-  "codexAdapter": "Codex 适配",
   "modelBehavior": "模型行为",
   "proxyConnection": "连接",
   "codexAppModelListInjection": "Codex App 模型列表注入",
@@ -445,6 +442,5 @@
   "officialWebsite": "官方网站",
   "aboutProductDescription": "本地 Codex 桥接器，集成桌面管理器、代理、catalog 和工具控制。",
   "aboutFooterNote": "通过本地桌面管理器连接 Codex 与已配置的模型服务。请使用合规的 API 凭证与端点，并遵守相关服务提供方的使用条款。",
-  "websiteUnavailable": "当前版本还没有配置官方网站地址。",
-  "aboutRuntimeAdapter": "Responses API 目录"
+  "websiteUnavailable": "当前版本还没有配置官方网站地址。"
 }

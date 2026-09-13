@@ -2,6 +2,94 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.8.0",
+      "released_at": "2026-09-13",
+      "notes": {
+        "en_us": {
+          "summary": "Moves the upstream address into Codex's own config.toml, makes the catalog the single source of model truth, and re-tunes the proxy defaults for a resident client.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "The upstream address now lives in Codex's config.toml as [codeseex] upstream_base_url. The settings field edits that file, the runtime resolves it on demand, a pre-0.8.0 CodeSeeX-side value migrates once, and the default official endpoint is never written.",
+                "The model list, aliases, capabilities and prices are one versioned catalog document; the published manifest carries the real DeepSeek models and official CNY prices, and an entry can be marked billing-only so it is priced without being offered.",
+                "Native Responses is the default and only implicit transport; the auto mode is gone.",
+                "The log page defaults to lifecycle and failures only, with a User/Debug control bringing the per-round diagnostics back, and transient feedback moved into a queued toast manager."
+              ]
+            },
+            {
+              "title": "Added",
+              "items": [
+                "A toast manager: top-centre, whole row clickable to dismiss, at most three visible with the rest queued, one row per key with a counter, and an overflow summary once the queue is full.",
+                "A log detail control in Settings, Client, Other: User keeps the log to necessary messages, Debug adds the per-round bookkeeping.",
+                "Dashboard RPM and TPM over a rolling 60-second window, plus average latency.",
+                "Catalog kind (chat or billing-only) and a semantic role, so the vision model is data instead of a hard-coded slug.",
+                "Thinking-chain mirror modes — none, smart, fixed, full — that do not change what the upstream model receives."
+              ]
+            },
+            {
+              "title": "Changed",
+              "items": [
+                "Alias and outbound slug handling is fully catalog-driven; the hard-coded GPT-5 mapping is gone.",
+                "Settings are grouped into Client, Proxy and Tools, and the web-search backend moved into its tool card.",
+                "One user turn is one usage session: native tool handoffs are marked so intermediate replies stay inside their turn.",
+                "Billing-only entries are excluded from selection, pinning and the tray; pricing resolves exact slug, then group, then an explicit unpriced state."
+              ]
+            },
+            {
+              "title": "Fixed",
+              "items": [
+                "The embedded desktop proxy silently fell back to the official DeepSeek endpoint, so a relay key failed with 401 on every request. The environment-only config constructor is now private, the Codex-side override resolves on demand, and existing installs migrate automatically.",
+                "Image understanding follows the configured upstream, shares its credential, forwards the client identity, and takes its default model from the catalog.",
+                "Workspace scope is only trusted from Codex-injected context and never from tool output, and log summaries are redacted."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "上游地址迁入 Codex 自己的 config.toml，模型目录成为唯一数据来源，代理默认行为按常驻客户端重新收敛。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "上游地址改为 Codex 的 config.toml 中的 [codeseex] upstream_base_url：设置页直接编辑该文件，运行时按需解析，0.8.0 之前的旧值自动迁移一次，官方默认地址永不写入。",
+                "模型清单、别名、能力与定价收敛为一份带版本的目录文档；公开清单写入真实 DeepSeek 模型与官方人民币价格，并可标记 billing-only 条目（只计价、不提供选择）。",
+                "原生 Responses 成为默认且唯一的隐式传输方式，auto 模式移除。",
+                "日志台默认只显示生命周期与失败，新增“用户 / 调试”开关按需恢复每轮诊断；瞬时反馈改由带队列的 toast 管理器承载。"
+              ]
+            },
+            {
+              "title": "新增",
+              "items": [
+                "toast 管理器：正上方居中、整条可点击消失、同屏最多 3 条其余排队、同 key 复用并累加计数、队列满后合并为一条摘要。",
+                "设置 → 客户端 → 其它 新增日志详细度开关。",
+                "仪表盘新增滚动 60 秒的 RPM / TPM 与平均延迟。",
+                "目录新增 kind（chat / billing_only）与语义化 role，识图模型来自数据而非写死的 slug。",
+                "思考链镜像模式（none / smart / fixed / full），不改变发给上游模型的内容。"
+              ]
+            },
+            {
+              "title": "变更",
+              "items": [
+                "别名与出站 slug 完全由目录驱动，删除写死的 GPT-5 映射。",
+                "设置页重组为客户端 / 代理 / 工具，网页搜索后端移入对应工具卡片。",
+                "一个用户回合对应一个用量会话：原生工具交接会被标记，中间回复留在回合内。",
+                "billing-only 条目不参与选择、上锁与托盘；定价按精确 slug → 分组 → 显式未定价解析。"
+              ]
+            },
+            {
+              "title": "修复",
+              "items": [
+                "桌面端内嵌代理静默回落到官方 DeepSeek 端点，导致中转 key 每次请求都 401。环境级配置构造现已私有，Codex 侧覆盖按需解析，旧值自动迁移。",
+                "图像理解跟随已配置上游、共用凭据、透传客户端身份，默认模型来自目录。",
+                "工作区范围只信任 Codex 注入的上下文，不再采信工具输出；日志摘要已脱敏。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "version": "0.7.1",
       "released_at": "2026-09-10",
       "notes": {

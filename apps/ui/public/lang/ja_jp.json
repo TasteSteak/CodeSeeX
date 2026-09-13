@@ -117,7 +117,6 @@
   "managerStopped": "管理サービスが停止しました。",
   "managerStopRequested": "ユーザーがエージェントの停止を要求しました。",
   "mode": "モード",
-  "model": "モデル",
   "modelAliasApplied": "モデルリクエストがマッピングされました。",
   "modelDefault": "デフォルト",
   "modelFlash": "Flash",
@@ -158,7 +157,6 @@
   "restartRequired": "一部の変更はプロキシの再起動が必要です",
   "running": "エージェント実行中",
   "runtimeEvent": "ランタイムイベント。",
-  "runtimeStats": "ランタイム統計",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "ソースコードを表示",
   "sourceUnavailable": "現在のバージョンではソースコードリポジトリのURLが設定されていません。",
@@ -221,7 +219,6 @@
   "viewLogsTitle": "ログ",
   "viewUsageSubtitle": "完了した会話記録、トークン使用量、所要時間、推定コストを確認します",
   "viewUsageTitle": "利用状況",
-  "codexAdapter": "Codex アダプター",
   "modelBehavior": "モデルの動作",
   "proxyConnection": "接続",
   "toolApplyPatchName": "パッチ適用",
@@ -444,7 +441,6 @@
   "logCategoryError": "エラー",
   "officialWebsite": "公式サイト",
   "websiteUnavailable": "このバージョンでは公式サイトの URL が設定されていません",
-  "aboutRuntimeAdapter": "Responses API カタログ",
   "billingGroupPriced": "グループ価格",
   "billingUnpriced": "価格未設定"
 }

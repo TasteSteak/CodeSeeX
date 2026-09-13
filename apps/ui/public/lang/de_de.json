@@ -117,7 +117,6 @@
   "managerStopped": "Verwaltungsdienst gestoppt.",
   "managerStopRequested": "Benutzer hat Stopp des Agenten angefordert.",
   "mode": "Modus",
-  "model": "Modell",
   "modelAliasApplied": "Modellanfrage wurde zugeordnet.",
   "modelDefault": "Standard",
   "modelFlash": "Flash",
@@ -158,7 +157,6 @@
   "restartRequired": "Einige Änderungen erfordern einen Neustart des Proxys",
   "running": "Agent läuft",
   "runtimeEvent": "Laufzeitereignis.",
-  "runtimeStats": "Laufzeitstatistiken",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "Quellcode ansehen",
   "sourceUnavailable": "Keine Quellcode-URL in dieser Version konfiguriert.",
@@ -221,7 +219,6 @@
   "viewLogsTitle": "Logs",
   "viewUsageSubtitle": "Abgeschlossene Gesprächsverläufe, Token-Verbrauch, Laufzeit und geschätzte Kosten einsehen.",
   "viewUsageTitle": "Nutzung",
-  "codexAdapter": "Codex-Adapter",
   "modelBehavior": "Modellverhalten",
   "proxyConnection": "Verbindung",
   "toolApplyPatchName": "Patch anwenden",
@@ -444,7 +441,6 @@
   "logCategoryError": "Fehler",
   "officialWebsite": "Offizielle Website",
   "websiteUnavailable": "Für diese Version ist keine offizielle Website-URL konfiguriert.",
-  "aboutRuntimeAdapter": "Responses-API-Katalog",
   "billingGroupPriced": "Gruppenpreis",
   "billingUnpriced": "Ohne Preis"
 }

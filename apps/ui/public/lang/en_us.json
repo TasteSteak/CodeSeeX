@@ -178,7 +178,6 @@
   "managerStopped": "Manager service stopped.",
   "managerStopRequested": "User requested proxy stop.",
   "mode": "Mode",
-  "model": "Model",
   "modelAliasApplied": "Model request was mapped.",
   "modelDefault": "Default",
   "modelFlash": "Flash",
@@ -226,7 +225,6 @@
   "configSaveConflict": "Configuration changed outside this editor. Refresh before saving.",
   "running": "Proxy running",
   "runtimeEvent": "Runtime event.",
-  "runtimeStats": "Runtime stats",
   "sidebarFooter": "Powered by TasteSteak\nLICENSE AGPL-3.0-only",
   "source": "View source",
   "sourceUnavailable": "No source repository URL is configured for this version.",
@@ -311,7 +309,6 @@
   "viewLogsTitle": "Logs",
   "viewUsageSubtitle": "Review completed conversation records, token usage, latency, and estimated cost.",
   "viewUsageTitle": "Usage",
-  "codexAdapter": "Codex adapter",
   "modelBehavior": "Model behavior",
   "proxyConnection": "Connection",
   "codexAppModelListInjection": "Codex App model list injection",
@@ -445,6 +442,5 @@
   "officialWebsite": "Official website",
   "aboutProductDescription": "Local Codex bridge with a desktop manager, proxy, catalog, and tool controls.",
   "aboutFooterNote": "Connect Codex to the configured model service through the local desktop manager. Use valid API credentials and follow the provider terms.",
-  "websiteUnavailable": "No official website URL is configured for this version.",
-  "aboutRuntimeAdapter": "Responses API catalog"
+  "websiteUnavailable": "No official website URL is configured for this version."
 }
