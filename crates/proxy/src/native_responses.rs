@@ -136,6 +136,97 @@ pub(crate) fn native_tool_output_item(call: &NativeToolCall, output: impl Into<S
     })
 }
 
+/// Repairs an `apply_patch` call carried by one provider event payload.
+///
+/// The native transport forwards provider items, and Codex only executes the
+/// native `@@` grammar, so the repair Chat compatibility already applies has to
+/// run here too. Returns `true` when the payload changed.
+pub(crate) fn normalize_apply_patch_event_payload(payload: &mut Value) -> bool {
+    let mut repaired = false;
+    if let Some(item) = payload.get_mut("item").filter(|item| item.is_object()) {
+        repaired |= normalize_apply_patch_item_input(item);
+    }
+    let output = payload
+        .get_mut("response")
+        .and_then(|response| response.get_mut("output"))
+        .and_then(Value::as_array_mut);
+    if let Some(items) = output {
+        for item in items.iter_mut() {
+            repaired |= normalize_apply_patch_item_input(item);
+        }
+    }
+    repaired
+}
+
+fn normalize_apply_patch_item_input(item: &mut Value) -> bool {
+    if item.get("type").and_then(Value::as_str) != Some("custom_tool_call")
+        || item.get("name").and_then(Value::as_str) != Some("apply_patch")
+    {
+        return false;
+    }
+    let Some(input) = item.get("input").and_then(Value::as_str) else {
+        return false;
+    };
+    let normalized =
+        crate::tools::response_items::normalize_apply_patch_response_input_with_diagnostic(input);
+    if normalized.input == input {
+        return false;
+    }
+    item["input"] = Value::String(normalized.input);
+    true
+}
+
+/// Rewrites one provider SSE frame when it carries an `apply_patch` call.
+pub(crate) fn normalize_apply_patch_sse_frame(frame_text: &str) -> Option<Vec<u8>> {
+    if !frame_text.contains("custom_tool_call") {
+        return None;
+    }
+    let data = frame_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut payload = serde_json::from_str::<Value>(data.trim()).ok()?;
+    if !normalize_apply_patch_event_payload(&mut payload) {
+        return None;
+    }
+    let serialized = serde_json::to_string(&payload).ok()?;
+    Some(rewrite_sse_data_lines(frame_text, &serialized))
+}
+
+/// Repairs every `apply_patch` call in a buffered provider body. The body may be
+/// a single frame or a whole buffered stream of frames.
+pub(crate) fn normalize_apply_patch_sse_body(body: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(&body) else {
+        return body;
+    };
+    if !text.contains("custom_tool_call") {
+        return body;
+    }
+    let mut output = Vec::with_capacity(body.len());
+    let mut changed = false;
+    for part in text.split_inclusive("\n\n") {
+        let (frame, delimiter) = match part.strip_suffix("\n\n") {
+            Some(frame) => (frame, "\n\n"),
+            None => (part, ""),
+        };
+        match normalize_apply_patch_sse_frame(frame) {
+            Some(rewritten) => {
+                changed = true;
+                output.extend_from_slice(&rewritten);
+                output.extend_from_slice(delimiter.as_bytes());
+            }
+            None => output.extend_from_slice(part.as_bytes()),
+        }
+    }
+    if changed {
+        output
+    } else {
+        body
+    }
+}
+
 fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCall>, String> {
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
     let (kind, input_field) = match item_type {
@@ -1003,6 +1094,13 @@ impl NativeResponseSseRelay {
                 ready.push(append_delimiter(frame, &delimiter));
                 continue;
             }
+            // Codex only executes the native `@@` grammar, so an apply_patch call
+            // is repaired before the frame is inspected and relayed; the client
+            // executes this text and the retained group replays it upstream.
+            let frame = std::str::from_utf8(&frame)
+                .ok()
+                .and_then(normalize_apply_patch_sse_frame)
+                .unwrap_or(frame);
             self.inspector.observe_bytes(&frame);
             self.inspector.observe_bytes(&delimiter);
             self.relay_frame(frame, delimiter, &mut ready);
@@ -1708,6 +1806,76 @@ fn find_sse_frame_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The client only executes the native `@@` grammar, so a provider
+    /// `custom_tool_call` item is repaired on the native transport too.
+    #[test]
+    fn native_apply_patch_item_input_is_repaired_before_the_client_sees_it() {
+        let mut payload = json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "call_1",
+                "status": "completed",
+                "input": "*** Begin Patch\n*** Update File: a.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n*** End Patch"
+            }
+        });
+
+        assert!(normalize_apply_patch_event_payload(&mut payload));
+        let input = payload
+            .pointer("/item/input")
+            .and_then(Value::as_str)
+            .expect("item input");
+        assert!(input.contains("@@\n"), "{input}");
+        assert!(!input.contains("@@ -1,2 +1,2 @@"), "{input}");
+        // A repaired payload is left alone on the next pass.
+        assert!(!normalize_apply_patch_event_payload(&mut payload));
+
+        // A completed response carries the same item inside `response.output`.
+        let mut response = json!({
+            "type": "response.completed",
+            "response": { "output": [{
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "call_2",
+                "input": "*** Begin Patch\n*** Update File: b.txt\n@@ -3 +3 @@\n-x\n+y\n*** End Patch"
+            }]}
+        });
+        assert!(normalize_apply_patch_event_payload(&mut response));
+        let input = response
+            .pointer("/response/output/0/input")
+            .and_then(Value::as_str)
+            .expect("response item input");
+        assert!(input.contains("@@\n"), "{input}");
+        assert!(!input.contains("@@ -3 +3 @@"), "{input}");
+    }
+
+    /// Buffered provider frames go to the client as they arrived, so the repair
+    /// has to rewrite the frame itself and leave every other frame untouched.
+    #[test]
+    fn native_apply_patch_sse_body_is_repaired_frame_by_frame() {
+        let body = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"apply_patch\",\"call_id\":\"call_1\",\"status\":\"completed\",\"input\":\"*** Begin Patch\\n*** Update File: a.txt\\n@@ -1,2 +1,2 @@\\n-old\\n+new\\n*** End Patch\"}}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n",
+            "\n"
+        )
+        .as_bytes()
+        .to_vec();
+
+        let normalized =
+            String::from_utf8(normalize_apply_patch_sse_body(body)).expect("normalized utf8");
+        assert!(!normalized.contains("@@ -1,2 +1,2 @@"), "{normalized}");
+        assert!(normalized.contains("@@\\n"), "{normalized}");
+        assert!(
+            normalized.contains("data: {\"type\":\"response.completed\""),
+            "{normalized}"
+        );
+        assert_eq!(normalized.matches("response.output_item.done").count(), 2);
+    }
 
     fn chat_function(name: &str) -> Value {
         json!({

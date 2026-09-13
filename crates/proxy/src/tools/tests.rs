@@ -113,11 +113,16 @@ fn apply_patch_definition_requires_paths_in_operation_headers() {
     assert!(description.contains("*** Delete File: path"));
     assert!(description.contains("first line must be *** Begin Patch"));
     assert!(description.contains("final line must be *** End Patch"));
-    assert!(description.contains("bare headers"));
-    assert!(description.contains("standalone grammar lines"));
-    assert!(description.contains("hunk-prefixed data lines"));
+    assert!(description.contains("Bare --- a/file and +++ b/file headers are invalid"));
     assert!(description.contains("empty context line"));
     assert!(description.contains("single space"));
+    // The rules the boundary tests proved the model needs.
+    assert!(description.contains("top-to-bottom file order"));
+    assert!(description.contains("Do not write unified range headers"));
+    assert!(description.contains("forward anchor"));
+    assert!(description.contains("byte for byte"));
+    assert!(description.contains("overwritten silently"));
+    assert!(description.contains("workspace-relative paths"));
 }
 
 #[test]

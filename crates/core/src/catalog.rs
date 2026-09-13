@@ -14,10 +14,18 @@ const LEGACY_APPLY_PATCH_LINE: &str = "- For local text edits, call apply_patch 
 const PREVIOUS_STRICT_APPLY_PATCH_LINE: &str = "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. The patch must start with *** Begin Patch and end with *** End Patch.";
 pub const APPLY_PATCH_SYSTEM_PROMPT_RULES: &str = concat!(
     "- When creating, editing, deleting, or renaming local text files, call apply_patch with a single raw Codex patch string. Do not answer with file contents as prose instead of calling the tool. ",
-    "Use Codex native apply_patch grammar: the first line must be *** Begin Patch and the final line must be *** End Patch. ",
-    "Use standalone grammar lines for structure and hunk prefixes for file data lines. Operation headers are exactly *** Add File: path, *** Update File: path, and *** Delete File: path. Bare headers such as --- a/file or +++ b/file are invalid. ",
-    "For update hunks, every file data line must start with a hunk prefix: space for unchanged context, + for added lines, or - for removed lines. An empty context line is not a blank line; encode it as a single space character line. ",
+    "Envelope: the first line is exactly *** Begin Patch and the final line is exactly *** End Patch, with nothing before or after them. ",
+    "Operation headers are exactly *** Add File: path, *** Update File: path, and *** Delete File: path. Bare headers such as --- a/file or +++ b/file are invalid. ",
+    "Every data line inside a hunk starts with exactly one hunk prefix: space for unchanged context, + for an added line, or - for a removed line. Encode an empty context line as a line containing a single space. ",
+    "For update hunks, write hunks in top-to-bottom file order and start each one with a line containing only @@. Do not write unified range headers such as @@ -1,3 +1,3 @@; they are not accepted. ",
+    "Text after @@ (for example @@ fn main) is a forward anchor: the hunk is matched after that line, so it must appear above the lines you change. Omit it unless you are sure. ",
+    "Keep one to three context lines per hunk. Context must match the file byte for byte, including trailing spaces and tabs; without context only the first matching line is changed. ",
     "For add-file hunks, each file content line is written as + followed by content.\n",
+    "Rules that prevent silent damage:\n",
+    "- A rename needs at least one hunk: write *** Move to: new_path right below the update header and add a hunk with only context lines.\n",
+    "- Never let Add File or Move to target a path that already exists; it is overwritten silently. Delete the target first or choose another path.\n",
+    "- Every write rewrites the file with LF line endings and a trailing newline, so a CRLF file or a file with no final newline changes on disk.\n",
+    "- Use workspace-relative paths. Never use absolute paths and never step outside the workspace with ../.\n",
     "Apply patch examples:\n",
     "Update one file:\n",
     "*** Begin Patch\n",
@@ -62,14 +70,22 @@ pub const APPLY_PATCH_SYSTEM_PROMPT_RULES: &str = concat!(
     "*** Begin Patch\n",
     "*** Update File: src/old_name.rs\n",
     "*** Move to: src/new_name.rs\n",
+    "@@\n",
+    " pub fn unchanged() {}\n",
     "*** End Patch"
 );
 pub const APPLY_PATCH_TOOL_PARAMETER_DESCRIPTION: &str = concat!(
-    "One complete raw apply_patch document. The first line must be *** Begin Patch and the final line must be *** End Patch. ",
-    "Use standalone grammar lines for patch structure and hunk-prefixed data lines for file content. ",
-    "Operation headers are *** Add File: path, *** Update File: path, and *** Delete File: path; Bare headers such as --- a/file or +++ b/file are invalid, and do not use bare headers. ",
-    "For *** Update File: path, use @@ hunks. Every hunk file data line must start with exactly one hunk prefix: space for unchanged context, + for an added line, or - for a removed line. Encode an empty context line as a line containing a single space, never as a truly blank line. ",
-    "For *** Add File: path, each file content line is encoded as + followed by content. Omit content hunks for deletes. Standard unified hunk headers are accepted and normalized to native Codex @@ headers."
+    "One complete raw apply_patch document. The first line must be *** Begin Patch and the final line must be *** End Patch; nothing before or after them. ",
+    "Every data line inside a hunk starts with exactly one prefix: space for unchanged context, + for an added line, - for a removed line. An empty context line is written as a single space character. ",
+    "Operation headers are exactly *** Add File: path, *** Update File: path, *** Delete File: path. Bare --- a/file and +++ b/file headers are invalid. ",
+    "For *** Update File: path, write hunks in top-to-bottom file order, each starting with a line containing only @@. Do not write unified range headers such as @@ -1,3 +1,3 @@; they are not accepted. ",
+    "Text after @@ (for example @@ fn main) is a forward anchor: the hunk is matched after that line, so it must appear above the lines you change. Omit it unless you are sure. ",
+    "Keep one to three context lines per hunk. Context must match the file byte for byte, including trailing spaces and tabs; without context only the first matching line is changed. ",
+    "For *** Add File: path, each content line is + followed by the content. For *** Delete File: path, write no hunks. ",
+    "A rename needs at least one hunk: write *** Move to: new_path right below the update header and add a hunk with only context lines. ",
+    "Never let Add File or Move to target a path that already exists; it is overwritten silently. Delete the target first or choose another path. ",
+    "Every write rewrites the file with LF endings and a trailing newline, so a CRLF file or a file with no final newline changes on disk. ",
+    "Use workspace-relative paths; never absolute paths, and never step outside the workspace with ../."
 );
 const STRICT_APPLY_PATCH_LINE: &str = APPLY_PATCH_SYSTEM_PROMPT_RULES;
 
@@ -650,16 +666,20 @@ fn prompt_fields_are_safe(model: &Value) -> bool {
                 && !messages_text.contains(legacy_codeseex_identity().as_str())
                 && instructions.contains("CodeSeeX Proxy Compatibility")
                 && instructions.contains("*** Add File: path")
-                && instructions.contains("Bare headers")
+                && instructions.contains("first line is exactly *** Begin Patch")
                 && instructions.contains("Do not answer with file contents as prose")
-                && instructions.contains("standalone grammar lines")
-                && instructions.contains("hunk prefixes for file data lines")
+                && instructions.contains("starts with exactly one hunk prefix")
+                && instructions.contains("top-to-bottom file order")
+                && instructions.contains("Do not write unified range headers")
+                && instructions.contains("forward anchor")
                 && messages_text.contains("CodeSeeX Proxy Compatibility")
                 && messages_text.contains("*** Add File: path")
-                && messages_text.contains("Bare headers")
+                && messages_text.contains("first line is exactly *** Begin Patch")
                 && messages_text.contains("Do not answer with file contents as prose")
-                && messages_text.contains("standalone grammar lines")
-                && messages_text.contains("hunk prefixes for file data lines")
+                && messages_text.contains("starts with exactly one hunk prefix")
+                && messages_text.contains("top-to-bottom file order")
+                && messages_text.contains("Do not write unified range headers")
+                && messages_text.contains("forward anchor")
         }
         _ => false,
     }
@@ -1740,16 +1760,18 @@ mod tests {
             assert!(base.contains(
                 "When creating, editing, deleting, or renaming local text files, call apply_patch"
             ));
-            assert!(base.contains("first line must be *** Begin Patch"));
-            assert!(base.contains("final line must be *** End Patch"));
-            assert!(base.contains("empty context line is not a blank line"));
-            assert!(base.contains("single space character line"));
+            assert!(base.contains("first line is exactly *** Begin Patch"));
+            assert!(base.contains("final line is exactly *** End Patch"));
+            assert!(
+                base.contains("Encode an empty context line as a line containing a single space")
+            );
             assert!(base.contains("Apply patch examples:"));
             assert!(base.contains("Edit multiple files in one patch:"));
             assert!(base.contains("*** Move to: src/new_name.rs"));
             assert!(messages.contains("Do not answer with file contents as prose"));
-            assert!(messages.contains("empty context line is not a blank line"));
-            assert!(messages.contains("single space character line"));
+            assert!(
+                messages.contains("Encode an empty context line as a line containing a single space")
+            );
             assert!(messages.contains("Edit multiple files in one patch:"));
             assert!(messages.contains("*** Move to: src/new_name.rs"));
         }

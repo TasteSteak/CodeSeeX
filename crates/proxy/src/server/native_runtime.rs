@@ -1090,7 +1090,10 @@ fn native_provider_turn_response(
         return response_from_bytes(
             reqwest::StatusCode::OK,
             Some(HeaderValue::from_static("text/event-stream")),
-            body,
+            // The buffered provider frames go to the client as they arrived,
+            // except for an apply_patch call, which has to reach Codex in the
+            // grammar the client can execute.
+            crate::native_responses::normalize_apply_patch_sse_body(body),
         );
     }
     let mut native = match serde_json::from_slice::<Value>(&body) {
@@ -1107,6 +1110,8 @@ fn native_provider_turn_response(
     if let Some(provider_id) = provider_id.as_deref() {
         rewrite_provider_response_identity(&mut native, provider_id, id);
     }
+    // Same reason as the SSE branch: the client executes this text.
+    crate::native_responses::normalize_apply_patch_event_payload(&mut native);
     // The stored copy always keeps the provider's own item shape; the client
     // copy additionally carries the mirrored summary.
     let mut client_response = native;
@@ -1438,6 +1443,9 @@ async fn native_non_streaming_response(
     if let Some(provider_id) = provider_id.as_deref() {
         rewrite_provider_response_identity(&mut native, provider_id, id);
     }
+    // Repair the apply_patch input before the group is retained, so the client
+    // copy, the stored copy and the upstream replay all agree on one text.
+    crate::native_responses::normalize_apply_patch_event_payload(&mut native);
     let tool_group = match native_tool_call_group_from_response(&native) {
         Ok(group) => group,
         Err(error) => {

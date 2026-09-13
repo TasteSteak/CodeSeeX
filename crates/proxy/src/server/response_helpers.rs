@@ -309,20 +309,29 @@ pub(super) async fn record_apply_patch_input_micro_repair_diagnostic(
     call: &ChatToolCall,
 ) {
     let diagnostic = apply_patch_input_normalization_diagnostic(&call.arguments);
-    if diagnostic.blank_context_lines_repaired == 0 {
-        return;
-    }
+    let unified_hunk_headers_repaired = diagnostic.unified_hunk_headers_repaired;
+    let blank_context_lines_repaired = diagnostic.blank_context_lines_repaired;
+    let repair_kind = match (
+        unified_hunk_headers_repaired > 0,
+        blank_context_lines_repaired > 0,
+    ) {
+        (true, true) => "unified_hunk_header_and_blank_context_line",
+        (true, false) => "unified_hunk_header",
+        (false, true) => "blank_update_hunk_context_line",
+        (false, false) => return,
+    };
     let _ = store
         .record_event(
             "info",
             "apply_patch_input_micro_repair_diagnostic",
-            "CodeSeeX repaired blank apply_patch hunk context lines.",
+            "CodeSeeX repaired apply_patch hunk input.",
             Some(&json!({
                 "id": response_id,
                 "call_id": call.id,
                 "tool_name": call.name,
-                "repair_kind": "blank_update_hunk_context_line",
-                "blank_context_lines_repaired": diagnostic.blank_context_lines_repaired,
+                "repair_kind": repair_kind,
+                "unified_hunk_headers_repaired": unified_hunk_headers_repaired,
+                "blank_context_lines_repaired": blank_context_lines_repaired,
                 "input_chars": diagnostic.input_chars,
             })),
         )

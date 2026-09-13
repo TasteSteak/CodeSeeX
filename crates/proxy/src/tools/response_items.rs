@@ -56,26 +56,35 @@ pub(crate) fn normalize_patch_newlines(value: &str) -> String {
 }
 
 fn normalize_patch_newlines_with_diagnostic(value: &str) -> ApplyPatchInputNormalization {
-    let normalized =
-        normalize_unified_hunk_headers(&value.replace("\r\n", "\n").replace('\r', "\n"));
+    let (normalized, unified_hunk_headers_repaired) = normalize_unified_hunk_headers_with_count(
+        &value.replace("\r\n", "\n").replace('\r', "\n"),
+    );
     let (input, blank_context_lines_repaired) =
         repair_update_hunk_blank_context_lines_with_count(&normalized);
     ApplyPatchInputNormalization {
         input_chars: input.chars().count(),
         input,
+        unified_hunk_headers_repaired,
         blank_context_lines_repaired,
     }
 }
 
-fn normalize_unified_hunk_headers(value: &str) -> String {
+fn normalize_unified_hunk_headers_with_count(value: &str) -> (String, usize) {
     let mut output = String::with_capacity(value.len());
+    let mut repaired = 0;
     for (index, line) in value.split('\n').enumerate() {
         if index > 0 {
             output.push('\n');
         }
-        output.push_str(&normalize_patch_line(line));
+        match normalize_unified_hunk_header(line) {
+            Some(normalized) => {
+                repaired += 1;
+                output.push_str(&normalized);
+            }
+            None => output.push_str(line),
+        }
     }
-    output
+    (output, repaired)
 }
 
 pub(crate) fn normalize_patch_line(line: &str) -> String {
@@ -353,6 +362,7 @@ fn web_search_direct_url(value: &str) -> Option<String> {
 pub(crate) struct ApplyPatchInputNormalization {
     pub(crate) input: String,
     pub(crate) input_chars: usize,
+    pub(crate) unified_hunk_headers_repaired: usize,
     pub(crate) blank_context_lines_repaired: usize,
 }
 
@@ -439,6 +449,29 @@ mod tests {
             input,
             "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n fn before() {}\n \n pub fn after() {}\n*** End Patch"
         );
+    }
+
+    /// Unified hunk headers are the most common DeepSeek apply_patch mistake, so
+    /// the repair is counted and reported instead of staying invisible.
+    #[test]
+    fn apply_patch_repairs_and_counts_unified_hunk_headers() {
+        let normalized = normalize_apply_patch_response_input_with_diagnostic(
+            "*** Begin Patch\n*** Update File: a.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n*** End Patch",
+        );
+
+        assert_eq!(normalized.unified_hunk_headers_repaired, 1);
+        assert_eq!(normalized.blank_context_lines_repaired, 0);
+        assert!(normalized.input.contains("@@\n"), "{}", normalized.input);
+        assert!(
+            !normalized.input.contains("@@ -1,2 +1,2 @@"),
+            "{}",
+            normalized.input
+        );
+
+        // A patched document is not rewritten a second time.
+        let again = normalize_apply_patch_response_input_with_diagnostic(&normalized.input);
+        assert_eq!(again.unified_hunk_headers_repaired, 0);
+        assert_eq!(again.input, normalized.input);
     }
 
     #[test]
