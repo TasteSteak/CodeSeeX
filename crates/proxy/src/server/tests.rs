@@ -508,11 +508,11 @@ async fn api_models_returns_app_server_model_list_shape() {
     let body = response.json::<Value>().await.unwrap();
     assert_eq!(
         body.pointer("/data/0/id").and_then(Value::as_str),
-        Some("deepseek-v4-flash")
+        Some("deepseek-flash")
     );
     assert_eq!(
         body.pointer("/data/0/model").and_then(Value::as_str),
-        Some("deepseek-v4-flash")
+        Some("deepseek-flash")
     );
     assert_eq!(
         body.pointer("/data/0/defaultReasoningEffort")
@@ -553,12 +553,12 @@ async fn codex_model_catalog_route_returns_injected_model_choices() {
     assert_eq!(
         body.pointer("/appServer/data/0/model")
             .and_then(Value::as_str),
-        Some("deepseek-v4-flash")
+        Some("deepseek-flash")
     );
     assert_eq!(
         body.pointer("/appServer/data/0/displayName")
             .and_then(Value::as_str),
-        Some("DeepSeek V4 Flash")
+        Some("DeepSeek V4.1 Flash")
     );
     assert_eq!(
         body.pointer("/appServer/data/0/shortDisplayName")
@@ -707,8 +707,15 @@ async fn app_server_rpc_dispatches_model_list() {
         body.pointer("/result/data/1/id").and_then(Value::as_str),
         Some("deepseek-v4-pro")
     );
+    // The official DeepSeek V4 Pro is text only; the Flash model carries images.
     assert_eq!(
-        body.pointer("/result/data/1/inputModalities/1")
+        body.pointer("/result/data/1/inputModalities")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        body.pointer("/result/data/0/inputModalities/1")
             .and_then(Value::as_str),
         Some("image")
     );

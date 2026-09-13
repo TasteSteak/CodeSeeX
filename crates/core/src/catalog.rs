@@ -1266,7 +1266,7 @@ mod tests {
     fn an_upstream_pin_resolves_through_the_catalog() {
         let mut config = crate::config::AppConfig::default();
         config.catalog_overrides.models.insert(
-            crate::models::MODEL_FLASH.to_owned(),
+            "deepseek-flash".to_owned(),
             crate::config::CatalogModelOverride {
                 upstream_slug: Some("upstream-flash".to_owned()),
                 ..Default::default()
@@ -1274,7 +1274,7 @@ mod tests {
         );
 
         config.model_override =
-            crate::models::UpstreamModelOverride::Custom(crate::models::MODEL_FLASH.to_owned());
+            crate::models::UpstreamModelOverride::Custom("deepseek-flash".to_owned());
         assert_eq!(
             resolve_upstream_slug(&config, crate::models::MODEL_PRO),
             "upstream-flash"
@@ -1330,8 +1330,26 @@ mod tests {
             .iter()
             .map(|model| model.slug.as_str())
             .collect();
-        assert!(slugs.contains(&"deepseek-v4-flash"));
+        assert!(slugs.contains(&"deepseek-flash"));
         assert!(slugs.contains(&"deepseek-v4-pro"));
+    }
+
+    /// The names DeepSeek retired are still accepted by the API (billed as
+    /// Flash), so a client that asks for one keeps resolving to that model.
+    #[test]
+    fn retired_model_names_still_resolve() {
+        let document = embedded_catalog_document();
+        for requested in ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
+            let model = document
+                .model_for_request(requested)
+                .unwrap_or_else(|| panic!("{requested} must resolve"));
+            assert_eq!(model.slug, "deepseek-flash");
+            assert_eq!(model.upstream_slug_or_slug(), "deepseek-v4-flash");
+        }
+        assert_eq!(
+            document.upstream_slug_for("deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
     }
 
     /// The published remote manifest (`catalog/model-catalog.json`) is the
@@ -1620,7 +1638,8 @@ mod tests {
         assert!(!pro.hidden);
         assert!(pro.is_default);
         assert_eq!(pro.default_reasoning_effort, "medium");
-        assert_eq!(pro.input_modalities, vec!["text", "image"]);
+        // The official DeepSeek V4 Pro does not accept images.
+        assert_eq!(pro.input_modalities, vec!["text"]);
         assert_eq!(
             pro.supported_reasoning_efforts
                 .iter()
@@ -1636,9 +1655,9 @@ mod tests {
         let flash = response
             .data
             .iter()
-            .find(|model| model.id == "deepseek-v4-flash")
+            .find(|model| model.id == "deepseek-flash")
             .expect("flash model");
-        assert_eq!(flash.display_name, "DeepSeek V4 Flash");
+        assert_eq!(flash.display_name, "DeepSeek V4.1 Flash");
         assert_eq!(flash.short_display_name.as_deref(), Some("Flash"));
     }
 
