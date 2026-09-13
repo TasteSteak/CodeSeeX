@@ -10,7 +10,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, Menu, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{
+    CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, Menu, MenuBuilder, SubmenuBuilder,
+};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, Manager, RunEvent, Runtime, State, Theme, WebviewUrl, WebviewWindowBuilder,
@@ -932,11 +934,12 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<Menu
     // The menu mirrors the catalog, so a model that arrives with a remote refresh
     // shows up here too instead of the tray being pinned to the built-in slugs.
     let pinned = model.pinned_slug();
-    let mut model_items: Vec<CheckMenuItem<R>> = vec![
-        CheckMenuItemBuilder::with_id("tray:model:default", i18n.text("modelDefault", &[]))
-            .checked(pinned.is_none())
-            .build(manager)?,
-    ];
+    let mut model_items: Vec<CheckMenuItem<R>> =
+        vec![
+            CheckMenuItemBuilder::with_id("tray:model:default", i18n.text("modelDefault", &[]))
+                .checked(pinned.is_none())
+                .build(manager)?,
+        ];
     for catalog_model in config
         .catalog_document()
         .models

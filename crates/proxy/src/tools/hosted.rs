@@ -141,10 +141,7 @@ pub(crate) fn tool_result_event_detail_for(
             );
         }
     }
-    if matches!(
-        name,
-        "vision_analyze" | "vision_generate" | "image_gen"
-    ) {
+    if matches!(name, "vision_analyze" | "vision_generate" | "image_gen") {
         if let Some(object) = detail.as_object_mut() {
             object.insert(
                 "vision".to_owned(),

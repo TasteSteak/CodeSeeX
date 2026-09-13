@@ -72,7 +72,10 @@ pub(crate) fn router() -> Router<ProxyState> {
             "/api/upstream/test",
             get(api_upstream_test).post(api_upstream_test),
         )
-        .route("/manager/upstream/test", get(api_upstream_test).post(api_upstream_test))
+        .route(
+            "/manager/upstream/test",
+            get(api_upstream_test).post(api_upstream_test),
+        )
         .route("/api/upstream/credential", post(api_upstream_credential))
         .route("/api/deepseek/balance", get(api_balance))
         .route("/api/search-sources/health", get(search_sources_health))

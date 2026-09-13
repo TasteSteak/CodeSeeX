@@ -1,5 +1,7 @@
 use crate::catalog::CatalogDocument;
-use crate::models::{parse_model_thinking, ModelThinking, TemperaturePreset, UpstreamModelOverride};
+use crate::models::{
+    parse_model_thinking, ModelThinking, TemperaturePreset, UpstreamModelOverride,
+};
 use crate::pricing::PricingTable;
 use crate::urls::normalize_base_url;
 use serde::{Deserialize, Serialize};
@@ -585,7 +587,8 @@ impl AppConfig {
         if !self.catalog_remote_enabled {
             return;
         }
-        if let Some(document) = crate::catalog::read_cached_catalog_document(&self.catalog_cache_path())
+        if let Some(document) =
+            crate::catalog::read_cached_catalog_document(&self.catalog_cache_path())
         {
             let document = Arc::new(document);
             self.catalog_remote = Some(Arc::clone(&document));
@@ -877,7 +880,10 @@ pub fn pricing_override_from_user_billing(billing: &UserBillingConfig) -> Option
                 rate.cache_miss_input.unwrap_or(0.0),
                 rate.output.unwrap_or(0.0),
             ];
-            if values.iter().any(|value| !value.is_finite() || *value < 0.0) {
+            if values
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            {
                 continue;
             }
             rates.insert(
@@ -903,30 +909,31 @@ pub fn pricing_override_from_user_billing(billing: &UserBillingConfig) -> Option
 /// Legacy 0.7.0 rate fields mapped onto the built-in slugs.
 fn legacy_billing_rates(billing: &UserBillingConfig) -> Vec<(&'static str, Value)> {
     let mut output = Vec::new();
-    let mut push = |slug: &'static str,
-                    cached: Option<f64>,
-                    cache_miss: Option<f64>,
-                    out: Option<f64>| {
-        if cached.is_none() && cache_miss.is_none() && out.is_none() {
-            return;
-        }
-        let values = [
-            cached.unwrap_or(0.0),
-            cache_miss.unwrap_or(0.0),
-            out.unwrap_or(0.0),
-        ];
-        if values.iter().any(|value| !value.is_finite() || *value < 0.0) {
-            return;
-        }
-        output.push((
-            slug,
-            json!({
-                "cached_input": values[0],
-                "cache_miss_input": values[1],
-                "output": values[2],
-            }),
-        ));
-    };
+    let mut push =
+        |slug: &'static str, cached: Option<f64>, cache_miss: Option<f64>, out: Option<f64>| {
+            if cached.is_none() && cache_miss.is_none() && out.is_none() {
+                return;
+            }
+            let values = [
+                cached.unwrap_or(0.0),
+                cache_miss.unwrap_or(0.0),
+                out.unwrap_or(0.0),
+            ];
+            if values
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            {
+                return;
+            }
+            output.push((
+                slug,
+                json!({
+                    "cached_input": values[0],
+                    "cache_miss_input": values[1],
+                    "output": values[2],
+                }),
+            ));
+        };
     push(
         crate::models::MODEL_FLASH,
         billing.flash_cached_input_cny,
@@ -1144,7 +1151,9 @@ mod tests {
             ReasoningSummaryMode::Smart
         );
         assert_eq!(
-            resolved("[experimental]\nreasoning_summary = false\nreasoning_summary_mode = \"full\"\n"),
+            resolved(
+                "[experimental]\nreasoning_summary = false\nreasoning_summary_mode = \"full\"\n"
+            ),
             ReasoningSummaryMode::Full
         );
         assert_eq!(
@@ -1353,7 +1362,10 @@ mod tests {
             ..UserConfig::default()
         });
 
-        assert_eq!(config.upstream.transport, UpstreamTransport::NativeResponses);
+        assert_eq!(
+            config.upstream.transport,
+            UpstreamTransport::NativeResponses
+        );
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {
@@ -1433,7 +1445,10 @@ mod tests {
 
         assert_eq!(config.upstream.base_url, "https://relay.example.com/v1");
         let migrated = std::fs::read_to_string(&codex_config).expect("read migrated config");
-        assert!(migrated.contains("model = \"deepseek-flash\""), "{migrated}");
+        assert!(
+            migrated.contains("model = \"deepseek-flash\""),
+            "{migrated}"
+        );
         assert!(
             migrated.contains("upstream_base_url = \"https://relay.example.com/v1\""),
             "{migrated}"
@@ -1446,10 +1461,7 @@ mod tests {
     fn legacy_transport_aliases_resolve_to_native_or_chat() {
         // There is no `auto` mode any more: it is not a recognised value, so an
         // unset/blank transport is what resolves to the Native default.
-        assert_eq!(
-            parse_upstream_transport("auto"),
-            None
-        );
+        assert_eq!(parse_upstream_transport("auto"), None);
         assert_eq!(
             parse_upstream_transport(""),
             Some(UpstreamTransport::NativeResponses)

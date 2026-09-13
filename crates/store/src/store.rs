@@ -4040,18 +4040,9 @@ fn usage_sessions_from_inner(
     // both the rows and the "already accounted for" set.
     let chains = turn_history
         .iter()
-        .map(|turn| {
-            (
-                turn.id.clone(),
-                usage_chain_for_final_turn(inner, &turn.id),
-            )
-        })
+        .map(|turn| (turn.id.clone(), usage_chain_for_final_turn(inner, &turn.id)))
         .collect::<HashMap<_, _>>();
-    let chain_ids = chains
-        .values()
-        .flatten()
-        .cloned()
-        .collect::<HashSet<_>>();
+    let chain_ids = chains.values().flatten().cloned().collect::<HashSet<_>>();
     let finals = usage_final_anchors(inner, turn_history);
     let mut handoff_ids_by_final_id = usage_requests_by_final_turn(inner, &finals, |request| {
         request_lifecycle(request) == "client_tool_handoff" && !chain_ids.contains(&request.id)
@@ -8208,7 +8199,8 @@ mod tests {
 
         let (all, _) = store.recent_events(50, None).await.expect("all events");
         assert!(
-            all.iter().any(|event| event.event_type == "request_started"),
+            all.iter()
+                .any(|event| event.event_type == "request_started"),
             "chatter must still be recorded"
         );
         let _ = std::fs::remove_dir_all(dir);

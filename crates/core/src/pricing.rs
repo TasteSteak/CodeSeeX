@@ -470,7 +470,10 @@ impl PricingTable {
     }
 }
 
-fn parse_rate_map(value: Option<&Value>, label: &str) -> Result<BTreeMap<String, ModelRates>, String> {
+fn parse_rate_map(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<BTreeMap<String, ModelRates>, String> {
     let Some(value) = value else {
         return Ok(BTreeMap::new());
     };
@@ -582,9 +585,8 @@ fn parse_rfc3339_utc_minutes(value: &str) -> Option<i64> {
         Some('Z') | Some('z') => {}
         Some(sign @ ('+' | '-')) => {
             let offset_text = &rest[1..];
-            let (hour_text, minute_text) = offset_text
-                .split_once(':')
-                .unwrap_or((offset_text, "0"));
+            let (hour_text, minute_text) =
+                offset_text.split_once(':').unwrap_or((offset_text, "0"));
             let offset_hour: i64 = hour_text.parse().ok()?;
             let offset_minute: i64 = minute_text.parse().ok()?;
             let magnitude = offset_hour * 60 + offset_minute;
@@ -691,16 +693,27 @@ mod tests {
     #[test]
     fn unpriced_models_are_not_silently_priced() {
         let table = table();
-        assert!(table.estimate("unknown-model", None, 1, 1, 1, "2026-09-10T20:00:00+08:00").is_none());
+        assert!(table
+            .estimate("unknown-model", None, 1, 1, 1, "2026-09-10T20:00:00+08:00")
+            .is_none());
         let grouped = table
-            .estimate("unknown-model", Some("default"), 1, 1, 1, "2026-09-10T20:00:00+08:00")
+            .estimate(
+                "unknown-model",
+                Some("default"),
+                1,
+                1,
+                1,
+                "2026-09-10T20:00:00+08:00",
+            )
             .expect("group fallback");
         assert_eq!(grouped.rate_source, "group");
     }
 
     #[test]
     fn invalid_documents_are_rejected() {
-        assert!(PricingTable::from_value(&json!({ "rates": { "m": { "output": -1.0 } } })).is_err());
+        assert!(
+            PricingTable::from_value(&json!({ "rates": { "m": { "output": -1.0 } } })).is_err()
+        );
         assert!(PricingTable::from_value(&json!({
             "peak_valley": { "windows": [ { "from": "12:00", "to": "09:00" } ] }
         }))
@@ -726,8 +739,17 @@ mod tests {
             }))
             .expect("override applies");
         assert_eq!(next.peak_valley.multiplier, 1.5);
-        assert_eq!(next.rate_for("deepseek-v4-pro", None).unwrap().rates.output, 6.0);
-        assert_eq!(next.rate_for("deepseek-v4-flash", None).unwrap().rates.output, 2.0);
+        assert_eq!(
+            next.rate_for("deepseek-v4-pro", None).unwrap().rates.output,
+            6.0
+        );
+        assert_eq!(
+            next.rate_for("deepseek-v4-flash", None)
+                .unwrap()
+                .rates
+                .output,
+            2.0
+        );
         assert_eq!(next.peak_valley.windows.len(), 2);
         assert_eq!(next.revision, "test.1");
     }

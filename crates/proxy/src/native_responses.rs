@@ -142,9 +142,7 @@ pub(crate) fn native_tool_output_item(call: &NativeToolCall, output: impl Into<S
 /// The native transport forwards provider items, and Codex only executes the
 /// native `@@` grammar, so the repair Chat compatibility already applies has to
 /// run here too. The returned tally describes what changed.
-pub(crate) fn normalize_apply_patch_event_payload(
-    payload: &mut Value,
-) -> ApplyPatchRepairTally {
+pub(crate) fn normalize_apply_patch_event_payload(payload: &mut Value) -> ApplyPatchRepairTally {
     let mut tally = ApplyPatchRepairTally::default();
     if let Some(item) = payload.get_mut("item").filter(|item| item.is_object()) {
         tally.merge(normalize_apply_patch_item_input(item));
@@ -1096,10 +1094,9 @@ impl NativeResponseSseRelay {
             // Codex only executes the native `@@` grammar, so an apply_patch call
             // is repaired before the frame is inspected and relayed; the client
             // executes this text and the retained group replays it upstream.
-            let normalized_frame =
-                std::str::from_utf8(&frame)
-                    .ok()
-                    .and_then(normalize_apply_patch_sse_frame);
+            let normalized_frame = std::str::from_utf8(&frame)
+                .ok()
+                .and_then(normalize_apply_patch_sse_frame);
             let frame = match normalized_frame {
                 Some((rewritten, tally)) => {
                     self.apply_patch_repairs.merge(tally);
@@ -1200,9 +1197,7 @@ impl NativeResponseSseRelay {
         let mutated = self.present_reasoning_summary
             && matches!(
                 event_type.as_str(),
-                "response.output_item.added"
-                    | "response.output_item.done"
-                    | "response.completed"
+                "response.output_item.added" | "response.output_item.done" | "response.completed"
             );
         let suppressed = self.suppress_provider_reasoning(&event_type, &payload);
         if !identity_rewritten && injected.is_empty() && !mutated && !suppressed {
@@ -1225,7 +1220,8 @@ impl NativeResponseSseRelay {
             let Some(base_sequence) = base_sequence else {
                 continue;
             };
-            event["sequence_number"] = json!(base_sequence + self.sequence_offset + 1 + index as u64);
+            event["sequence_number"] =
+                json!(base_sequence + self.sequence_offset + 1 + index as u64);
             let event_name = event
                 .get("type")
                 .and_then(Value::as_str)
@@ -1295,8 +1291,8 @@ impl NativeResponseSseRelay {
                 }
             }
             "response.content_part.added" => {
-                let is_reasoning_text = payload.pointer("/part/type").and_then(Value::as_str)
-                    == Some("reasoning_text");
+                let is_reasoning_text =
+                    payload.pointer("/part/type").and_then(Value::as_str) == Some("reasoning_text");
                 let Some(item_id) = payload
                     .get("item_id")
                     .and_then(Value::as_str)
@@ -1665,11 +1661,7 @@ pub(crate) fn present_reasoning_summary_in_response(
                     .filter(|part| {
                         part.get("type").and_then(Value::as_str) == Some("reasoning_text")
                     })
-                    .map(|part| {
-                        part.get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                    })
+                    .map(|part| part.get("text").and_then(Value::as_str).unwrap_or_default())
                     .collect::<String>()
             })
             .unwrap_or_default();
@@ -1910,9 +1902,8 @@ mod tests {
         assert!(!relayed.contains("@@ -1,2 +1,2 @@"), "{relayed}");
 
         // A clean frame adds nothing.
-        relay.relay_bytes(
-            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
-        );
+        relay
+            .relay_bytes(b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n");
         assert_eq!(relay.apply_patch_repairs().unified_hunk_headers, 1);
     }
 
@@ -1935,8 +1926,7 @@ mod tests {
                 chat_function("workspace_search"),
             ],
             WebSearchBackend::Local,
-        )
-;
+        );
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -1954,8 +1944,7 @@ mod tests {
                 chat_function("external_lookup"),
             ],
             WebSearchBackend::Official,
-        )
-;
+        );
 
         assert!(!plan.requires_local_execution);
         assert!(plan.uses_official_web_search);
@@ -1982,8 +1971,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("web_search_preview")],
             WebSearchBackend::Official,
-        )
-;
+        );
 
         assert!(!plan.requires_local_execution);
         assert!(plan.uses_official_web_search);
@@ -1995,8 +1983,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("workspace_search")],
             WebSearchBackend::Official,
-        )
-;
+        );
 
         assert!(!plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -2008,8 +1995,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("web_search"), json!({ "type": "web_search" })],
             WebSearchBackend::Local,
-        )
-;
+        );
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -2025,8 +2011,7 @@ mod tests {
 
     #[test]
     fn provider_native_web_search_without_the_local_function_asks_for_the_hosted_executor() {
-        let plan =
-            plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local);
+        let plan = plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local);
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -2035,8 +2020,7 @@ mod tests {
 
     #[test]
     fn apply_patch_is_converted_to_provider_custom_schema_without_parameter_wrapper() {
-        let plan =
-            plan_native_tools(&[chat_function("apply_patch")], WebSearchBackend::Local);
+        let plan = plan_native_tools(&[chat_function("apply_patch")], WebSearchBackend::Local);
 
         assert!(!plan.requires_local_execution);
         assert_eq!(
@@ -2247,8 +2231,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("exec_command"), namespace.clone()],
             WebSearchBackend::Local,
-        )
-;
+        );
 
         assert!(!plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -3160,7 +3143,9 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
             .find(|body| body.contains("event: response.output_item.done"))
             .expect("item done frame");
         assert!(
-            item_done.contains("\"summary\":[{\"text\":\"Keep the opening point.\",\"type\":\"summary_text\"}]"),
+            item_done.contains(
+                "\"summary\":[{\"text\":\"Keep the opening point.\",\"type\":\"summary_text\"}]"
+            ),
             "{item_done}"
         );
         let completed = bodies
@@ -3168,7 +3153,9 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
             .find(|body| body.contains("event: response.completed"))
             .expect("completed frame");
         assert!(
-            completed.contains("\"summary\":[{\"text\":\"Keep the opening point.\",\"type\":\"summary_text\"}]"),
+            completed.contains(
+                "\"summary\":[{\"text\":\"Keep the opening point.\",\"type\":\"summary_text\"}]"
+            ),
             "{completed}"
         );
         assert!(
@@ -3201,7 +3188,8 @@ data: {"type":"response.completed","response":{"id":"resp_provider","status":"co
     fn reasoning_summary_stream(bodies: &[String]) -> String {
         let mut streamed = String::new();
         for body in bodies {
-            let Some(rest) = body.strip_prefix("event: response.reasoning_summary_text.delta\ndata: ")
+            let Some(rest) =
+                body.strip_prefix("event: response.reasoning_summary_text.delta\ndata: ")
             else {
                 continue;
             };

@@ -230,13 +230,22 @@ mod tests {
         assert_eq!(custom.upstream_slug(MODEL_PRO), "test-placeholder-1");
 
         // The labels the manager already writes keep their legacy meaning.
-        assert_eq!(UpstreamModelOverride::from_label(""), UpstreamModelOverride::Default);
+        assert_eq!(
+            UpstreamModelOverride::from_label(""),
+            UpstreamModelOverride::Default
+        );
         assert_eq!(
             UpstreamModelOverride::from_label("default"),
             UpstreamModelOverride::Default
         );
-        assert_eq!(UpstreamModelOverride::from_label("flash"), UpstreamModelOverride::Flash);
-        assert_eq!(UpstreamModelOverride::from_label(MODEL_PRO), UpstreamModelOverride::Pro);
+        assert_eq!(
+            UpstreamModelOverride::from_label("flash"),
+            UpstreamModelOverride::Flash
+        );
+        assert_eq!(
+            UpstreamModelOverride::from_label(MODEL_PRO),
+            UpstreamModelOverride::Pro
+        );
         assert_eq!(UpstreamModelOverride::Default.pinned_slug(), None);
 
         for value in [

@@ -79,9 +79,7 @@ pub(crate) fn config_keys() -> [&'static str; 10] {
     ]
 }
 
-pub(crate) fn analyze_registry_config_fields(
-    settings: &BTreeMap<String, String>,
-) -> Vec<Value> {
+pub(crate) fn analyze_registry_config_fields(settings: &BTreeMap<String, String>) -> Vec<Value> {
     vec![
         json!({
             "key": ANALYZE_BACKEND_KEY,
@@ -2118,10 +2116,7 @@ mod tests {
             })
             .expect("deepseek model field");
         assert_eq!(field.get("type").and_then(Value::as_str), Some("text"));
-        assert_eq!(
-            field.get("placeholder").and_then(Value::as_str),
-            Some("")
-        );
+        assert_eq!(field.get("placeholder").and_then(Value::as_str), Some(""));
     }
 
     #[test]

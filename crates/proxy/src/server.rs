@@ -1061,7 +1061,6 @@ async fn responses(
     .await;
     record_cost_risk_diagnostic(&state.store, &id, "/v1/responses", &input, Some(&payload)).await;
 
-
     let auth = upstream_authorization_from_headers(&headers, &state.v1_access_token);
     if let Some(auth) = auth.as_deref() {
         codeseex_core::codex_auth::remember_authorization_header(auth);

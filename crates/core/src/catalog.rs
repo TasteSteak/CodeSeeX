@@ -286,7 +286,9 @@ fn catalog_from_seed_and_document(
 ) -> serde_json::Result<Catalog> {
     let seed: CatalogSeed = serde_json::from_str(text)?;
     if document.models.is_empty() {
-        let mut fallback = Catalog { models: seed.models };
+        let mut fallback = Catalog {
+            models: seed.models,
+        };
         apply_common_model_fields(&mut fallback, &seed.common_model_fields);
         return Ok(fallback);
     }
@@ -332,7 +334,10 @@ fn merge_seed_field(model: &mut CatalogModel, key: &str, value: &Value) {
         model.extra.insert(key.to_owned(), value.clone());
         return;
     }
-    model.extra.entry(key.to_owned()).or_insert_with(|| value.clone());
+    model
+        .extra
+        .entry(key.to_owned())
+        .or_insert_with(|| value.clone());
 }
 
 fn catalog_model_is_hidden(model: &CatalogModel) -> bool {
@@ -856,12 +861,10 @@ impl CatalogDocument {
             }
             models.push(model);
         }
-        let has_explicit_default = models.iter().any(|model| {
-            model.extra.get("is_default").and_then(Value::as_bool) == Some(true)
-        });
-        if !has_explicit_default
-            && !models.iter().any(|model| model.slug == default_model)
-        {
+        let has_explicit_default = models
+            .iter()
+            .any(|model| model.extra.get("is_default").and_then(Value::as_bool) == Some(true));
+        if !has_explicit_default && !models.iter().any(|model| model.slug == default_model) {
             return Err("catalog document must declare a default model".to_owned());
         }
         let pricing = match object.get("pricing") {
@@ -899,8 +902,8 @@ impl CatalogDocument {
     }
 
     pub fn to_json(&self) -> String {
-        let mut text = serde_json::to_string_pretty(&self.to_value())
-            .unwrap_or_else(|_| "{}".to_owned());
+        let mut text =
+            serde_json::to_string_pretty(&self.to_value()).unwrap_or_else(|_| "{}".to_owned());
         text.push('\n');
         text
     }
@@ -940,9 +943,7 @@ impl CatalogDocument {
         if self.default_model.trim().is_empty() {
             self.models
                 .iter()
-                .find(|model| {
-                    model.extra.get("is_default").and_then(Value::as_bool) == Some(true)
-                })
+                .find(|model| model.extra.get("is_default").and_then(Value::as_bool) == Some(true))
                 .or_else(|| self.models.first())
                 .map(|model| model.slug.as_str())
                 .unwrap_or(MODEL_PRO)
@@ -1023,10 +1024,7 @@ impl CatalogDocument {
         CatalogDocument {
             schema_version: overlay.schema_version,
             revision: overlay.revision.clone(),
-            issued_at: overlay
-                .issued_at
-                .clone()
-                .or_else(|| self.issued_at.clone()),
+            issued_at: overlay.issued_at.clone().or_else(|| self.issued_at.clone()),
             provider_name: if overlay.provider_name.trim().is_empty() {
                 self.provider_name.clone()
             } else {
@@ -1171,7 +1169,9 @@ fn validate_catalog_model(model: &CatalogModel) -> Result<(), String> {
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        return Err(format!("catalog model slug has unsupported characters: {slug}"));
+        return Err(format!(
+            "catalog model slug has unsupported characters: {slug}"
+        ));
     }
     for key in CATALOG_PROMPT_FIELDS {
         if model.extra.contains_key(key) {
@@ -1184,16 +1184,24 @@ fn validate_catalog_model(model: &CatalogModel) -> Result<(), String> {
         return Err(format!("catalog model {slug} needs a display_name"));
     }
     if model.context_window == 0 {
-        return Err(format!("catalog model {slug} needs a positive context_window"));
+        return Err(format!(
+            "catalog model {slug} needs a positive context_window"
+        ));
     }
     if !(1..=100).contains(&model.effective_context_window_percent) {
         return Err(format!(
             "catalog model {slug} needs an effective_context_window_percent between 1 and 100"
         ));
     }
-    if let Some(max) = model.extra.get("max_context_window").and_then(Value::as_u64) {
+    if let Some(max) = model
+        .extra
+        .get("max_context_window")
+        .and_then(Value::as_u64)
+    {
         if max == 0 {
-            return Err(format!("catalog model {slug} needs a positive max_context_window"));
+            return Err(format!(
+                "catalog model {slug} needs a positive max_context_window"
+            ));
         }
     }
     for key in ["aliases", "alias_patterns"] {
@@ -1324,15 +1332,15 @@ impl crate::config::CatalogModelOverride {
                 .insert("upstream_slug".to_owned(), json!(upstream_slug));
         }
         if let Some(group) = self.pricing_group.as_deref() {
-            model
-                .extra
-                .insert("pricing_group".to_owned(), json!(group));
+            model.extra.insert("pricing_group".to_owned(), json!(group));
         }
         if let Some(aliases) = self.aliases.as_ref() {
             model.extra.insert("aliases".to_owned(), json!(aliases));
         }
         if let Some(is_default) = self.is_default {
-            model.extra.insert("is_default".to_owned(), json!(is_default));
+            model
+                .extra
+                .insert("is_default".to_owned(), json!(is_default));
         }
         if let Some(hidden) = self.hidden {
             model.extra.insert("hidden".to_owned(), json!(hidden));
@@ -1358,10 +1366,7 @@ impl crate::config::CatalogModelOverride {
                 extra: BTreeMap::new(),
             });
         model.slug = slug.to_owned();
-        model.display_name = self
-            .display_name
-            .clone()
-            .unwrap_or_else(|| slug.to_owned());
+        model.display_name = self.display_name.clone().unwrap_or_else(|| slug.to_owned());
         model.description = self.description.clone().unwrap_or_default();
         self.apply_to(&mut model);
         Some(model)
@@ -1450,7 +1455,10 @@ mod tests {
     #[test]
     fn billing_only_entries_are_priced_but_not_offered() {
         let mut document = embedded_catalog_document();
-        let mut vision = document.model("deepseek-flash").cloned().expect("flash model");
+        let mut vision = document
+            .model("deepseek-flash")
+            .cloned()
+            .expect("flash model");
         vision.slug = "deepseek-v4-flash-vision-exp".to_owned();
         vision.display_name = "DeepSeek V4 Flash Vision".to_owned();
         vision
@@ -1588,8 +1596,13 @@ mod tests {
             document(&format!("{},{}", model("m1"), model("m1"))),
             valid.replace("\"default_model\":\"m1\"", "\"default_model\":\"missing\""),
             document(&windowless_model("m1")),
-            document(&model("m1").replace("\"priority\":1", "\"base_instructions\":\"x\",\"priority\":1")),
-            document(&model("m1").replace("\"priority\":1", "\"model_messages\":{},\"priority\":1")),
+            document(&model("m1").replace(
+                "\"priority\":1",
+                "\"base_instructions\":\"x\",\"priority\":1",
+            )),
+            document(
+                &model("m1").replace("\"priority\":1", "\"model_messages\":{},\"priority\":1"),
+            ),
             "not json at all".to_owned(),
         ];
         for text in rejected {
@@ -1605,9 +1618,10 @@ mod tests {
     #[test]
     fn seed_prompt_fields_beat_the_document() {
         let mut document = embedded_catalog_document();
-        document.models[0]
-            .extra
-            .insert("base_instructions".to_owned(), Value::String("remote".to_owned()));
+        document.models[0].extra.insert(
+            "base_instructions".to_owned(),
+            Value::String("remote".to_owned()),
+        );
 
         let catalog = catalog_from_seed_and_document(
             r#"{"common_model_fields":{"base_instructions":"seed"},"models":[]}"#,
@@ -1769,9 +1783,8 @@ mod tests {
             assert!(base.contains("Edit multiple files in one patch:"));
             assert!(base.contains("*** Move to: src/new_name.rs"));
             assert!(messages.contains("Do not answer with file contents as prose"));
-            assert!(
-                messages.contains("Encode an empty context line as a line containing a single space")
-            );
+            assert!(messages
+                .contains("Encode an empty context line as a line containing a single space"));
             assert!(messages.contains("Edit multiple files in one patch:"));
             assert!(messages.contains("*** Move to: src/new_name.rs"));
         }

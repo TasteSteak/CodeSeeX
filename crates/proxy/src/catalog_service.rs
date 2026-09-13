@@ -17,8 +17,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const CODESEEX_CATALOG_RAW_BASE_URL: &str =
-    "https://raw.githubusercontent.com/TasteSteak/CodeSeeX";
+const CODESEEX_CATALOG_RAW_BASE_URL: &str = "https://raw.githubusercontent.com/TasteSteak/CodeSeeX";
 const CODESEEX_CATALOG_DEFAULT_PATH: &str = "main/catalog/model-catalog.json";
 const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const CATALOG_FETCH_THROTTLE: Duration = Duration::from_secs(60);
@@ -63,7 +62,6 @@ pub(crate) enum UpstreamModelProbe {
 }
 
 impl UpstreamModelProbe {
-
     fn to_value(&self) -> Value {
         match self {
             Self::Listed(models) => json!({
@@ -228,8 +226,20 @@ impl CatalogService {
 
         let response = match tokio::time::timeout(CATALOG_REQUEST_TIMEOUT, request.send()).await {
             Ok(Ok(response)) => response,
-            Ok(Err(error)) => return self.record_refresh_failure("catalog_remote_unreachable", &error.to_string(), &config),
-            Err(_) => return self.record_refresh_failure("catalog_remote_timeout", "request timed out", &config),
+            Ok(Err(error)) => {
+                return self.record_refresh_failure(
+                    "catalog_remote_unreachable",
+                    &error.to_string(),
+                    &config,
+                )
+            }
+            Err(_) => {
+                return self.record_refresh_failure(
+                    "catalog_remote_timeout",
+                    "request timed out",
+                    &config,
+                )
+            }
         };
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
@@ -310,7 +320,8 @@ impl CatalogService {
         }
         runtime.set_catalog_document(Some(document.clone()));
         // The Codex-facing file contract is unchanged; only its generator moves.
-        let catalog = build_codeseex_catalog_from_document(&runtime.active_config().catalog_document());
+        let catalog =
+            build_codeseex_catalog_from_document(&runtime.active_config().catalog_document());
         if let Err(error) = write_catalog_atomic(&config.catalog_path(), &catalog) {
             tracing::warn!(error = %error, "failed to rewrite model-catalog.json");
         }
@@ -386,7 +397,11 @@ impl CatalogService {
     /// `POST /manager/upstream/test`: explains which credential reaches the
     /// upstream, which URL is used, and what the upstream answered. The key
     /// itself is never included.
-    pub(crate) async fn upstream_test(&self, config: &AppConfig, client: &reqwest::Client) -> Value {
+    pub(crate) async fn upstream_test(
+        &self,
+        config: &AppConfig,
+        client: &reqwest::Client,
+    ) -> Value {
         let upstream = &config.upstream;
         let managed_key = crate::secrets::upstream_api_key(config);
         let resolved = crate::upstream::resolve_upstream_authorization(
@@ -411,23 +426,19 @@ impl CatalogService {
 
         let (status, summary, models) = match url.clone() {
             None => (None, "invalid upstream base URL".to_owned(), None),
-            Some(_) => {
-                match tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, request.send()).await {
-                    Ok(Ok(response)) => {
-                        let status = response.status().as_u16();
-                        let body = response.text().await.unwrap_or_default();
-                        let models = parse_model_ids(&serde_json::from_str::<Value>(&body).unwrap_or(Value::Null));
-                        let needles = secret_needles(upstream, managed_key.as_deref());
-                        (
-                            Some(status),
-                            summarize_error(&body, &needles),
-                            models,
-                        )
-                    }
-                    Ok(Err(error)) => (None, summarize_error(&error.to_string(), &[]), None),
-                    Err(_) => (None, "request timed out".to_owned(), None),
+            Some(_) => match tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, request.send()).await {
+                Ok(Ok(response)) => {
+                    let status = response.status().as_u16();
+                    let body = response.text().await.unwrap_or_default();
+                    let models = parse_model_ids(
+                        &serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
+                    );
+                    let needles = secret_needles(upstream, managed_key.as_deref());
+                    (Some(status), summarize_error(&body, &needles), models)
                 }
-            }
+                Ok(Err(error)) => (None, summarize_error(&error.to_string(), &[]), None),
+                Err(_) => (None, "request timed out".to_owned(), None),
+            },
         };
 
         json!({
@@ -464,11 +475,10 @@ fn probe_diagnostics(
     summary: &str,
 ) -> String {
     let mut diagnostics = upstream_credential_hint(upstream, source, has_header);
-    let client_gate = matches!(status, Some(401 | 403))
-        && {
-            let summary = summary.to_ascii_lowercase();
-            summary.contains("unauthorized client") || summary.contains("unrecognized client")
-        };
+    let client_gate = matches!(status, Some(401 | 403)) && {
+        let summary = summary.to_ascii_lowercase();
+        summary.contains("unauthorized client") || summary.contains("unrecognized client")
+    };
     if client_gate {
         diagnostics.push_str(
             " This upstream appears to require a Codex client request; the probe only identifies itself as CodeSeeX, while real traffic forwards the client's originator and User-Agent.",
@@ -492,9 +502,7 @@ pub(crate) fn spawn_remote_refresh(
             if config.catalog_remote_enabled && CatalogService::remote_url(&config).is_some() {
                 let client = state.client();
                 let result = state.catalog.refresh(&state.runtime_config, &client).await;
-                let flag = |key: &str| {
-                    result.get(key).and_then(Value::as_bool).unwrap_or(false)
-                };
+                let flag = |key: &str| result.get(key).and_then(Value::as_bool).unwrap_or(false);
                 if !flag("throttled") {
                     let _ = store
                         .record_event(
@@ -615,17 +623,17 @@ pub(crate) fn parse_model_ids(value: &Value) -> Option<Vec<String>> {
                 .map(str::to_owned),
             _ => None,
         };
-        if let Some(id) = id.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty()) {
+        if let Some(id) = id
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty())
+        {
             models.push(id);
         }
     }
     Some(models)
 }
 
-async fn fetch_upstream_models(
-    config: &AppConfig,
-    client: &reqwest::Client,
-) -> UpstreamModelProbe {
+async fn fetch_upstream_models(config: &AppConfig, client: &reqwest::Client) -> UpstreamModelProbe {
     let upstream = &config.upstream;
     let Ok(url) = models_url(&upstream.base_url) else {
         return UpstreamModelProbe::Unavailable {
@@ -723,13 +731,7 @@ mod tests {
         );
         assert!(gated.contains("Codex client request"));
 
-        let plain = probe_diagnostics(
-            &upstream,
-            "codex_auth",
-            true,
-            Some(500),
-            "internal error",
-        );
+        let plain = probe_diagnostics(&upstream, "codex_auth", true, Some(500), "internal error");
         assert!(!plain.contains("Codex client request"));
     }
 

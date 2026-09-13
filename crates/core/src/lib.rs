@@ -16,8 +16,8 @@ pub use catalog::{
 };
 pub use config::{
     parse_network_proxy_mode, AppConfig, NetworkProxyMode, UpstreamConfig, UpstreamTransport,
-    UserBillingConfig, UserCatalogConfig, UserConfig, UserModelConfig, UserNetworkConfig,
-    UserExperimentalConfig, UserProxyConfig, UserToolsConfig, UserUiConfig, UserUpstreamConfig,
+    UserBillingConfig, UserCatalogConfig, UserConfig, UserExperimentalConfig, UserModelConfig,
+    UserNetworkConfig, UserProxyConfig, UserToolsConfig, UserUiConfig, UserUpstreamConfig,
     UserVisionGenerateToolConfig, UserVisionToolConfig, UserWebSearchToolConfig,
     VisionAnalyzeBackend, VisionImageDetail, WebSearchBackend, IMAGE_CAPABILITY_SCHEMA_VERSION,
 };

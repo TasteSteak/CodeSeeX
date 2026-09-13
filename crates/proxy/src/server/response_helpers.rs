@@ -347,7 +347,10 @@ pub(super) async fn record_apply_patch_input_micro_repairs(
     response_id: &str,
     tally: crate::tools::response_items::ApplyPatchRepairTally,
 ) {
-    let repair_kind = match (tally.unified_hunk_headers > 0, tally.blank_context_lines > 0) {
+    let repair_kind = match (
+        tally.unified_hunk_headers > 0,
+        tally.blank_context_lines > 0,
+    ) {
         (true, true) => "unified_hunk_header_and_blank_context_line",
         (true, false) => "unified_hunk_header",
         (false, true) => "blank_update_hunk_context_line",

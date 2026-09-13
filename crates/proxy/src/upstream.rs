@@ -159,16 +159,19 @@ fn codex_app_isolation_applies(upstream: &UpstreamConfig, payload: &Value) -> bo
     upstream_is_official(upstream) && payload_looks_like_codex_app_request(payload)
 }
 
-fn inbound_credential<'a>(
-    request: &UpstreamAuthRequest<'a>,
-) -> Option<String> {
+fn inbound_credential<'a>(request: &UpstreamAuthRequest<'a>) -> Option<String> {
     request
         .inbound
-        .filter(|value| !authorization_matches_local_access_token(request.local_access_token, value))
+        .filter(|value| {
+            !authorization_matches_local_access_token(request.local_access_token, value)
+        })
         .and_then(format_bearer_header)
 }
 
-fn configured_credential(upstream: &UpstreamConfig, request: &UpstreamAuthRequest<'_>) -> Option<String> {
+fn configured_credential(
+    upstream: &UpstreamConfig,
+    request: &UpstreamAuthRequest<'_>,
+) -> Option<String> {
     upstream
         .api_key
         .as_deref()
@@ -262,12 +265,9 @@ async fn send_upstream_request(
     }
 
     let auth_payload = auth_context_payload.unwrap_or(&payload);
-    let resolved = resolve_upstream_authorization(
-        upstream,
-        request,
-        auth_payload,
-        &|| read_codex_auth_api_key(false),
-    );
+    let resolved = resolve_upstream_authorization(upstream, request, auth_payload, &|| {
+        read_codex_auth_api_key(false)
+    });
     if let Some(value) = resolved
         .header
         .as_deref()
@@ -524,8 +524,8 @@ mod tests {
         };
         let resolved =
             resolve_upstream_authorization(&secret_upstream, request.clone(), &payload, &|| {
-            Some("direct-key".to_owned())
-        });
+                Some("direct-key".to_owned())
+            });
         assert_eq!(resolved.source, "secret");
         assert_eq!(resolved.header.as_deref(), Some("Bearer managed-key"));
         let codex_auth_upstream = UpstreamConfig {
@@ -533,10 +533,12 @@ mod tests {
             api_key: Some("configured-key".to_owned()),
             ..custom_upstream(None)
         };
-        let resolved =
-            resolve_upstream_authorization(&codex_auth_upstream, request.clone(), &payload, &|| {
-            Some("direct-key".to_owned())
-        });
+        let resolved = resolve_upstream_authorization(
+            &codex_auth_upstream,
+            request.clone(),
+            &payload,
+            &|| Some("direct-key".to_owned()),
+        );
         assert_eq!(resolved.source, "codex_auth");
         assert_eq!(resolved.header.as_deref(), Some("Bearer direct-key"));
         let request_only = UpstreamConfig {
@@ -544,8 +546,7 @@ mod tests {
             api_key: Some("configured-key".to_owned()),
             ..custom_upstream(None)
         };
-        let resolved =
-            resolve_upstream_authorization(&request_only, request, &payload, &|| None);
+        let resolved = resolve_upstream_authorization(&request_only, request, &payload, &|| None);
         assert_eq!(resolved.source, "request");
         assert_eq!(resolved.header.as_deref(), Some("Bearer inbound-key"));
     }
@@ -693,7 +694,10 @@ mod tests {
             .build()
             .expect("request builds");
 
-        assert_eq!(request.headers().get("user-agent").unwrap(), "CodeSeeX Vision");
+        assert_eq!(
+            request.headers().get("user-agent").unwrap(),
+            "CodeSeeX Vision"
+        );
         assert!(request.headers().get("originator").is_none());
     }
 
@@ -743,15 +747,21 @@ mod tests {
             .clone()
             .expect("captured headers");
         assert_eq!(
-            headers.get("originator").and_then(|value| value.to_str().ok()),
+            headers
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
             Some("codex_cli_rs")
         );
         assert_eq!(
-            headers.get("user-agent").and_then(|value| value.to_str().ok()),
+            headers
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
             Some("codex_cli_rs/0.7.1")
         );
         assert_eq!(
-            headers.get("session_id").and_then(|value| value.to_str().ok()),
+            headers
+                .get("session_id")
+                .and_then(|value| value.to_str().ok()),
             Some("session-123")
         );
         assert!(headers.get("conversation_id").is_none());

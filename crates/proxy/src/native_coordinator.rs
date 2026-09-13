@@ -273,10 +273,7 @@ pub(crate) fn round_hash(response_id: &str) -> String {
     short_hash(response_id)
 }
 
-fn prune_expired(
-    groups: &mut BTreeMap<String, PendingNativeToolGroup>,
-    evicted: &mut Vec<String>,
-) {
+fn prune_expired(groups: &mut BTreeMap<String, PendingNativeToolGroup>, evicted: &mut Vec<String>) {
     let now = Instant::now();
     groups.retain(|response_id, group| {
         if now.duration_since(group.created_at) < PENDING_NATIVE_GROUP_TTL {
@@ -420,7 +417,9 @@ mod tests {
     fn a_previous_response_id_link_wins_over_the_anchor() {
         let groups = NativePendingToolGroups::default();
         register_hosted_round(&groups);
-        let mut linked = request(vec![json!({ "type": "message", "role": "user", "content": "x" })]);
+        let mut linked = request(vec![
+            json!({ "type": "message", "role": "user", "content": "x" }),
+        ]);
         linked["previous_response_id"] = json!("resp_local_1");
 
         let Some(continuation) = groups.continuation_for(&linked) else {

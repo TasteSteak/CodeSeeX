@@ -281,13 +281,17 @@ mod tests {
             Some(r"C:\new\model-catalog.json")
         );
         // Stable when it already points at this catalog.
-        assert!(!sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
-            .expect("sync"));
+        assert!(
+            !sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
+                .expect("sync")
+        );
 
         // A path the user aimed at their own file is never rewritten.
         std::fs::write(&path, "model_catalog_json = 'D:\\mine\\own.json'\n").expect("write");
-        assert!(!sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
-            .expect("sync"));
+        assert!(
+            !sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
+                .expect("sync")
+        );
         assert_eq!(
             read_model_catalog_json_from(&path).as_deref(),
             Some(r"D:\mine\own.json")
@@ -338,7 +342,9 @@ mod tests {
             .expect("read")
             .contains("[codeseex]"));
         // A path on the official host normalises to the same default.
-        assert!(!upsert_upstream_base_url(&path, "https://api.deepseek.com/v1").expect("official v1"));
+        assert!(
+            !upsert_upstream_base_url(&path, "https://api.deepseek.com/v1").expect("official v1")
+        );
         assert!(!std::fs::read_to_string(&path)
             .expect("read")
             .contains("[codeseex]"));
@@ -359,7 +365,9 @@ mod tests {
 
         assert!(upsert_upstream_base_url(&path, "https://relay.example.com/v1").expect("upsert"));
         let text = std::fs::read_to_string(&path).expect("read");
-        let provider = text.find("[model_providers.custom]").expect("provider table");
+        let provider = text
+            .find("[model_providers.custom]")
+            .expect("provider table");
         let codeseex = text.find("[codeseex]").expect("codeseex table");
         let projects = text.find("[projects.'c:\\work']").expect("projects table");
         assert!(provider < codeseex && codeseex < projects, "{text}");

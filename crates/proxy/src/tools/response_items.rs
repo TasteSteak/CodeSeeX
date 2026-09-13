@@ -56,9 +56,8 @@ pub(crate) fn normalize_patch_newlines(value: &str) -> String {
 }
 
 fn normalize_patch_newlines_with_diagnostic(value: &str) -> ApplyPatchInputNormalization {
-    let (normalized, unified_hunk_headers_repaired) = normalize_unified_hunk_headers_with_count(
-        &value.replace("\r\n", "\n").replace('\r', "\n"),
-    );
+    let (normalized, unified_hunk_headers_repaired) =
+        normalize_unified_hunk_headers_with_count(&value.replace("\r\n", "\n").replace('\r', "\n"));
     let (input, blank_context_lines_repaired) =
         repair_update_hunk_blank_context_lines_with_count(&normalized);
     ApplyPatchInputNormalization {

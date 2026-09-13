@@ -259,10 +259,7 @@ impl ManagerRuntime {
     pub fn set_upstream_credential(&self, body: Option<&Value>) -> ManagerJsonResponse {
         let config = self.active_config();
         let body = body.cloned().unwrap_or_else(|| json!({}));
-        let clear = body
-            .get("clear")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let clear = body.get("clear").and_then(Value::as_bool).unwrap_or(false);
         let api_key = body
             .get("api_key")
             .and_then(Value::as_str)
@@ -282,10 +279,7 @@ impl ManagerRuntime {
             }));
         }
         let Some(api_key) = api_key else {
-            return status(
-                400,
-                json!({ "ok": false, "error": "missing_api_key" }),
-            );
+            return status(400, json!({ "ok": false, "error": "missing_api_key" }));
         };
         if let Err(error) = crate::secrets::write_upstream_api_key(&config, api_key) {
             return status(
@@ -716,10 +710,7 @@ impl ManagerRuntime {
                     }
                 }
             }
-            object.insert(
-                "CATALOG".to_owned(),
-                self.catalog.document_payload(&config),
-            );
+            object.insert("CATALOG".to_owned(), self.catalog.document_payload(&config));
             object.insert(
                 "UPSTREAM_API_KEY_CONFIGURED".to_owned(),
                 Value::Bool(crate::secrets::upstream_api_key_configured(&config)),
@@ -732,10 +723,7 @@ impl ManagerRuntime {
                 "CATALOG_SOURCE".to_owned(),
                 Value::String(config.catalog_source_label().to_owned()),
             );
-            object.insert(
-                "CATALOG_STATUS".to_owned(),
-                self.catalog.status(&config),
-            );
+            object.insert("CATALOG_STATUS".to_owned(), self.catalog.status(&config));
             object.insert(
                 "VISION_ANALYZE_API_KEY_CONFIGURED".to_owned(),
                 Value::Bool(
@@ -1494,8 +1482,8 @@ fn catalog_file_state(config: &AppConfig) -> CatalogFileState {
     let expected = serde_json::to_string_pretty(&build_codeseex_catalog_from_document(
         &config.catalog_document(),
     ))
-        .map(|text| text + "\n")
-        .unwrap_or_default();
+    .map(|text| text + "\n")
+    .unwrap_or_default();
 
     CatalogFileState {
         exists: true,

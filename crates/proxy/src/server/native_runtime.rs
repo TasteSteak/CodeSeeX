@@ -642,16 +642,12 @@ async fn native_hosted_tool_loop(
                                 })),
                             )
                             .await;
-                        let completed = matches!(
-                            inspection.terminal,
-                            Some(NativeResponseTerminal::Completed)
-                        );
+                        let completed =
+                            matches!(inspection.terminal, Some(NativeResponseTerminal::Completed));
                         (bytes, Vec::new(), completed, inspection.final_usage)
                     } else {
-                        let completed = matches!(
-                            inspection.terminal,
-                            Some(NativeResponseTerminal::Completed)
-                        );
+                        let completed =
+                            matches!(inspection.terminal, Some(NativeResponseTerminal::Completed));
                         (
                             bytes,
                             inspection.output_items,
@@ -732,7 +728,12 @@ async fn native_hosted_tool_loop(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            (bytes.to_vec(), output_items, completed, native.get("usage").cloned())
+            (
+                bytes.to_vec(),
+                output_items,
+                completed,
+                native.get("usage").cloned(),
+            )
         };
 
         // The body is complete and well-formed, so the retained round this
@@ -1515,7 +1516,10 @@ async fn native_non_streaming_response(
     } else {
         RequestStatus::Failed
     };
-    let provider_tool_calls = tool_group.as_ref().map(|group| group.calls.len()).unwrap_or(0);
+    let provider_tool_calls = tool_group
+        .as_ref()
+        .map(|group| group.calls.len())
+        .unwrap_or(0);
     let mut detail = json!({
         "transport": "native_responses",
         "web_search_backend": web_search_backend_label(web_search_backend),
@@ -1902,8 +1906,12 @@ async fn retain_native_pending_tool_group(
         .iter()
         .map(|call| call.call_id.clone())
         .collect::<Vec<_>>();
-    let pending =
-        PendingNativeToolGroup::new(response_id, original_request, injected_items, client_call_ids);
+    let pending = PendingNativeToolGroup::new(
+        response_id,
+        original_request,
+        injected_items,
+        client_call_ids,
+    );
     let pending_diagnostic = pending.diagnostic();
     state.native_pending_tool_groups.register(pending);
     let _ = state
@@ -2557,7 +2565,11 @@ mod tests {
             2,
             "the sub-agent turn must reach upstream instead of failing closed"
         );
-        let summary = state.store.runtime_summary(10).await.expect("runtime summary");
+        let summary = state
+            .store
+            .runtime_summary(10)
+            .await
+            .expect("runtime summary");
         assert!(
             !summary.billable_history.is_empty(),
             "the handoff rounds are billable and must be recorded"
@@ -2681,7 +2693,11 @@ mod tests {
 
         // The turn must read as one usage entry: the round trip that handed the
         // tool call back, and the round trip that finished it.
-        let summary = state.store.runtime_summary(10).await.expect("runtime summary");
+        let summary = state
+            .store
+            .runtime_summary(10)
+            .await
+            .expect("runtime summary");
         assert_eq!(summary.turn_history.len(), 1, "one user turn");
         assert_eq!(summary.turn_history[0].lifecycle, "final_turn");
         let session = summary
@@ -2815,8 +2831,7 @@ mod tests {
             "the hosted loop must continue upstream instead of handing the request to Chat compatibility"
         );
         assert_eq!(
-            requests[1]["tools"][0]["name"],
-            "web_search",
+            requests[1]["tools"][0]["name"], "web_search",
             "the second native request must keep the native tool declaration"
         );
         let continuation = requests[1]["input"]
@@ -2944,8 +2959,16 @@ mod tests {
             0,
             "CodeSeeX executes no hosted round here, so it retains nothing"
         );
-        let summary = state.store.runtime_summary(10).await.expect("runtime summary");
-        assert_eq!(summary.turn_history.len(), 0, "this round is not a finished turn");
+        let summary = state
+            .store
+            .runtime_summary(10)
+            .await
+            .expect("runtime summary");
+        assert_eq!(
+            summary.turn_history.len(),
+            0,
+            "this round is not a finished turn"
+        );
         let turn = summary
             .billable_history
             .first()
@@ -3511,7 +3534,10 @@ mod tests {
             upstream["input"][0]["content"][0]["type"],
             json!("reasoning_text")
         );
-        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("step one"));
+        assert_eq!(
+            upstream["input"][0]["content"][0]["text"],
+            json!("step one")
+        );
         assert_eq!(
             upstream["input"][0]["summary"],
             json!([]),
@@ -3565,8 +3591,14 @@ mod tests {
 
         let upstream = native_upstream_payload(&payload);
 
-        assert_eq!(upstream["input"][0]["summary"][0]["text"], json!("A short recap."));
-        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("Detailed reasoning."));
+        assert_eq!(
+            upstream["input"][0]["summary"][0]["text"],
+            json!("A short recap.")
+        );
+        assert_eq!(
+            upstream["input"][0]["content"][0]["text"],
+            json!("Detailed reasoning.")
+        );
     }
 
     #[test]
@@ -3590,8 +3622,10 @@ mod tests {
             upstream["input"][0]["content"][0]["type"],
             json!("reasoning_text")
         );
-        assert_eq!(upstream["input"][0]["content"][0]["text"], json!("old step"));
+        assert_eq!(
+            upstream["input"][0]["content"][0]["text"],
+            json!("old step")
+        );
         assert_eq!(upstream["input"][0]["summary"], json!([]));
     }
-
 }

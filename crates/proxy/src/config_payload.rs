@@ -341,8 +341,9 @@ fn apply_catalog_models_payload(
             .get("effective_context_window_percent")
             .and_then(Value::as_u64)
         {
-            entry.effective_context_window_percent =
-                u8::try_from(value).ok().filter(|value| (1..=100).contains(value));
+            entry.effective_context_window_percent = u8::try_from(value)
+                .ok()
+                .filter(|value| (1..=100).contains(value));
         }
         if let Some(value) = model.get("aliases") {
             if value.is_null() {
@@ -728,7 +729,9 @@ fn value_f64(payload: &Value, key: &str) -> Option<f64> {
 }
 
 fn value_model_override(payload: &Value, key: &str) -> Option<UpstreamModelOverride> {
-    Some(UpstreamModelOverride::from_label(&value_string(payload, key)?))
+    Some(UpstreamModelOverride::from_label(&value_string(
+        payload, key,
+    )?))
 }
 
 fn value_temperature(payload: &Value, key: &str) -> Option<TemperaturePreset> {
@@ -1026,10 +1029,7 @@ mod tests {
             .vision_analyze
             .as_ref()
             .expect("vision analyze config");
-        assert_eq!(
-            vision.deepseek_model.as_deref(),
-            Some("deepseek-v4-flash")
-        );
+        assert_eq!(vision.deepseek_model.as_deref(), Some("deepseek-v4-flash"));
         let settings = tool_settings_from_user_config(&config);
         assert_eq!(
             settings

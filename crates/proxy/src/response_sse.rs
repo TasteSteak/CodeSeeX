@@ -13,10 +13,7 @@ const REASONING_PREFIX: &str = "codeseex-reasoning-v1:";
 /// The provider's reasoning text is kept only in `encrypted_content` so it can
 /// be replayed to DeepSeek on the next turn. CodeSeeX does not present it to
 /// Codex and never makes it visible: what the client shows is Codex's decision.
-pub(crate) fn reasoning_response_item(
-    config: &AppConfig,
-    reasoning: &str,
-) -> Value {
+pub(crate) fn reasoning_response_item(config: &AppConfig, reasoning: &str) -> Value {
     reasoning_response_item_with_id(
         config,
         &format!("rs_{}", Uuid::new_v4().simple()),

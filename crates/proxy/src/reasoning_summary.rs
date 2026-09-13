@@ -332,7 +332,10 @@ mod tests {
     fn projector_streams_at_boundaries_and_holds_the_tail() {
         let mut projector = SummaryProjector::new(mode("smart"));
         assert_eq!(projector.push("Thinking about"), None);
-        assert_eq!(projector.push(" the plan.").as_deref(), Some("Thinking about the plan."));
+        assert_eq!(
+            projector.push(" the plan.").as_deref(),
+            Some("Thinking about the plan.")
+        );
         assert_eq!(projector.push("\n\nmore narration"), None);
         assert_eq!(projector.finish(), None);
         assert_eq!(projector.summary(), "Thinking about the plan.");

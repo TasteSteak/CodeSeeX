@@ -1736,10 +1736,7 @@ fn renderer_probe_from_injected(value: &Value) -> Option<Value> {
 
 fn injection_message_from_probe(probe: Option<&Value>) -> Option<String> {
     let probe = probe?;
-    for pointer in [
-        "/dynamicConfigPatch/error",
-        "/fetchPatch/error",
-    ] {
+    for pointer in ["/dynamicConfigPatch/error", "/fetchPatch/error"] {
         if let Some(message) = probe.pointer(pointer).and_then(Value::as_str) {
             if !message.trim().is_empty() {
                 return Some(message.trim().to_owned());
