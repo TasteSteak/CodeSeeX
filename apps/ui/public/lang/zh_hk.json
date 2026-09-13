@@ -106,6 +106,8 @@
   "logVerbosityHint": "使用者僅顯示必要訊息，偵錯會附加每輪診斷資訊",
   "logVerbosity_user": "使用者",
   "logVerbosity_debug": "偵錯",
+  "toastOverflowTitle": "更多提示已合併",
+  "toastOverflowMessage": "佇列已滿，最新一則為 {message}",
   "logRetention3d": "3 日",
   "logRetention7d": "7 日",
   "managerConfigSaved": "配置已儲存。",

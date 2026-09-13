@@ -106,6 +106,8 @@
   "logVerbosityHint": "사용자는 필요한 메시지만, 디버그는 라운드별 진단도 표시합니다",
   "logVerbosity_user": "사용자",
   "logVerbosity_debug": "디버그",
+  "toastOverflowTitle": "추가 알림 병합됨",
+  "toastOverflowMessage": "대기열이 가득 참, 최신 항목 {message}",
   "logRetention3d": "3일",
   "logRetention7d": "7일",
   "managerConfigSaved": "설정이 저장되었습니다.",

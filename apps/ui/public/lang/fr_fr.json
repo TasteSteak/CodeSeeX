@@ -106,6 +106,8 @@
   "logVerbosityHint": "Utilisateur n'affiche que les messages nécessaires, Debug ajoute les diagnostics par tour",
   "logVerbosity_user": "Utilisateur",
   "logVerbosity_debug": "Debug",
+  "toastOverflowTitle": "Autres notifications fusionnées",
+  "toastOverflowMessage": "File pleine, dernier message {message}",
   "logRetention3d": "3 jours",
   "logRetention7d": "7 jours",
   "managerConfigSaved": "Configuration enregistrée.",

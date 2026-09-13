@@ -232,18 +232,14 @@
 
     .toast {
       --tone: var(--info);
-      --toast-tint: var(--toast-info-tint);
       position: relative;
-      overflow: hidden;
       display: flex;
       align-items: flex-start;
       gap: 10px;
-      padding: 10px 30px 12px 12px;
+      padding: 10px 12px;
       border: 1px solid var(--border-color);
-      border-left: 3px solid var(--tone);
       border-radius: var(--radius-sm);
       background: var(--bg-panel);
-      background: linear-gradient(var(--toast-tint), var(--toast-tint)), var(--bg-panel);
       box-shadow: var(--shadow-md);
       color: var(--text-main);
       cursor: pointer;
@@ -253,10 +249,12 @@
       transition: var(--theme-transition), transform 0.2s var(--theme-easing), opacity 0.2s var(--theme-easing);
     }
 
-    .toast:focus-visible { border-color: var(--tone); box-shadow: var(--shadow-md), 0 0 0 3px var(--toast-tint); }
-    .toast[data-tone="success"] { --tone: var(--success); --toast-tint: var(--toast-success-tint); }
-    .toast[data-tone="warn"]    { --tone: var(--warn);    --toast-tint: var(--toast-warn-tint); }
-    .toast[data-tone="error"]   { --tone: var(--danger);  --toast-tint: var(--toast-error-tint); }
+    .toast:hover { border-color: var(--text-muted); }
+    .toast:focus-visible { border-color: var(--text-muted); box-shadow: var(--shadow-md), 0 0 0 3px var(--hover-bg); }
+    .toast[data-tone="info"]    { --tone: var(--info); }
+    .toast[data-tone="success"] { --tone: var(--success); }
+    .toast[data-tone="warn"]    { --tone: var(--warn); }
+    .toast[data-tone="error"]   { --tone: var(--danger); }
 
     .toast.is-out { animation: toast-out 0.2s var(--theme-easing) forwards; pointer-events: none; }
     .toast.is-bump { animation: toast-bump 0.3s var(--theme-easing); }
@@ -274,6 +272,7 @@
       font-size: 11px;
       font-weight: 800;
       line-height: 1;
+      transition: var(--theme-transition);
     }
 
     .toast-body { min-width: 0; flex: 1; display: grid; gap: 3px; }
@@ -313,30 +312,6 @@
     }
     .toast-message[hidden] { display: none; }
 
-    .toast-close {
-      position: absolute;
-      top: 7px;
-      right: 9px;
-      color: var(--text-muted);
-      font-size: 14px;
-      line-height: 1;
-      transition: var(--theme-transition);
-    }
-    .toast:hover .toast-close { color: var(--text-secondary); }
-
-    .toast-progress {
-      position: absolute;
-      left: 0;
-      bottom: 0;
-      width: 100%;
-      height: 2px;
-      transform-origin: left center;
-      background: var(--tone);
-      opacity: 0.45;
-      animation: toast-countdown var(--toast-duration, 4200ms) linear forwards;
-    }
-    .toast.is-paused .toast-progress { animation-play-state: paused; }
-
     @keyframes toast-in {
       from { opacity: 0; transform: translateY(-10px) scale(0.99); }
       to   { opacity: 1; transform: translateY(0) scale(1); }
@@ -347,17 +322,12 @@
     }
     @keyframes toast-bump {
       0%   { transform: scale(1); }
-      45%  { transform: scale(1.012); box-shadow: var(--shadow-md), 0 0 0 3px var(--toast-tint); }
+      45%  { transform: scale(1.012); }
       100% { transform: scale(1); }
-    }
-    @keyframes toast-countdown {
-      from { transform: scaleX(1); }
-      to   { transform: scaleX(0); }
     }
 
     @media (prefers-reduced-motion: reduce) {
       .toast, .toast.is-out, .toast.is-bump { animation-duration: 0.01ms; }
-      .toast-progress { animation: none; opacity: 0; }
     }
 
     @media (max-width: 620px) {
@@ -617,15 +587,7 @@
         message.hidden = !record.message;
         body.append(head, message);
 
-        var close = document.createElement("span");
-        close.className = "toast-close";
-        close.setAttribute("aria-hidden", "true");
-        close.textContent = "\u00d7";
-
-        var bar = document.createElement("span");
-        bar.className = "toast-progress";
-
-        node.append(icon, body, close, bar);
+        node.append(icon, body);
         node.setAttribute("aria-label", (record.title + " " + record.message).trim());
 
         node.addEventListener("click", function () { dismiss(record); });
@@ -678,16 +640,7 @@
         record.startedAt = performance.now();
         window.clearTimeout(record.timer);
         record.timer = window.setTimeout(function () { dismiss(record); }, record.remaining);
-        if (!node) return;
-        node.classList.remove("is-paused");
-        node.style.setProperty("--toast-duration", record.remaining + "ms");
-        var bar = node.querySelector(".toast-progress");
-        if (bar) {
-          // Restart the CSS countdown from full width.
-          bar.style.animation = "none";
-          void bar.offsetWidth;
-          bar.style.animation = "";
-        }
+        if (node) node.classList.remove("is-paused");
       }
 
       function pause(record) {

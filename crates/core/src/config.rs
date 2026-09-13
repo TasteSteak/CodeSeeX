@@ -51,6 +51,13 @@ pub struct AppConfig {
     /// Codex config.
     #[serde(skip)]
     pub codex_config_path: Option<PathBuf>,
+    /// Whether [`AppConfig::apply_codex_config`] may resolve Codex's
+    /// `config.toml` on demand. Production entries (`load`, `load_base`) set
+    /// this, so a caller that skipped `load()` still picks up
+    /// `[codeseex] upstream_base_url` instead of silently falling back to the
+    /// official endpoint. Tests keep the default `false`.
+    #[serde(skip)]
+    pub codex_config_resolve: bool,
 }
 
 /// Which catalog layer is actually in use.
@@ -443,6 +450,7 @@ impl Default for AppConfig {
             catalog_cache: None,
             experimental: ExperimentalConfig::default(),
             codex_config_path: None,
+            codex_config_resolve: false,
         }
     }
 }
@@ -469,10 +477,33 @@ impl Default for UpstreamConfig {
     }
 }
 
+/// `[upstream] base_url` from CodeSeeX's own `config.toml`, read only for the
+/// one-time migration above. The field is no longer part of `UserConfig`.
+fn legacy_user_upstream_base_url(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let document: toml::Value = toml::from_str(text).ok()?;
+    document
+        .get("upstream")?
+        .get("base_url")?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 impl AppConfig {
-    pub fn load_base() -> Self {
+    /// Base configuration from the environment only. Private on purpose: it has
+    /// never read `config.toml`, so serving requests with it silently drops the
+    /// Codex-side upstream override. Use [`AppConfig::load`].
+    fn load_base() -> Self {
         load_dotenv_once();
-        Self::default()
+        let mut config = Self::default();
+        // `load_base` is a production entry point (the desktop embedded proxy,
+        // the standalone proxy): let `apply_codex_config` resolve Codex's
+        // config.toml even when the caller never went through `load()`.
+        config.codex_config_resolve = true;
+        config
     }
 
     pub fn load() -> Self {
@@ -484,6 +515,7 @@ impl AppConfig {
         }
         config.codex_config_path = crate::codex_auth::resolve_codex_config_path();
         config.apply_codex_config();
+        config.migrate_legacy_upstream_base_url();
         config
     }
 
@@ -496,11 +528,39 @@ impl AppConfig {
         if env::var("DEEPSEEK_BASE_URL").is_ok() {
             return;
         }
+        // Resolve on demand so a caller that skipped `load()` still reads the
+        // override rather than falling back to the official endpoint.
+        if self.codex_config_path.is_none() && self.codex_config_resolve {
+            self.codex_config_path = crate::codex_auth::resolve_codex_config_path();
+        }
         let Some(path) = self.codex_config_path.as_deref() else {
             return;
         };
         let base_url = crate::codex_config::read_upstream_base_url_from(path).unwrap_or_default();
         self.upstream.base_url = normalize_base_url(&base_url);
+    }
+
+    /// One-time migration for installs that still carry the pre-2ae1ebc
+    /// `[upstream] base_url` in CodeSeeX's own config. That field is gone, so
+    /// without this the address would silently fall back to the official
+    /// endpoint; instead move it into Codex's `config.toml` once. A no-op once
+    /// the Codex-side key exists.
+    pub fn migrate_legacy_upstream_base_url(&mut self) {
+        if env::var("DEEPSEEK_BASE_URL").is_ok() {
+            return;
+        }
+        let Some(path) = self.codex_config_path.clone() else {
+            return;
+        };
+        if crate::codex_config::read_upstream_base_url_from(&path).is_some() {
+            return;
+        }
+        let Some(legacy) = legacy_user_upstream_base_url(&self.config_path()) else {
+            return;
+        };
+        if crate::codex_config::upsert_upstream_base_url(&path, &legacy).is_ok() {
+            self.upstream.base_url = normalize_base_url(&legacy);
+        }
     }
 
     /// Reads the cached remote catalog document (layer 2). Never touches the
@@ -1279,6 +1339,80 @@ mod tests {
         });
 
         assert_eq!(config.upstream.transport, UpstreamTransport::NativeResponses);
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("codeseex-{label}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// Production entries arm on-demand resolution of Codex's config.toml;
+    /// `Default` deliberately does not, so tests never read a real config.
+    #[test]
+    fn codex_upstream_resolution_is_armed_for_production_entries_only() {
+        assert!(!AppConfig::default().codex_config_resolve);
+        assert!(AppConfig::load_base().codex_config_resolve);
+    }
+
+    /// The embedded-proxy bug: a caller that never went through `load()` must
+    /// still read `[codeseex] upstream_base_url` instead of silently falling back
+    /// to the official endpoint.
+    #[test]
+    fn apply_codex_config_resolves_the_codex_config_on_demand() {
+        let dir = unique_temp_dir("on-demand-upstream");
+        let codex_config = dir.join("config.toml");
+        std::fs::write(
+            &codex_config,
+            "[codeseex]\nupstream_base_url = \"https://relay.example.com/v1\"\n",
+        )
+        .expect("write codex config");
+
+        let previous = env::var_os("CODESEEX_CODEX_CONFIG");
+        env::set_var("CODESEEX_CODEX_CONFIG", &codex_config);
+        let mut config = AppConfig::load_base();
+        config.apply_codex_config();
+        match previous {
+            Some(value) => env::set_var("CODESEEX_CODEX_CONFIG", value),
+            None => env::remove_var("CODESEEX_CODEX_CONFIG"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(config.upstream.base_url, "https://relay.example.com/v1");
+    }
+
+    /// Pre-2ae1ebc installs kept the address in CodeSeeX's own config; the
+    /// one-time migration moves it into Codex's config instead of letting it
+    /// silently fall back to the official endpoint.
+    #[test]
+    fn legacy_upstream_base_url_migrates_into_codex_config() {
+        let dir = unique_temp_dir("legacy-upstream");
+        let codex_config = dir.join("codex-config.toml");
+        std::fs::write(&codex_config, "model = \"deepseek-flash\"\n").expect("write codex config");
+        std::fs::write(
+            dir.join("config.toml"),
+            "[upstream]\nbase_url = \"https://relay.example.com/v1\"\n",
+        )
+        .expect("write legacy codeseex config");
+
+        let mut config = AppConfig::default();
+        config.data_dir = dir.clone();
+        config.codex_config_path = Some(codex_config.clone());
+        config.migrate_legacy_upstream_base_url();
+
+        assert_eq!(config.upstream.base_url, "https://relay.example.com/v1");
+        let migrated = std::fs::read_to_string(&codex_config).expect("read migrated config");
+        assert!(migrated.contains("model = \"deepseek-flash\""), "{migrated}");
+        assert!(
+            migrated.contains("upstream_base_url = \"https://relay.example.com/v1\""),
+            "{migrated}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

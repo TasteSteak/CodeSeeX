@@ -167,6 +167,8 @@
   "logVerbosityHint": "User keeps the log to necessary messages, debug also shows per-round diagnostics",
   "logVerbosity_user": "User",
   "logVerbosity_debug": "Debug",
+  "toastOverflowTitle": "More notices merged",
+  "toastOverflowMessage": "Queue full, newest is {message}",
   "logRetention3d": "3 days",
   "logRetention7d": "7 days",
   "managerConfigSaved": "Configuration saved.",

@@ -568,7 +568,7 @@ pub fn codex_toml_snippet_for_document(
     base_url: &str,
     upstream_base_url: &str,
 ) -> String {
-    [
+    let mut lines = vec![
         "model_provider = \"custom\"".to_owned(),
         format!("model = {}", toml_string(document.default_slug())),
         "disable_response_storage = true".to_owned(),
@@ -583,11 +583,20 @@ pub fn codex_toml_snippet_for_document(
         "wire_api = \"responses\"".to_owned(),
         "requires_openai_auth = true".to_owned(),
         format!("base_url = {}", toml_string(base_url)),
-        "".to_owned(),
-        "[codeseex]".to_owned(),
-        format!("upstream_base_url = {}", toml_string(upstream_base_url)),
-    ]
-    .join("\n")
+    ];
+    // Only pin the upstream when the user actually set one: emitting the
+    // resolved default here would silently claim the official endpoint as the
+    // user's intent the next time the snippet is pasted in.
+    let upstream_base_url = upstream_base_url.trim();
+    if !upstream_base_url.is_empty() {
+        lines.push("".to_owned());
+        lines.push("[codeseex]".to_owned());
+        lines.push(format!(
+            "upstream_base_url = {}",
+            toml_string(upstream_base_url)
+        ));
+    }
+    lines.join("\n")
 }
 
 /// The on-disk catalog only has to be structurally usable: any model set that

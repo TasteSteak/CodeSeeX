@@ -167,6 +167,8 @@
   "logVerbosityHint": "用户仅显示必要消息，调试会附加每轮诊断信息",
   "logVerbosity_user": "用户",
   "logVerbosity_debug": "调试",
+  "toastOverflowTitle": "更多提示已合并",
+  "toastOverflowMessage": "队列已满，最新一条为 {message}",
   "logRetention3d": "3 天",
   "logRetention7d": "7 天",
   "managerConfigSaved": "配置已保存。",

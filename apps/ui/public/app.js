@@ -91,7 +91,6 @@ const els = {
   catalogNotice: byId("catalogNotice"),
   configTomlCode: byId("configTomlCode"),
   configSaveStatus: byId("configSaveStatus"),
-  configTomlCopyStatus: byId("configTomlCopyStatus"),
   configTomlStatus: byId("configTomlStatus"),
   copyTomlButton: byId("copyTomlButton"),
   launchCodexButton: byId("launchCodexButton"),
@@ -184,6 +183,7 @@ let currentTools = [];
 let currentToolsSignature = "";
 let currentConfigSignature = "";
 let currentAdapterSignature = "";
+let lastCatalogNoticeError = "";
 let currentToolValuesSignature = "";
 let refreshInFlight = false;
 let refreshQueuedOptions = null;
@@ -261,7 +261,6 @@ let updateProgressState = {
 let updateNoticeSeenVersion = "";
 let latestConfigVersion = "";
 let externalConfigSyncTimer = null;
-let configTomlStatusTimer = null;
 let ccsKeyResolve = null;
 let uiLanguage = FALLBACK_LANGUAGE;
 let contextMenuEl = null;
@@ -557,7 +556,15 @@ function isVisibleElement(element) {
 async function copySelectedText() {
   const text = selectedText();
   if (!text) return;
-  await navigator.clipboard.writeText(text).catch(() => document.execCommand("copy"));
+  const copied = await navigator.clipboard
+    .writeText(text)
+    .then(() => true)
+    .catch(() => document.execCommand("copy"));
+  showToast({
+    key: "copy-selection",
+    tone: copied ? "success" : "error",
+    title: t(copied ? "copied" : "copyFailed"),
+  });
 }
 
 function selectedText() {
@@ -609,6 +616,12 @@ async function refreshCatalogDocument() {
     flashCatalogLabel(els.catalogRefreshLabel, "catalogFetchModels", added > 0 ? `${t("catalogFetchAdded")} +${added}` : t("catalogFetchUpToDate"));
   } catch (error) {
     flashCatalogLabel(els.catalogRefreshLabel, "catalogFetchModels", t("catalogFetchFailed"));
+    showToast({
+      key: "catalog-refresh",
+      tone: "error",
+      title: t("catalogFetchFailed"),
+      message: error && error.message ? String(error.message) : "",
+    });
   } finally {
     button.disabled = false;
   }
@@ -777,6 +790,12 @@ async function refresh(options = {}) {
       message: error.message || String(error),
       detail: clientErrorDetail("/api/status", error),
     }], { force: true });
+    showToast({
+      key: "client-read",
+      tone: "error",
+      title: t("clientError"),
+      message: error.message || String(error),
+    });
   } finally {
     refreshInFlight = false;
     noteSlow("refresh", performance.now() - started);
@@ -851,6 +870,12 @@ async function refreshUsage(options = {}) {
       message: error.message || String(error),
       detail: clientErrorDetail("/api/usage", error),
     }], { force: true });
+    showToast({
+      key: "client-read",
+      tone: "error",
+      title: t("clientError"),
+      message: error.message || String(error),
+    });
   } finally {
     usageRefreshInFlight = false;
     noteSlow("refreshUsage", performance.now() - started);
@@ -908,6 +933,12 @@ async function refreshLatestLogs(options = {}) {
       message: error.message || String(error),
       detail: clientErrorDetail("/api/events", error),
     }], { force: true, nextCursor: null });
+    showToast({
+      key: "client-read",
+      tone: "error",
+      title: t("clientError"),
+      message: error.message || String(error),
+    });
   } finally {
     if (sequence === logRefreshSequence) latestLogsRefreshInFlight = false;
   }
@@ -1313,7 +1344,11 @@ async function loadAppInfo() {
     renderAppInfo(appInfo);
   } catch (error) {
     appInfo = null;
-    setAboutStatus((error.message || String(error)), true);
+    showToast({
+      key: "app-info",
+      tone: "error",
+      title: error.message || String(error),
+    });
   }
 }
 
@@ -1513,30 +1548,30 @@ function renderCodexAdapter(adapter) {
 async function copyConfigToml() {
   const text = configTomlCopyText(els.configTomlCode ? els.configTomlCode.textContent : "");
   if (!text || text === "-") {
-    setConfigTomlActionStatus(t("codexAdapterMissing"), { warning: true, timeout: 2200 });
+    showToast({ key: "config-toml", tone: "warn", title: t("codexAdapterMissing") });
     return;
   }
   try {
     await navigator.clipboard.writeText(text);
-    setConfigTomlActionStatus(t("copied"));
+    showToast({ key: "config-toml", tone: "success", title: t("copied") });
   } catch {
-    setConfigTomlActionStatus(t("copyFailed"), { warning: true, timeout: 2200 });
+    showToast({ key: "config-toml", tone: "error", title: t("copyFailed") });
   }
 }
 
 async function importConfigToCcs() {
   const toml = configTomlCopyText(els.configTomlCode ? els.configTomlCode.textContent : "");
   if (!toml || toml === "-") {
-    setConfigTomlActionStatus(t("codexAdapterMissing"), { warning: true, timeout: 2200 });
+    showToast({ key: "ccs-import", tone: "warn", title: t("codexAdapterMissing") });
     return;
   }
   const apiKey = await requestCcsApiKey();
   if (!apiKey) return;
   try {
     await openExternalUrl(ccsImportUrl(toml, { apiKey }));
-    setConfigTomlActionStatus(t("ccsImportStartedCatalogWarning"), { warning: true, timeout: 5200 });
+    showToast({ key: "ccs-import", tone: "warn", title: t("ccsImportStartedCatalogWarning") });
   } catch {
-    setConfigTomlActionStatus(t("ccsImportFailed"), { warning: true, timeout: 2600 });
+    showToast({ key: "ccs-import", tone: "error", title: t("ccsImportFailed") });
   }
 }
 
@@ -1558,13 +1593,18 @@ async function launchCodexApp() {
       : injectionEnabled
         ? "codexLaunchStartedWithInjection"
         : "codexLaunchStarted";
-    setConfigTomlActionStatus(t(statusKey), {
-      warning: injectionEnabled && !injectionOk,
-      timeout: injectionEnabled && !injectionOk ? 5200 : 2600,
+    showToast({
+      key: "codex-launch",
+      tone: injectionEnabled && !injectionOk ? "warn" : "success",
+      title: t(statusKey),
     });
     await refresh({ forceLogs: true, force: true });
   } catch (error) {
-    setConfigTomlActionStatus(actionErrorMessage(t("codexLaunchFailed"), error), { warning: true, timeout: 9000 });
+    showToast({
+      key: "codex-launch",
+      tone: "error",
+      title: actionErrorMessage(t("codexLaunchFailed"), error),
+    });
     await refresh({ forceLogs: true, force: true }).catch(() => {});
   } finally {
     setBusy(false);
@@ -1830,12 +1870,14 @@ function renderCatalogNotice(diagnostic) {
     els.catalogNotice.textContent = t("catalogNoticeRuntimeError");
     els.catalogNotice.className = "catalog-notice is-error";
     els.catalogNotice.hidden = false;
+    notifyCatalogNoticeError("runtime");
     return;
   }
   if (!diagnostic || state === "unknown" || state === "ok") {
     els.catalogNotice.hidden = true;
     els.catalogNotice.textContent = "";
     els.catalogNotice.className = "catalog-notice";
+    lastCatalogNoticeError = "";
     return;
   }
   const key = state === "repaired"
@@ -1846,6 +1888,19 @@ function renderCatalogNotice(diagnostic) {
   els.catalogNotice.textContent = t(key);
   els.catalogNotice.className = `catalog-notice is-${state}`;
   els.catalogNotice.hidden = false;
+  if (state === "error") notifyCatalogNoticeError("error");
+}
+
+/// The notice banner is persistent, so the toast only fires when the banner
+/// newly enters an error state instead of on every re-render.
+function notifyCatalogNoticeError(state) {
+  if (lastCatalogNoticeError === state) return;
+  lastCatalogNoticeError = state;
+  showToast({
+    key: "catalog-notice",
+    tone: "error",
+    title: t(state === "runtime" ? "catalogNoticeRuntimeError" : "catalogNoticeError"),
+  });
 }
 
 function catalogRuntimeStatusClass(diagnostic) {
@@ -2068,25 +2123,6 @@ function utf8Base64(value) {
   return btoa(binary);
 }
 
-function setConfigTomlActionStatus(message, options = {}) {
-  if (!els.configTomlCopyStatus) return;
-  if (configTomlStatusTimer) {
-    window.clearTimeout(configTomlStatusTimer);
-    configTomlStatusTimer = null;
-  }
-  els.configTomlCopyStatus.textContent = message || "";
-  els.configTomlCopyStatus.classList.toggle("warning", Boolean(options.warning));
-  const timeout = Number(options.timeout === undefined ? 1800 : options.timeout);
-  if (timeout > 0) {
-    configTomlStatusTimer = window.setTimeout(() => {
-      configTomlStatusTimer = null;
-      if (!els.configTomlCopyStatus) return;
-      els.configTomlCopyStatus.textContent = "";
-      els.configTomlCopyStatus.classList.remove("warning");
-    }, timeout);
-  }
-}
-
 function renderUpdateState(options = {}) {
   const hasUpdate = Boolean(latestUpdateCheck && latestUpdateCheck.has_update);
   if (els.aboutUpdateDot) els.aboutUpdateDot.hidden = !hasUpdate || isUpdateNoticeSeen(latestUpdateCheck);
@@ -2102,6 +2138,11 @@ function renderUpdateState(options = {}) {
     setAboutStatus(updateMessage("updateCurrent", latestUpdateCheck), false);
   } else {
     setAboutStatus(updateMessage("updateCheckFailed", latestUpdateCheck), true);
+    showToast({
+      key: "update",
+      tone: "error",
+      title: updateMessage("updateCheckFailed", latestUpdateCheck),
+    });
   }
 }
 
@@ -2180,6 +2221,13 @@ function handleUpdateProgressEvent(payload = {}) {
   if (stage === "failed") {
     updateProgressState.visible = !updateProgressState.background;
     setAboutStatus(updateMessage("updateInstallFailed", { error: updateProgressState.error || t("unknownError") }), true);
+    showToast({
+      key: "update-install",
+      tone: "error",
+      title: updateMessage("updateInstallFailed", {
+        error: updateProgressState.error || t("unknownError"),
+      }),
+    });
   } else if (stage === "canceled") {
     setAboutStatus(t("updateCanceledTask"), false);
   } else if (stage === "restarting") {
@@ -3152,6 +3200,12 @@ async function fetchUsageSessionDetail(details, session) {
     if (!body.parentNode) details.appendChild(body);
     details.dataset.rendered = "true";
     pruneUsageDetailCache();
+  } catch (error) {
+    showToast({
+      key: "usage-detail",
+      tone: "error",
+      title: error && error.message ? String(error.message) : String(error),
+    });
   } finally {
     details.dataset.loadingUsageDetail = "false";
   }
@@ -4119,6 +4173,7 @@ function renderBalance(data) {
     els.balanceGranted.textContent = "-";
     els.balanceToppedUp.textContent = "-";
     setBalanceStage(message, "error");
+    showToast({ key: "balance", tone: "error", title: message });
     return;
   }
 
@@ -4371,13 +4426,20 @@ function handleAboutStatusClick(event) {
 }
 
 async function openOrExplain(url, fallback) {
-  if (!url) return setAboutStatus(fallback, true);
+  if (!url) {
+    showToast({ key: "external-link", tone: "warn", title: fallback });
+    return;
+  }
   try {
     await openExternalUrl(url);
     setAboutStatus(t("openExternal"), false);
   } catch (error) {
     window.open(url, "_blank", "noopener");
-    setAboutStatus(error && error.message ? error.message : String(error), true);
+    showToast({
+      key: "external-link",
+      tone: "error",
+      title: error && error.message ? String(error.message) : fallback,
+    });
   }
 }
 
@@ -4386,7 +4448,11 @@ async function openRechargePage() {
     await openExternalUrl(DEEPSEEK_RECHARGE_URL);
   } catch (error) {
     window.open(DEEPSEEK_RECHARGE_URL, "_blank", "noopener");
-    setBalanceStage(error && error.message ? error.message : String(error), "error");
+    showToast({
+      key: "recharge",
+      tone: "error",
+      title: error && error.message ? String(error.message) : String(error),
+    });
   }
 }
 
@@ -4591,6 +4657,14 @@ function renderConfigSaveState(state, detail = "") {
   }
   els.configSaveStatus.textContent = detail ? `${t(key)}: ${detail}` : t(key);
   els.configSaveStatus.dataset.state = state;
+  if (state === "error") {
+    showToast({
+      key: "config-save",
+      tone: "error",
+      title: t("configSaveError"),
+      message: detail,
+    });
+  }
 }
 
 function setBusy(nextBusy, title, detail) {
@@ -5400,4 +5474,253 @@ function isAtLogBottom() {
   if (!els.logStream) return false;
   const gap = els.logStream.scrollHeight - els.logStream.scrollTop - els.logStream.clientHeight;
   return gap <= LOG_BOTTOM_LOAD_THRESHOLD;
+}
+
+/* ==========================================================================
+   Toast manager
+
+   Top-center transient feedback. One row per `key`: a repeat refreshes that row
+   and bumps its counter instead of stacking a new one. Visible rows are capped
+   and the queue folds overflow into a single summary row, so a burst can never
+   grow without bound. The whole row is the dismiss target.
+   ========================================================================== */
+const TOAST_LIMITS = { maxVisible: 3, maxQueue: 12, exitMs: 200, overflowKey: "__overflow__" };
+const TOAST_DURATION = { info: 4200, success: 3400, warn: 5600, error: 6800 };
+const TOAST_ICONS = { info: "i", success: "\u2713", warn: "!", error: "\u2715" };
+const toastRuntime = { active: [], queue: [], shown: 0, merged: 0 };
+
+function toastStack() {
+  return byId("toastStack");
+}
+
+function toastFind(key) {
+  return toastRuntime.active.find((item) => item.key === key)
+    || toastRuntime.queue.find((item) => item.key === key)
+    || null;
+}
+
+function showToast(options = {}) {
+  const tone = TOAST_DURATION[options.tone] ? options.tone : "info";
+  const key = options.key || `toast-${Math.random().toString(36).slice(2)}`;
+  const existing = toastFind(key);
+  if (existing) {
+    toastMerge(existing, options, tone);
+    return existing;
+  }
+  const record = {
+    key,
+    tone,
+    title: options.title || "",
+    message: options.message || "",
+    duration: options.duration || TOAST_DURATION[tone],
+    count: 1,
+    state: "queued",
+    el: null,
+    parts: null,
+    timer: null,
+    startedAt: 0,
+    remaining: 0,
+  };
+  if (toastRuntime.queue.length >= TOAST_LIMITS.maxQueue) return toastPushOverflow(record);
+  toastRuntime.queue.push(record);
+  toastPromote();
+  return record;
+}
+
+function toastPushOverflow(record) {
+  let bucket = toastFind(TOAST_LIMITS.overflowKey);
+  const latest = String(record.title || record.message || "").trim();
+  const summary = t("toastOverflowMessage").replace("{message}", latest);
+  if (bucket) {
+    bucket.count += 1;
+    bucket.tone = record.tone;
+    bucket.message = summary;
+    toastRuntime.merged += 1;
+    if (bucket.state === "active") {
+      toastRepaint(bucket);
+      toastBump(bucket);
+      toastResetTimer(bucket);
+    } else {
+      toastMoveToFront(bucket);
+    }
+    return bucket;
+  }
+  bucket = {
+    key: TOAST_LIMITS.overflowKey,
+    tone: record.tone,
+    title: t("toastOverflowTitle"),
+    message: summary,
+    duration: TOAST_DURATION.warn,
+    count: 1,
+    state: "queued",
+    el: null,
+    parts: null,
+    timer: null,
+    startedAt: 0,
+    remaining: 0,
+  };
+  toastRuntime.queue.push(bucket);
+  toastPromote();
+  return bucket;
+}
+
+function toastMoveToFront(item) {
+  const index = toastRuntime.queue.indexOf(item);
+  if (index > 0) {
+    toastRuntime.queue.splice(index, 1);
+    toastRuntime.queue.unshift(item);
+  }
+}
+
+function toastMerge(item, options, tone) {
+  item.tone = tone;
+  if (options.title) item.title = options.title;
+  if (options.message) item.message = options.message;
+  item.duration = typeof options.duration === "number" ? options.duration : TOAST_DURATION[tone];
+  item.count += 1;
+  toastRuntime.merged += 1;
+  if (item.state === "active") {
+    toastRepaint(item);
+    toastBump(item);
+    toastResetTimer(item);
+  } else if (item.state === "queued") {
+    toastMoveToFront(item);
+  }
+}
+
+function toastPromote() {
+  const stack = toastStack();
+  if (!stack) return;
+  while (toastRuntime.active.length < TOAST_LIMITS.maxVisible && toastRuntime.queue.length > 0) {
+    toastActivate(stack, toastRuntime.queue.shift());
+  }
+}
+
+function toastActivate(stack, record) {
+  record.state = "active";
+  const node = toastBuild(record);
+  record.el = node;
+  record.parts = {
+    title: node.querySelector(".toast-title"),
+    message: node.querySelector(".toast-message"),
+    badge: node.querySelector(".toast-count"),
+    icon: node.querySelector(".toast-icon"),
+  };
+  stack.appendChild(node);
+  toastRuntime.active.push(record);
+  toastRuntime.shown += 1;
+  toastResetTimer(record);
+}
+
+function toastBuild(record) {
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.dataset.tone = record.tone;
+  node.setAttribute("role", "button");
+  node.setAttribute("tabindex", "0");
+
+  const icon = document.createElement("span");
+  icon.className = "toast-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = TOAST_ICONS[record.tone] || TOAST_ICONS.info;
+
+  const body = document.createElement("div");
+  body.className = "toast-body";
+  const head = document.createElement("div");
+  head.className = "toast-head";
+  const title = document.createElement("strong");
+  title.className = "toast-title";
+  title.textContent = record.title;
+  const badge = document.createElement("span");
+  badge.className = "toast-count";
+  badge.hidden = record.count <= 1;
+  badge.textContent = `\u00d7${record.count}`;
+  head.append(title, badge);
+  const message = document.createElement("p");
+  message.className = "toast-message";
+  message.textContent = record.message;
+  message.hidden = !record.message;
+  body.append(head, message);
+
+  node.append(icon, body);
+  node.setAttribute("aria-label", `${record.title} ${record.message}`.trim());
+  node.addEventListener("click", () => toastDismiss(record));
+  node.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toastDismiss(record);
+  });
+  node.addEventListener("mouseenter", () => toastPause(record));
+  node.addEventListener("mouseleave", () => toastResume(record));
+  node.addEventListener("focus", () => toastPause(record));
+  node.addEventListener("blur", () => toastResume(record));
+  return node;
+}
+
+function toastRepaint(record) {
+  const node = record.el;
+  if (!node || !record.parts) return;
+  node.dataset.tone = record.tone;
+  if (record.parts.icon) record.parts.icon.textContent = TOAST_ICONS[record.tone] || TOAST_ICONS.info;
+  record.parts.title.textContent = record.title;
+  record.parts.message.textContent = record.message;
+  record.parts.message.hidden = !record.message;
+  record.parts.badge.textContent = `\u00d7${record.count}`;
+  record.parts.badge.hidden = record.count <= 1;
+  node.setAttribute("aria-label", `${record.title} ${record.message}`.trim());
+}
+
+function toastBump(record) {
+  const node = record.el;
+  if (!node) return;
+  node.classList.remove("is-bump");
+  void node.offsetWidth;
+  node.classList.add("is-bump");
+  node.addEventListener("animationend", function handler() {
+    node.classList.remove("is-bump");
+    node.removeEventListener("animationend", handler);
+  });
+}
+
+function toastResetTimer(record) {
+  record.remaining = record.duration;
+  record.startedAt = performance.now();
+  window.clearTimeout(record.timer);
+  record.timer = window.setTimeout(() => toastDismiss(record), record.remaining);
+  if (record.el) record.el.classList.remove("is-paused");
+}
+
+function toastPause(record) {
+  if (record.state !== "active") return;
+  window.clearTimeout(record.timer);
+  record.timer = null;
+  record.remaining = Math.max(0, record.remaining - (performance.now() - record.startedAt));
+  if (record.el) record.el.classList.add("is-paused");
+}
+
+function toastResume(record) {
+  if (record.state !== "active" || record.timer) return;
+  if (record.el) record.el.classList.remove("is-paused");
+  record.startedAt = performance.now();
+  record.timer = window.setTimeout(() => toastDismiss(record), record.remaining);
+}
+
+function toastDismiss(record) {
+  if (!record || record.state === "dismissing" || record.state === "done") return;
+  record.state = "dismissing";
+  window.clearTimeout(record.timer);
+  const node = record.el;
+  const remove = () => {
+    if (node && node.parentNode) node.parentNode.removeChild(node);
+    const index = toastRuntime.active.indexOf(record);
+    if (index >= 0) toastRuntime.active.splice(index, 1);
+    record.state = "done";
+    toastPromote();
+  };
+  if (!node) {
+    remove();
+    return;
+  }
+  node.classList.add("is-out");
+  window.setTimeout(remove, TOAST_LIMITS.exitMs);
 }

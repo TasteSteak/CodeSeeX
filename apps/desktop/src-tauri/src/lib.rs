@@ -635,12 +635,15 @@ fn start_embedded_proxy(app: AppHandle) -> Result<(), String> {
     };
 
     tauri::async_runtime::spawn(async move {
-        let config = AppConfig::load_base();
-        let effective_config = AppConfig::load();
+        // The served config must be the fully resolved one: the upstream URL
+        // lives in Codex's config.toml and is only read by AppConfig::load(),
+        // so load_base() silently fell back to the official DeepSeek endpoint
+        // even when [codeseex] upstream_base_url was set.
+        let config = AppConfig::load();
         let endpoint = ProxyRuntimeEndpoint {
-            host: effective_config.host.clone(),
-            port: effective_config.port,
-            base_url: effective_config.proxy_base_url(),
+            host: config.host.clone(),
+            port: config.port,
+            base_url: config.proxy_base_url(),
         };
         set_proxy_runtime_endpoint_if_generation(&app, generation, endpoint);
         let running_app = app.clone();
@@ -1443,6 +1446,19 @@ fn string_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression guard for a fatal bug: the embedded proxy used the
+    /// environment-only base config, which cannot see Codex's `config.toml`, so
+    /// the upstream silently fell back to the official DeepSeek endpoint and
+    /// every request 401'd. The served config must be the fully resolved one.
+    #[test]
+    fn embedded_proxy_serves_the_resolved_config() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("let config = AppConfig::load();"));
+        // Built from pieces so the search string does not match this line itself.
+        let forbidden = ["let config = AppConfig::load", "_base();"].concat();
+        assert!(!source.contains(&forbidden));
+    }
 
     #[test]
     fn tray_i18n_uses_configured_language_pack() {

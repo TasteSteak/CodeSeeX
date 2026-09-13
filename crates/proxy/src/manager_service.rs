@@ -1201,7 +1201,11 @@ impl ManagerRuntime {
                 let toml_snippet = codex_toml_snippet(
                     &config.catalog_path(),
                     &config.proxy_base_url(),
-                    &config.upstream.base_url,
+                    &config
+                        .codex_config_path
+                        .as_deref()
+                        .and_then(codeseex_core::codex_config::read_upstream_base_url_from)
+                        .unwrap_or_default(),
                 );
                 let after = catalog_file_state(&config);
                 ok(json!({

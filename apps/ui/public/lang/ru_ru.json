@@ -106,6 +106,8 @@
   "logVerbosityHint": "Пользователь показывает только нужные сообщения, отладка добавляет диагностику по раундам",
   "logVerbosity_user": "Пользователь",
   "logVerbosity_debug": "Отладка",
+  "toastOverflowTitle": "Дополнительные уведомления объединены",
+  "toastOverflowMessage": "Очередь заполнена, последнее {message}",
   "logRetention3d": "3 дня",
   "logRetention7d": "7 дней",
   "managerConfigSaved": "Конфигурация сохранена.",

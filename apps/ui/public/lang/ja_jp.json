@@ -106,6 +106,8 @@
   "logVerbosityHint": "ユーザーは必要なメッセージのみ、デバッグは各ラウンドの診断も表示します",
   "logVerbosity_user": "ユーザー",
   "logVerbosity_debug": "デバッグ",
+  "toastOverflowTitle": "さらに通知を統合しました",
+  "toastOverflowMessage": "キューが満杯です、最新は {message}",
   "logRetention3d": "3 日",
   "logRetention7d": "7 日",
   "managerConfigSaved": "設定が保存されました。",

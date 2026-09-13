@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="/styles/components/lists.css?v=0.7.1">
   <link rel="stylesheet" href="/styles/components/menus.css?v=0.7.1">
   <link rel="stylesheet" href="/styles/components/overlays.css?v=0.7.1">
+  <link rel="stylesheet" href="/styles/components/toast.css?v=0.7.1">
   <link rel="stylesheet" href="/styles/components/toml.css?v=0.7.1">
   <link rel="stylesheet" href="/styles/features/config/billing.css?v=0.7.1">
   <link rel="stylesheet" href="/styles/features/config/tools.css?v=0.7.1">
@@ -26,6 +27,7 @@
   <link rel="stylesheet" href="/styles/pages/usage.css?v=0.7.1">
 </head>
 <body>
+  <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
   <div class="layout-container">
     <aside class="sidebar">
       <div class="brand">
@@ -163,7 +165,6 @@ LICENSE AGPL-3.0-only</div>
                 <p id="configTomlStatus">~/.codex/config.toml</p>
               </div>
               <div class="config-toml-actions">
-                <span class="copy-status" id="configTomlCopyStatus" aria-live="polite"></span>
                 <button class="btn btn-secondary btn-icon-label" type="button" id="launchCodexButton">
                   <span class="btn-icon btn-icon-codex" aria-hidden="true"></span>
                   <span data-i18n="launchCodex">Launch Codex</span>

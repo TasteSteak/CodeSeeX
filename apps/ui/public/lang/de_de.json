@@ -106,6 +106,8 @@
   "logVerbosityHint": "Benutzer zeigt nur notwendige Meldungen, Debug zeigt zusätzlich Diagnosen pro Runde",
   "logVerbosity_user": "Benutzer",
   "logVerbosity_debug": "Debug",
+  "toastOverflowTitle": "Weitere Hinweise zusammengefasst",
+  "toastOverflowMessage": "Warteschlange voll, neuester Eintrag {message}",
   "logRetention3d": "3 Tage",
   "logRetention7d": "7 Tage",
   "managerConfigSaved": "Konfiguration gespeichert.",
