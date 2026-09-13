@@ -458,7 +458,9 @@ impl Default for AppConfig {
 impl Default for UpstreamConfig {
     fn default() -> Self {
         let raw_base = env::var("DEEPSEEK_BASE_URL")
-            .unwrap_or_else(|_| "https://api.deepseek.com/".to_owned());
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://api.deepseek.com/".to_owned());
         Self {
             base_url: normalize_base_url(&raw_base),
             transport: env_upstream_transport(),
@@ -490,6 +492,19 @@ fn legacy_user_upstream_base_url(path: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/// Whether `DEEPSEEK_BASE_URL` carries a real override.
+///
+/// A blank variable - what a shell writes for `DEEPSEEK_BASE_URL=` - is not an
+/// override. Counting it as one used to skip both the Codex-side upstream and
+/// the 0.7.0 migration, quietly sending traffic to the official endpoint.
+fn env_base_url_is_configured() -> bool {
+    base_url_env_is_configured(env::var("DEEPSEEK_BASE_URL").ok().as_deref())
+}
+
+fn base_url_env_is_configured(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| !value.trim().is_empty())
 }
 
 impl AppConfig {
@@ -525,7 +540,7 @@ impl AppConfig {
     /// explicit `DEEPSEEK_BASE_URL` environment variable still wins, and an
     /// unset value keeps the built-in default.
     pub fn apply_codex_config(&mut self) {
-        if env::var("DEEPSEEK_BASE_URL").is_ok() {
+        if env_base_url_is_configured() {
             return;
         }
         // Resolve on demand so a caller that skipped `load()` still reads the
@@ -546,7 +561,7 @@ impl AppConfig {
     /// endpoint; instead move it into Codex's `config.toml` once. A no-op once
     /// the Codex-side key exists.
     pub fn migrate_legacy_upstream_base_url(&mut self) {
-        if env::var("DEEPSEEK_BASE_URL").is_ok() {
+        if env_base_url_is_configured() {
             return;
         }
         let Some(path) = self.codex_config_path.clone() else {
@@ -1357,6 +1372,18 @@ mod tests {
     fn codex_upstream_resolution_is_armed_for_production_entries_only() {
         assert!(!AppConfig::default().codex_config_resolve);
         assert!(AppConfig::load_base().codex_config_resolve);
+    }
+
+    /// A blank `DEEPSEEK_BASE_URL` is not an override: it must not disable the
+    /// Codex-side upstream or the 0.7.0 migration.
+    #[test]
+    fn blank_base_url_env_is_not_an_override() {
+        assert!(!base_url_env_is_configured(None));
+        assert!(!base_url_env_is_configured(Some("")));
+        assert!(!base_url_env_is_configured(Some("   ")));
+        assert!(base_url_env_is_configured(Some(
+            "https://relay.example.com/v1"
+        )));
     }
 
     /// The embedded-proxy bug: a caller that never went through `load()` must

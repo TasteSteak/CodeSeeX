@@ -6,7 +6,7 @@
       "released_at": "2026-09-13",
       "notes": {
         "en_us": {
-          "summary": "Moves the upstream address into Codex's own config.toml, makes the catalog the single source of model truth, and re-tunes the proxy defaults for a resident client.",
+          "summary": "Reworks a large amount of underlying behaviour: the upstream address, model list, pricing and tool ownership collapse into a single source of truth, the transport, logging and feedback are re-tuned for a resident client, the configuration, model-picking, usage-viewing and troubleshooting experience is improved, and the issues left over from earlier versions are fixed.",
           "sections": [
             {
               "title": "Highlights",
@@ -47,7 +47,7 @@
           ]
         },
         "zh_cn": {
-          "summary": "上游地址迁入 Codex 自己的 config.toml，模型目录成为唯一数据来源，代理默认行为按常驻客户端重新收敛。",
+          "summary": "优化了大量底层实现：上游地址、模型清单、定价与工具归属收敛为单一数据来源，传输方式、日志与反馈按常驻客户端重新定调，并优化了配置编辑、模型选择、用量查看与故障排查体验，修复了旧版本遗留的问题。",
           "sections": [
             {
               "title": "重点更新",

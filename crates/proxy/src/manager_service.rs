@@ -164,6 +164,9 @@ impl ManagerRuntime {
                 ok(self.codex_model_catalog())
             }
             ("POST", "/api/codex-app/inject") => self.inject_codex_app(query, body).await,
+            ("POST", "/api/codex-app/remove-injection") => {
+                self.remove_codex_app_injection(query, body).await
+            }
             ("POST", "/api/codex-app/launch") => self.launch_codex_app(query, body).await,
             ("GET", "/api/config") => ok(self.config_payload()),
             ("POST", "/api/config") => {
@@ -390,6 +393,49 @@ impl ManagerRuntime {
                         "error",
                         "codex_app_inject_failed",
                         "Codex App renderer model catalog injection failed.",
+                        Some(&body),
+                    )
+                    .await;
+                status(502, body)
+            }
+        }
+    }
+
+    /// Removes the renderer injection from a running Codex App on request, so the
+    /// "residue" the injection leaves is always under the user's control.
+    async fn remove_codex_app_injection(
+        &self,
+        query: Option<&Value>,
+        body: Option<&Value>,
+    ) -> ManagerJsonResponse {
+        let debug_port = crate::codex_app::debug_port_from_values(query, body)
+            .unwrap_or_else(crate::codex_app::default_debug_port);
+        match crate::codex_app::remove_model_catalog_injection(debug_port).await {
+            Ok(value) => {
+                let _ = self
+                    .store
+                    .record_event(
+                        "info",
+                        "codex_app_inject_removed",
+                        "Codex App renderer model catalog injection was removed.",
+                        Some(&value),
+                    )
+                    .await;
+                ok(value)
+            }
+            Err(error) => {
+                let body = json!({
+                    "ok": false,
+                    "error": "codex_app_inject_remove_failed",
+                    "debug_port": debug_port,
+                    "message": error.to_string()
+                });
+                let _ = self
+                    .store
+                    .record_event(
+                        "warn",
+                        "codex_app_inject_remove_failed",
+                        "Codex App renderer model catalog injection could not be removed.",
                         Some(&body),
                     )
                     .await;
@@ -1574,10 +1620,23 @@ fn catalog_model_overrides(user_config: &UserConfig) -> Value {
 
 pub fn ensure_catalog(config: &AppConfig) -> anyhow::Result<()> {
     let catalog = build_codeseex_catalog_from_document(&config.catalog_document());
-    if catalog_file_matches_current(&config.catalog_path(), &catalog) {
-        return Ok(());
+    if !catalog_file_matches_current(&config.catalog_path(), &catalog) {
+        write_catalog_atomic(&config.catalog_path(), &catalog)?;
     }
-    write_catalog_atomic(&config.catalog_path(), &catalog)
+    // Codex reads the catalog from the path recorded in its own config. A dev
+    // build and a packaged build keep their data directory in different places,
+    // so follow the path this process actually writes instead of leaving Codex on
+    // a stale one. `codex_config_path` is only set for a real, fully-resolved
+    // configuration, so a test with a temporary data directory can never write
+    // its throwaway path into the user's Codex file. A failure here must not stop
+    // the proxy from starting.
+    if let Some(codex_config_path) = config.codex_config_path.as_deref() {
+        let _ = codeseex_core::codex_config::sync_model_catalog_json_at(
+            std::path::Path::new(codex_config_path),
+            &config.catalog_path(),
+        );
+    }
+    Ok(())
 }
 
 fn catalog_file_matches_current(

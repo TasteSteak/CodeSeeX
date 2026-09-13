@@ -604,23 +604,23 @@ async fn renderer_inject_script_route_embeds_codex_app_model_patch() {
     );
     let body = response.text().await.unwrap();
     assert!(body.contains("deepseek-v4-pro"), "{body}");
-    assert!(body.contains("list-models-for-host"), "{body}");
-    assert!(body.contains("model-queries-"), "{body}");
-    assert!(body.contains("use-host-config:request-bridge"), "{body}");
-    assert!(body.contains("module && module.Vt"), "{body}");
-    assert!(body.contains("shortenSelectedModelButtonLabels"), "{body}");
-    assert!(body.contains("message.method"), "{body}");
-    assert!(body.contains("modelListResultLooksPatchable"), "{body}");
+    assert!(body.contains("isModelListPayload"), "{body}");
     assert!(
-        body.contains("const initialDiagnostic = await refresh(\"initial\");"),
+        body.contains("const initialDiagnostic = refresh(\"initial\");"),
         "{body}"
     );
     assert!(body.contains("return initialDiagnostic;"), "{body}");
-    assert!(body.contains("appServerPatch"), "{body}");
     assert!(body.contains("patchStatsigDynamicConfig"), "{body}");
+    assert!(body.contains("patchDynamicConfigValue"), "{body}");
     assert!(body.contains("available_models"), "{body}");
     assert!(body.contains("107580212"), "{body}");
     assert!(body.contains("dynamicConfigPatch"), "{body}");
+    assert!(body.contains("installFetchPatch"), "{body}");
+    assert!(!body.contains("model-queries-"), "{body}");
+    assert!(!body.contains("use-host-config"), "{body}");
+    assert!(!body.contains("installAppServerPatch"), "{body}");
+    assert!(!body.contains("patchAppServerClient"), "{body}");
+    assert!(!body.contains("shortenSelectedModelButtonLabels"), "{body}");
     assert!(!body.contains("Response.prototype.json"), "{body}");
     assert!(!body.contains("window.dispatchEvent ="), "{body}");
     assert!(!body.contains("MODEL_DYNAMIC_CONFIG_NAMES"), "{body}");
@@ -628,6 +628,57 @@ async fn renderer_inject_script_route_embeds_codex_app_model_patch() {
     assert!(!body.contains("patchObjectGraph"), "{body}");
     assert!(!body.contains("Object.values(module)"), "{body}");
     assert!(!body.contains("app-server-manager-signals-"), "{body}");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+/// Drives the real native relay: a unified hunk header must be repaired for the
+/// client AND reported, exactly like the Chat compatibility path reports it.
+#[tokio::test]
+async fn native_apply_patch_repair_is_recorded() {
+    let data_dir = temp_workspace("native-apply-patch-report");
+    let config = test_config(data_dir.clone());
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let store = Store::open(&config.data_dir).await.unwrap();
+
+    let mut relay = crate::native_responses::NativeResponseSseRelay::new("resp_native");
+    let frame = concat!(
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"apply_patch\",\"call_id\":\"call_1\",\"input\":\"*** Begin Patch\\n*** Update File: a.txt\\n@@ -1,2 +1,2 @@\\n-old\\n+new\\n*** End Patch\"}}\n",
+        "\n"
+    );
+    let relayed = String::from_utf8(relay.relay_bytes(frame.as_bytes()).concat()).unwrap();
+    assert!(!relayed.contains("@@ -1,2 +1,2 @@"), "{relayed}");
+    assert!(relayed.contains("@@\\n"), "{relayed}");
+
+    let repairs = relay.apply_patch_repairs();
+    assert!(!repairs.is_empty(), "the relay must tally the repair");
+    crate::server::response_helpers::record_apply_patch_input_micro_repairs(
+        &store,
+        "resp_native",
+        repairs,
+    )
+    .await;
+
+    let (events, _) = store.recent_events(20, None).await.unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event_type == "apply_patch_input_micro_repair_diagnostic")
+        .expect("native apply_patch repair diagnostic");
+    let detail = event.detail.as_ref().expect("diagnostic detail");
+    assert_eq!(
+        detail.pointer("/repair_kind").and_then(Value::as_str),
+        Some("unified_hunk_header")
+    );
+    assert_eq!(
+        detail.pointer("/transport").and_then(Value::as_str),
+        Some("native_responses")
+    );
+    assert_eq!(
+        detail
+            .pointer("/unified_hunk_headers_repaired")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
     let _ = std::fs::remove_dir_all(data_dir);
 }
 

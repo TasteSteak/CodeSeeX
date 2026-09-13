@@ -413,7 +413,14 @@ async fn buffer_native_sse(
     response: reqwest::Response,
     response_id: &str,
     config: &AppConfig,
-) -> Result<(Vec<u8>, NativeResponseStreamInspection), reqwest::Error> {
+) -> Result<
+    (
+        Vec<u8>,
+        NativeResponseStreamInspection,
+        crate::tools::response_items::ApplyPatchRepairTally,
+    ),
+    reqwest::Error,
+> {
     use futures_util::StreamExt;
 
     let mut upstream = response.bytes_stream();
@@ -430,7 +437,8 @@ async fn buffer_native_sse(
         buffered.extend_from_slice(&frame);
     }
     let inspection = relay.inspection().clone();
-    Ok((buffered, inspection))
+    let apply_patch_repairs = relay.apply_patch_repairs();
+    Ok((buffered, inspection, apply_patch_repairs))
 }
 
 struct NativeHostedToolLoopParams<'a> {
@@ -607,7 +615,13 @@ async fn native_hosted_tool_loop(
             .is_some_and(|value| value.contains("text/event-stream"));
         let (body, output_items, completed, usage) = if is_sse {
             match buffer_native_sse(response, &id, config).await {
-                Ok((bytes, inspection)) => {
+                Ok((bytes, inspection, apply_patch_repairs)) => {
+                    crate::server::response_helpers::record_apply_patch_input_micro_repairs(
+                        &state.store,
+                        &id,
+                        apply_patch_repairs,
+                    )
+                    .await;
                     if inspection.output_items_incomplete {
                         // The frames were forwarded, but CodeSeeX could not
                         // inspect the whole stream as one bounded group (for
@@ -788,11 +802,13 @@ async fn native_hosted_tool_loop(
                 .finish_request(&id, status_to_store, None, Some(&detail))
                 .await;
             return native_provider_turn_response(
+                state,
                 body,
                 is_sse,
                 &id,
                 reasoning_summary_mode(config),
-            );
+            )
+            .await;
         };
 
         // Codex always declares its local web search tool, so a request that
@@ -1070,17 +1086,13 @@ async fn native_hosted_client_tool_group(
         .store
         .finish_request(id, status_to_store, None, Some(&detail))
         .await;
-    native_provider_turn_response(
-        body,
-        is_sse,
-        id,
-        reasoning_summary_mode(config),
-    )
+    native_provider_turn_response(state, body, is_sse, id, reasoning_summary_mode(config)).await
 }
 
 /// Returns one buffered provider turn to the client. The native transport
 /// forwards the provider body and only narrows the response identity it exposes.
-fn native_provider_turn_response(
+async fn native_provider_turn_response(
+    state: &ProxyState,
     body: Vec<u8>,
     is_sse: bool,
     id: &str,
@@ -1111,7 +1123,16 @@ fn native_provider_turn_response(
         rewrite_provider_response_identity(&mut native, provider_id, id);
     }
     // Same reason as the SSE branch: the client executes this text.
-    crate::native_responses::normalize_apply_patch_event_payload(&mut native);
+    let apply_patch_repairs =
+        crate::native_responses::normalize_apply_patch_event_payload(&mut native);
+    if !apply_patch_repairs.is_empty() {
+        crate::server::response_helpers::record_apply_patch_input_micro_repairs(
+            &state.store,
+            id,
+            apply_patch_repairs,
+        )
+        .await;
+    }
     // The stored copy always keeps the provider's own item shape; the client
     // copy additionally carries the mirrored summary.
     let mut client_response = native;
@@ -1445,7 +1466,16 @@ async fn native_non_streaming_response(
     }
     // Repair the apply_patch input before the group is retained, so the client
     // copy, the stored copy and the upstream replay all agree on one text.
-    crate::native_responses::normalize_apply_patch_event_payload(&mut native);
+    let apply_patch_repairs =
+        crate::native_responses::normalize_apply_patch_event_payload(&mut native);
+    if !apply_patch_repairs.is_empty() {
+        crate::server::response_helpers::record_apply_patch_input_micro_repairs(
+            &state.store,
+            id,
+            apply_patch_repairs,
+        )
+        .await;
+    }
     let tool_group = match native_tool_call_group_from_response(&native) {
         Ok(group) => group,
         Err(error) => {
@@ -1638,6 +1668,12 @@ fn response_stream_from_native(params: NativeStreamingResponseParams) -> axum::r
                 yield Bytes::from(frame);
             }
             let inspection = relay.inspection().clone();
+            crate::server::response_helpers::record_apply_patch_input_micro_repairs(
+                &state.store,
+                &response_id,
+                relay.apply_patch_repairs(),
+            )
+            .await;
             let mut finalization = native_stream_finalization(&inspection, streaming_response_cancelled(&cancelled));
             let mut provider_tool_calls = 0_usize;
             let mut tool_group_issue = None;

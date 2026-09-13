@@ -13,7 +13,7 @@
   width: min(420px, calc(100vw - 24px));
   display: flex;
   flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   gap: 8px;
   pointer-events: none;
 }
@@ -21,6 +21,7 @@
 .toast {
   position: relative;
   display: flex;
+  width: 100%;
   align-items: flex-start;
   gap: 10px;
   padding: 10px 12px;
@@ -34,6 +35,43 @@
   outline: none;
   animation: toast-in 0.22s var(--theme-easing) both;
   transition: var(--theme-transition), transform 0.2s var(--theme-easing), opacity 0.2s var(--theme-easing);
+}
+
+/* Compact row: one short confirmation, so the row hugs its text and reads as a
+   pill rather than a full-width panel. */
+.toast.is-compact {
+  width: auto;
+  max-width: min(420px, calc(100vw - 24px));
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 5px 8px;
+  border-radius: 999px;
+}
+
+.toast.is-compact .toast-icon {
+  width: 15px;
+  height: 15px;
+  margin-top: 0;
+  border-radius: 999px;
+  font-size: 10px;
+}
+
+.toast.is-compact .toast-body {
+  display: block;
+}
+
+.toast.is-compact .toast-head {
+  align-items: center;
+}
+
+.toast.is-compact .toast-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.toast.is-compact .toast-message {
+  margin-top: 2px;
+  font-size: 11.5px;
 }
 
 .toast:hover {

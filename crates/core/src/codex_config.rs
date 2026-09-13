@@ -15,6 +15,8 @@ use toml_edit::DocumentMut;
 pub const TABLE: &str = "codeseex";
 /// Key holding the upstream base URL inside [`TABLE`].
 pub const UPSTREAM_KEY: &str = "upstream_base_url";
+/// Top-level Codex key naming the model catalog file.
+pub const MODEL_CATALOG_KEY: &str = "model_catalog_json";
 
 /// `[codeseex] upstream_base_url` from Codex's config, when it is set.
 pub fn read_upstream_base_url() -> Option<String> {
@@ -34,6 +36,47 @@ pub fn read_upstream_base_url_from(path: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/// `model_catalog_json` from a Codex-style `config.toml`, when it is set.
+pub fn read_model_catalog_json_from(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let document: toml::Value = toml::from_str(text).ok()?;
+    document
+        .get(MODEL_CATALOG_KEY)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Keeps Codex's `model_catalog_json` pointed at the catalog this build writes.
+///
+/// The caller passes the Codex config path it already resolved, so a test with a
+/// throwaway data directory can never rewrite the user's real Codex file. Only an
+/// existing value that already names a CodeSeeX catalog file is replaced; a path
+/// the user pointed somewhere else is left alone.
+pub fn sync_model_catalog_json_at(config_path: &Path, catalog_path: &Path) -> io::Result<bool> {
+    let path = config_path;
+    let desired = catalog_path.to_string_lossy().to_string();
+    let Some(current) = read_model_catalog_json_from(path) else {
+        return Ok(false);
+    };
+    if current == desired || !current.ends_with("model-catalog.json") {
+        return Ok(false);
+    }
+
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let mut document = text.parse::<DocumentMut>().map_err(io::Error::other)?;
+    document[MODEL_CATALOG_KEY] = toml_edit::value(desired);
+    let mut output = document.to_string();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    write_atomic(path, &output)?;
+    Ok(true)
 }
 
 /// Writes `[codeseex] upstream_base_url` into Codex's config. A blank value
@@ -215,6 +258,40 @@ mod tests {
 
         std::fs::write(&path, "model = \"deepseek-flash\"\n").expect("write");
         assert_eq!(read_upstream_base_url_from(&path), None);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap_or(Path::new(".")));
+    }
+
+    /// A dev build and a packaged build keep the catalog in different data
+    /// directories, so Codex's recorded path has to follow this build's catalog.
+    #[test]
+    fn sync_model_catalog_json_follows_this_builds_catalog() {
+        let path = temp_config("catalog-sync");
+        std::fs::write(
+            &path,
+            "model = \"deepseek-flash\"\nmodel_catalog_json = 'C:\\old\\model-catalog.json'\n\n[model_providers.custom]\nname = \"x\"\n",
+        )
+        .expect("write");
+
+        let changed = sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
+            .expect("sync");
+        assert!(changed);
+        assert_eq!(
+            read_model_catalog_json_from(&path).as_deref(),
+            Some(r"C:\new\model-catalog.json")
+        );
+        // Stable when it already points at this catalog.
+        assert!(!sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
+            .expect("sync"));
+
+        // A path the user aimed at their own file is never rewritten.
+        std::fs::write(&path, "model_catalog_json = 'D:\\mine\\own.json'\n").expect("write");
+        assert!(!sync_model_catalog_json_at(&path, Path::new(r"C:\new\model-catalog.json"))
+            .expect("sync"));
+        assert_eq!(
+            read_model_catalog_json_from(&path).as_deref(),
+            Some(r"D:\mine\own.json")
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap_or(Path::new(".")));
     }

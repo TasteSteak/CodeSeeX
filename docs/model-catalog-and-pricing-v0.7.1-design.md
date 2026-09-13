@@ -410,7 +410,7 @@ unexpected status 401 Unauthorized: unauthorized client detected, contact suppor
 
 ### A.6 实测结论（0.7.1 落地时复核）
 
-以真实中转 `https://ps.air-outer.com/v1` 复测后，A.3 的嫌疑排序需要修正：**第 3 条（请求头被最小化）才是主因**，第 1 条（Authorization 被丢弃）是并发的第二处缺陷。
+以真实第三方中转 endpoint 复测后，A.3 的嫌疑排序需要修正：**第 3 条（请求头被最小化）才是主因**，第 1 条（Authorization 被丢弃）是并发的第二处缺陷。
 
 同一 key、同一 `/v1/responses`、同一模型，只改请求头：
 

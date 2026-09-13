@@ -562,6 +562,7 @@ async function copySelectedText() {
     key: "copy-selection",
     tone: copied ? "success" : "error",
     title: t(copied ? "copied" : "copyFailed"),
+    compact: copied,
   });
 }
 
@@ -1550,7 +1551,7 @@ async function copyConfigToml() {
   }
   try {
     await navigator.clipboard.writeText(text);
-    showToast({ key: "config-toml", tone: "success", title: t("copied") });
+    showToast({ key: "config-toml", tone: "success", title: t("copied"), compact: true });
   } catch {
     showToast({ key: "config-toml", tone: "error", title: t("copyFailed") });
   }
@@ -5472,6 +5473,8 @@ function isAtLogBottom() {
    ========================================================================== */
 const TOAST_LIMITS = { maxVisible: 3, maxQueue: 12, exitMs: 200, overflowKey: "__overflow__" };
 const TOAST_DURATION = { info: 4200, success: 3400, warn: 5600, error: 6800 };
+// Compact rows are for one-word confirmations ("copied"): smaller and shorter.
+const TOAST_COMPACT_DURATION = 1800;
 const TOAST_ICONS = { info: "i", success: "\u2713", warn: "!", error: "\u2715" };
 const toastRuntime = { active: [], queue: [], shown: 0, merged: 0 };
 
@@ -5493,12 +5496,14 @@ function showToast(options = {}) {
     toastMerge(existing, options, tone);
     return existing;
   }
+  const compact = options.compact === true;
   const record = {
     key,
     tone,
+    compact,
     title: options.title || "",
     message: options.message || "",
-    duration: options.duration || TOAST_DURATION[tone],
+    duration: options.duration || (compact ? TOAST_COMPACT_DURATION : TOAST_DURATION[tone]),
     count: 1,
     state: "queued",
     el: null,
@@ -5560,9 +5565,12 @@ function toastMoveToFront(item) {
 
 function toastMerge(item, options, tone) {
   item.tone = tone;
+  if (typeof options.compact === "boolean") item.compact = options.compact;
   if (options.title) item.title = options.title;
   if (options.message) item.message = options.message;
-  item.duration = typeof options.duration === "number" ? options.duration : TOAST_DURATION[tone];
+  item.duration = typeof options.duration === "number"
+    ? options.duration
+    : (item.compact ? TOAST_COMPACT_DURATION : TOAST_DURATION[tone]);
   item.count += 1;
   toastRuntime.merged += 1;
   if (item.state === "active") {
@@ -5600,7 +5608,7 @@ function toastActivate(stack, record) {
 
 function toastBuild(record) {
   const node = document.createElement("div");
-  node.className = "toast";
+  node.className = record.compact ? "toast is-compact" : "toast";
   node.dataset.tone = record.tone;
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
@@ -5646,6 +5654,7 @@ function toastBuild(record) {
 function toastRepaint(record) {
   const node = record.el;
   if (!node || !record.parts) return;
+  node.classList.toggle("is-compact", record.compact === true);
   node.dataset.tone = record.tone;
   if (record.parts.icon) record.parts.icon.textContent = TOAST_ICONS[record.tone] || TOAST_ICONS.info;
   record.parts.title.textContent = record.title;

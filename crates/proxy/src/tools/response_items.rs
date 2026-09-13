@@ -366,6 +366,33 @@ pub(crate) struct ApplyPatchInputNormalization {
     pub(crate) blank_context_lines_repaired: usize,
 }
 
+/// Copyable summary of what the apply_patch normalizer changed. The native
+/// transport carries this out of the relay so it can report the same repair
+/// kinds the Chat compatibility layer reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ApplyPatchRepairTally {
+    pub(crate) unified_hunk_headers: usize,
+    pub(crate) blank_context_lines: usize,
+}
+
+impl ApplyPatchRepairTally {
+    pub(crate) fn from_normalization(normalization: &ApplyPatchInputNormalization) -> Self {
+        Self {
+            unified_hunk_headers: normalization.unified_hunk_headers_repaired,
+            blank_context_lines: normalization.blank_context_lines_repaired,
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.unified_hunk_headers += other.unified_hunk_headers;
+        self.blank_context_lines += other.blank_context_lines;
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.unified_hunk_headers == 0 && self.blank_context_lines == 0
+    }
+}
+
 pub(crate) fn normalize_apply_patch_response_input_with_diagnostic(
     arguments: &str,
 ) -> ApplyPatchInputNormalization {

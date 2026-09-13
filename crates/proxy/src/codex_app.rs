@@ -886,12 +886,12 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     const TEMPLATE: &str = r#"
 (async () => {
   const catalog = __CODESEEX_MODEL_CATALOG_JSON__;
-  const VERSION = "codeseex-model-catalog-unlock-v2:" + String((catalog && catalog.catalog_revision) || "builtin");
+  const VERSION = "codeseex-model-catalog-unlock-v3:" + String((catalog && catalog.catalog_revision) || "builtin");
+  const LEGACY_VERSION_PREFIX = "codeseex-model-catalog-unlock-v2";
   const state = window.__codeseexModelCatalogUnlock = window.__codeseexModelCatalogUnlock || {};
   state.version = VERSION;
   state.catalog = catalog;
   state.failures = state.failures || [];
-  state.modules = state.modules || {};
 
   function rememberFailure(error) {
     try {
@@ -900,13 +900,140 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     } catch {}
   }
 
-  function assetLabel(url) {
-    try {
-      const parsed = new URL(String(url || ""), location.href);
-      return parsed.pathname.split("/").filter(Boolean).pop() || parsed.href;
-    } catch {
-      return String(url || "").slice(0, 200);
+  /// Everything this profile installs is remembered here so the whole injection
+  /// can be torn down again. Codex must never keep a hook we added.
+  const hooks = {
+    fetch: null,
+    statsigClient: null,
+    statsigOriginal: null,
+    statsigValue: undefined,
+    hadStatsig: false,
+    interval: 0,
+    installed: false
+  };
+
+  /// True once the renderer has actually received the widened model list, either
+  /// through the statsig gate or through a rewritten model response.
+  function injectionDelivered() {
+    return Boolean(
+      (state.dynamicConfigPatch && state.dynamicConfigPatch.applied)
+      || (state.fetchPatch && state.fetchPatch.patched)
+    );
+  }
+
+  /// Removes every hook this profile installed and leaves nothing behind. The
+  /// injected status object stays for diagnostics, but it holds no behaviour.
+  function uninstallInjection(reason) {
+    if (!hooks.installed) {
+      state.uninstallReason = state.uninstallReason || reason;
+      return;
     }
+    try {
+      if (hooks.fetch) window.fetch = hooks.fetch;
+    } catch (error) {
+      rememberFailure(error);
+    }
+    try {
+      if (hooks.statsigClient && hooks.statsigOriginal) {
+        hooks.statsigClient.getDynamicConfig = hooks.statsigOriginal;
+      }
+      if (hooks.statsigClient) delete hooks.statsigClient.__codeseexDynamicConfigPatch;
+    } catch (error) {
+      rememberFailure(error);
+    }
+    try {
+      delete window.__STATSIG__;
+      if (hooks.hadStatsig) {
+        Object.defineProperty(window, "__STATSIG__", {
+          value: hooks.statsigValue,
+          writable: true,
+          configurable: true,
+          enumerable: true
+        });
+      }
+    } catch (error) {
+      rememberFailure(error);
+    }
+    try {
+      if (hooks.interval) window.clearInterval(hooks.interval);
+    } catch (error) {
+      rememberFailure(error);
+    }
+    // These two markers are the "already patched" sentinels for the fetch hook
+    // and the statsig trap. They must leave together with the hooks: if they
+    // survive, a later injection at the same catalog revision early-returns and
+    // reports success without installing anything.
+    try {
+      delete window.__codeseexModelFetchPatchVersion;
+      delete window.__codeseexStatsigTrapVersion;
+    } catch (error) {
+      rememberFailure(error);
+    }
+    hooks.fetch = null;
+    hooks.statsigClient = null;
+    hooks.statsigOriginal = null;
+    hooks.interval = 0;
+    hooks.installed = false;
+    state.installed = false;
+    state.uninstalled = true;
+    state.uninstallReason = reason;
+  }
+
+  /// The v2 profile is no longer shipped, but a renderer it injected earlier can
+  /// still be alive after an app update: it left a statsig wrapper (which built a
+  /// clone and rebound `get`), a DOM observer, a click listener and an interval
+  /// behind. Undo everything that can be undone before installing v3.
+  function cleanupPreviousInjection() {
+    const removed = [];
+    try {
+      if (window.__codeseexModelCatalogObserver) {
+        window.__codeseexModelCatalogObserver.disconnect();
+        removed.push("dom-observer");
+      }
+      delete window.__codeseexModelCatalogObserver;
+      if (window.__codeseexModelCatalogClickHandler) {
+        document.removeEventListener("click", window.__codeseexModelCatalogClickHandler, true);
+        removed.push("click-listener");
+      }
+      delete window.__codeseexModelCatalogClickHandler;
+      if (window.__codeseexModelCatalogInterval) {
+        window.clearInterval(window.__codeseexModelCatalogInterval);
+        removed.push("refresh-interval");
+      }
+      delete window.__codeseexModelCatalogInterval;
+    } catch (error) {
+      rememberFailure(error);
+    }
+    try {
+      for (const client of statsigClients()) {
+        if (typeof client.__codeseexOriginalGetDynamicConfig === "function") {
+          client.getDynamicConfig = client.__codeseexOriginalGetDynamicConfig;
+          removed.push("statsig-clone-wrapper");
+        }
+        delete client.__codeseexOriginalGetDynamicConfig;
+        const marker = client.__codeseexDynamicConfigPatch;
+        if (typeof marker === "string" && marker.startsWith(LEGACY_VERSION_PREFIX)) {
+          delete client.__codeseexDynamicConfigPatch;
+        }
+      }
+    } catch (error) {
+      rememberFailure(error);
+    }
+    if (window.__codeseexModelMessagePatch) {
+      // v2 added an anonymous capture-phase `message` listener and never kept a
+      // reference, so it cannot be removed from a live renderer; it goes away the
+      // next time the renderer reloads.
+      removed.push("stale-window-message-listener");
+      delete window.__codeseexModelMessagePatch;
+    }
+    for (const key of ["assetProbe", "hostConfig", "modules", "appServerPatch", "messagePatch", "shortLabelPatch"]) {
+      if (key in state) {
+        delete state[key];
+        removed.push(key);
+      }
+    }
+    state.cleanup = removed;
+    return removed;
   }
 
   function unique(values) {
@@ -1105,47 +1232,6 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     return changed;
   }
 
-  function catalogModelArray() {
-    return modelNames().map((name) => descriptorFor(name));
-  }
-
-  function defaultModelDescriptor() {
-    const defaultName = (catalog && (catalog.default_model || catalog.model)) || modelNames()[0] || "";
-    return defaultName ? descriptorFor(defaultName) : null;
-  }
-
-  function replaceModelArrayWithCatalog(container, key) {
-    if (!container || typeof container !== "object") return false;
-    if (!Array.isArray(container[key])) return false;
-    container[key] = catalogModelArray();
-    return true;
-  }
-
-  function replaceModelContainerWithCatalog(value) {
-    if (!value || typeof value !== "object") return false;
-    let changed = false;
-    const defaultModel = defaultModelDescriptor();
-    if (replaceModelArrayWithCatalog(value, "data")) changed = true;
-    if (replaceModelArrayWithCatalog(value, "models")) changed = true;
-    if (replaceModelArrayWithCatalog(value.result, "data")) changed = true;
-    if (replaceModelArrayWithCatalog(value.result, "models")) changed = true;
-    if (replaceModelArrayWithCatalog(value.message && value.message.result, "data")) changed = true;
-    if (defaultModel && ("data" in value || "models" in value || "result" in value)) {
-      value.defaultModel = defaultModel;
-      value.model = defaultModel.model || defaultModel.id || defaultModel.slug;
-      changed = true;
-    }
-    if ("nextCursor" in value) {
-      value.nextCursor = null;
-      changed = true;
-    }
-    if (value.result && typeof value.result === "object" && "nextCursor" in value.result) {
-      value.result.nextCursor = null;
-      changed = true;
-    }
-    return changed;
-  }
-
   function patchModelContainer(value, allowEmpty) {
     if (!value || typeof value !== "object") return false;
     let changed = false;
@@ -1169,143 +1255,10 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     return changed;
   }
 
-  const appServerRequestPatchVersion = VERSION;
-  const modulePromises = new Map();
 
-  function codexAppAssetUrl(namePart) {
-    const urls = [
-      ...Array.from(document.scripts || []).map((script) => script.src),
-      ...Array.from(document.querySelectorAll("link[href]") || []).map((link) => link.href),
-      ...performance.getEntriesByType("resource").map((entry) => entry.name)
-    ].filter(Boolean);
-    const url = urls.find((url) => url.includes("/assets/") && url.includes(namePart) && url.split("?")[0].endsWith(".js")) || "";
-    state.assetProbe = state.assetProbe || {};
-    state.assetProbe[namePart] = url ? assetLabel(url) : "";
-    return url;
-  }
+  const STATSIG_MODEL_CONFIG_KEY = "107580212";
 
-  async function loadCodexAppModule(cacheKey, resolveUrl) {
-    if (!modulePromises.has(cacheKey)) {
-      modulePromises.set(cacheKey, Promise.resolve().then(async () => {
-        const url = await resolveUrl();
-        if (!url) throw new Error(`Codex App asset not found: ${cacheKey}`);
-        const module = await import(url);
-        state.modules[cacheKey] = {
-          loaded: true,
-          url: assetLabel(url),
-          exportKeys: Object.keys(module || {}).slice(0, 30)
-        };
-        return module;
-      }).catch((error) => {
-        modulePromises.delete(cacheKey);
-        state.modules[cacheKey] = {
-          loaded: false,
-          error: String(error && (error.message || error) || error)
-        };
-        throw error;
-      }));
-    }
-    return await modulePromises.get(cacheKey);
-  }
-
-  async function resolveHostConfigModuleUrl() {
-    const directUrl = codexAppAssetUrl("use-host-config-");
-    state.hostConfig = state.hostConfig || {};
-    if (directUrl) {
-      state.hostConfig.resolvedBy = "direct_asset";
-      state.hostConfig.url = assetLabel(directUrl);
-      return directUrl;
-    }
-    const modelQueriesUrl = codexAppAssetUrl("model-queries-");
-    if (!modelQueriesUrl) throw new Error("Codex App model-queries asset not found");
-    state.hostConfig.modelQueriesUrl = assetLabel(modelQueriesUrl);
-    const response = await fetch(modelQueriesUrl, { cache: "force-cache" });
-    if (!response.ok) throw new Error(`Codex App model-queries asset fetch failed: ${response.status}`);
-    const source = await response.text();
-    const match = source.match(/from\s*["']\.\/(use-host-config-[^"']+\.js)["']/);
-    if (!match) throw new Error("Codex App model-queries host-config import not found");
-    const resolved = new URL(match[1], modelQueriesUrl).toString();
-    state.hostConfig.resolvedBy = "model_queries_import";
-    state.hostConfig.importName = match[1];
-    state.hostConfig.url = assetLabel(resolved);
-    return resolved;
-  }
-
-  function appServerRequestMethod(method, params) {
-    if (method === "send-cli-request-for-host" && params && params.method) return String(params.method);
-    return String(method || "");
-  }
-
-  function patchAppServerModelResult(method, result) {
-    if (method !== "list-models-for-host") return result;
-    if (Array.isArray(result)) return catalogModelArray();
-    if (!replaceModelContainerWithCatalog(result)) patchModelContainer(result, true);
-    return result;
-  }
-
-  function patchAppServerClient(client) {
-    if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__codeseexModelRequestPatch === appServerRequestPatchVersion) return true;
-    const original = client.__codeseexOriginalSendRequest || client.sendRequest.bind(client);
-    client.__codeseexOriginalSendRequest = original;
-    client.sendRequest = async function codeseexPatchedSendRequest(method, params, options) {
-      const resolvedMethod = appServerRequestMethod(String(method || ""), params);
-      try {
-        const result = await original(method, params, options);
-        return patchAppServerModelResult(resolvedMethod, result);
-      } catch (error) {
-        if (resolvedMethod === "list-models-for-host" && modelNames().length > 0) {
-          rememberFailure(error);
-          return patchAppServerModelResult(resolvedMethod, { data: [] });
-        }
-        throw error;
-      }
-    };
-    client.__codeseexModelRequestPatch = appServerRequestPatchVersion;
-    return true;
-  }
-
-  function patchModelAvailabilityValue(value) {
-    if (!value || typeof value !== "object") return value;
-    const names = modelNames();
-    if (!names.length) return value;
-    const available = Array.isArray(value.available_models) ? value.available_models : [];
-    const merged = unique([...available, ...names]);
-    const defaultName = (catalog && (catalog.default_model || catalog.model)) || names[0] || "";
-    let changed = merged.length !== available.length;
-    const next = { ...value, available_models: merged };
-    if (defaultName && (!next.default_model || !names.includes(String(next.default_model)))) {
-      next.default_model = defaultName;
-      changed = true;
-    }
-    return changed ? next : value;
-  }
-
-  function patchDynamicConfigResult(name, result) {
-    if (String(name || "") !== "107580212") return result;
-    if (!result || typeof result !== "object") return result;
-    const currentValue = result.value && typeof result.value === "object" ? result.value : {};
-    const nextValue = patchModelAvailabilityValue(currentValue);
-    if (nextValue === currentValue) return result;
-    const clone = Object.create(Object.getPrototypeOf(result) || Object.prototype);
-    Object.assign(clone, result, { value: nextValue });
-    if (typeof result.get === "function") {
-      clone.get = function codeseexPatchedDynamicConfigGet(key, fallback) {
-        if (key === "available_models") return nextValue.available_models;
-        if (key === "default_model") return nextValue.default_model;
-        return result.get.call(this, key, fallback);
-      };
-    }
-    state.dynamicConfigPatch = {
-      installed: true,
-      configKey: "107580212",
-      models: modelNames(),
-      patchVersion: VERSION
-    };
-    return clone;
-  }
-
-  function collectStatsigClients() {
+  function statsigClients() {
     const global = window.__STATSIG__;
     const clients = [];
     const push = (value) => {
@@ -1324,204 +1277,163 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
     return clients;
   }
 
-  function patchStatsigDynamicConfig() {
-    const clients = collectStatsigClients();
-    let patched = 0;
-    for (const client of clients) {
-      if (client.__codeseexDynamicConfigPatch === VERSION) {
-        patched += 1;
-        continue;
-      }
-      const original = client.__codeseexOriginalGetDynamicConfig || client.getDynamicConfig.bind(client);
-      client.__codeseexOriginalGetDynamicConfig = original;
-      client.getDynamicConfig = function codeseexPatchedGetDynamicConfig(name, options) {
-        const result = original(name, options);
-        if (result && typeof result.then === "function") {
-          return result.then((value) => patchDynamicConfigResult(name, value));
-        }
-        return patchDynamicConfigResult(name, result);
-      };
-      client.__codeseexDynamicConfigPatch = VERSION;
-      patched += 1;
-    }
-    state.dynamicConfigPatch = {
-      installed: patched > 0,
-      clients: patched,
-      configKey: "107580212",
-      models: modelNames(),
-      patchVersion: VERSION
-    };
-    return patched > 0;
-  }
-
-  async function installAppServerPatch() {
-    const diagnostic = {
-      attempted: true,
-      installed: false,
-      cacheKey: "use-host-config:request-bridge",
-      expectedExport: "Vt"
-    };
-    state.appServerPatch = diagnostic;
-    try {
-      const module = await loadCodexAppModule("use-host-config:request-bridge", resolveHostConfigModuleUrl);
-      diagnostic.moduleLoaded = !!module;
-      diagnostic.exportKeys = Object.keys(module || {}).slice(0, 30);
-      let requestBridge = module && module.Vt;
-      let exportName = requestBridge ? "Vt" : "";
-      if (!requestBridge && module && typeof module === "object") {
-        for (const [key, value] of Object.entries(module)) {
-          if (value && typeof value === "object" && typeof value.sendRequest === "function") {
-            requestBridge = value;
-            exportName = key;
-            break;
-          }
-        }
-      }
-      diagnostic.exportName = exportName;
-      diagnostic.exportFound = !!requestBridge;
-      diagnostic.hasSendRequest = !!(requestBridge && typeof requestBridge.sendRequest === "function");
-      if (!requestBridge || typeof requestBridge.sendRequest !== "function") {
-        throw new Error("Codex App use-host-config request bridge sendRequest export not found");
-      }
-      diagnostic.installed = patchAppServerClient(requestBridge);
-      diagnostic.patchVersion = requestBridge.__codeseexModelRequestPatch || null;
-    } catch (error) {
-      diagnostic.error = String(error && (error.message || error) || error);
-      rememberFailure(error);
-    }
-    return diagnostic;
-  }
-
-  function modelListResultLooksPatchable(result) {
-    if (!result || typeof result !== "object") return false;
-    return modelArrayLooksPatchable(result, true)
-      || modelArrayLooksPatchable(result.data, true)
-      || modelArrayLooksPatchable(result.models, true)
-      || stringArrayLooksPatchable(result.models);
-  }
-
-  function patchMcpModelResponseData(data) {
-    if (!data || data.type !== "mcp-response") return false;
-    const message = data.message || data.response;
-    const method = String(
-      (message && message.method)
-      || (message && message.request && message.request.method)
-      || (message && message.params && message.params.method)
-      || ""
-    );
-    if (method && method !== "model/list" && method !== "list-models-for-host") return false;
-    if (!method && !modelListResultLooksPatchable(message && message.result)) return false;
+  /// Widens the model gate in place. The provider's DynamicConfig object is
+  /// handed back untouched: only the values inside `value` are merged, so no
+  /// prototype or receiver is replaced and nothing can throw on a private field.
+  function patchDynamicConfigValue(config) {
+    if (!config || typeof config !== "object") return false;
+    const value = config.value;
+    if (!value || typeof value !== "object") return false;
+    const names = modelNames();
+    if (!names.length) return false;
     let changed = false;
-    if (patchModelContainer(message, true)) changed = true;
-    if (patchModelContainer(message && message.result, true)) changed = true;
-    if (patchModelContainer(message && message.result && message.result.data, true)) changed = true;
-    if (patchModelArray(message && message.result, true)) changed = true;
-    if (patchModelArray(message && message.result && message.result.data, true)) changed = true;
-    if (patchModelArray(message && message.result && message.result.models, true)) changed = true;
-    return changed;
-  }
-
-  function installMessagePatch() {
-    if (window.__codeseexModelMessagePatch === VERSION) return;
-    window.addEventListener("message", (event) => {
+    const available = Array.isArray(value.available_models) ? value.available_models : [];
+    const merged = unique([...available, ...names]);
+    if (merged.length !== available.length) {
       try {
-        patchMcpModelResponseData(event && event.data);
+        value.available_models = merged;
+        changed = true;
       } catch (error) {
         rememberFailure(error);
       }
-    }, true);
-    window.__codeseexModelMessagePatch = VERSION;
-    state.messagePatch = {
-      installed: true,
-      mode: "window_message_listener",
-      patchVersion: VERSION
-    };
-  }
-
-  function modelDisplayLabelPairs() {
-    const pairs = [];
-    for (const name of modelNames()) {
-      const full = displayNameForModel(name);
-      const short = shortDisplayNameForModel(name, full);
-      for (const label of unique([full, normalizeModelDisplayName(full), String(full || "").replace(/^DeepSeek V4\b/, "DeepSeek-V4"), name])) {
-        if (label && short && label !== short) pairs.push({ full: label, short });
+    }
+    const defaultName = (catalog && (catalog.default_model || catalog.model)) || names[0] || "";
+    if (defaultName && (!value.default_model || !names.includes(String(value.default_model)))) {
+      try {
+        value.default_model = defaultName;
+        changed = true;
+      } catch (error) {
+        rememberFailure(error);
       }
     }
-    return pairs.sort((left, right) => right.full.length - left.full.length);
+    if (changed) {
+      state.dynamicConfigPatch = {
+        installed: true,
+        applied: true,
+        configKey: STATSIG_MODEL_CONFIG_KEY,
+        models: names,
+        patchVersion: VERSION
+      };
+    }
+    return changed;
   }
 
-  function isInsideDropdownMenu(element) {
-    return !!(element && element.closest([
-      "[role=\"menu\"]",
-      "[role=\"menuitem\"]",
-      "[role=\"listbox\"]",
-      "[role=\"option\"]",
-      "[data-radix-menu-content]",
-      "[data-radix-popper-content-wrapper]"
-    ].join(",")));
-  }
-
-  function isModelSelectorTriggerElement(element) {
-    if (!element || isInsideDropdownMenu(element)) return false;
-    const popup = element.getAttribute("aria-haspopup");
-    return popup === "menu"
-      || popup === "true"
-      || element.hasAttribute("aria-expanded")
-      || element.hasAttribute("data-state");
-  }
-
-  function replaceModelLabelInElement(element, pair) {
-    if (!element || !pair) return 0;
-    let replacements = 0;
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    const nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    for (const node of nodes) {
-      const text = node.nodeValue || "";
-      if (!text.includes(pair.full)) continue;
-      node.nodeValue = text.replaceAll(pair.full, pair.short);
-      replacements += 1;
-    }
-    if (replacements > 0) return replacements;
-
-    const descendants = Array.from(element.querySelectorAll ? element.querySelectorAll("*") : [])
-      .filter((item) => item && !isInsideDropdownMenu(item) && !["svg", "path"].includes(String(item.tagName || "").toLowerCase()))
-      .reverse();
-    for (const item of descendants) {
-      const text = String(item.textContent || "");
-      if (!text.includes(pair.full)) continue;
-      item.textContent = text.replaceAll(pair.full, pair.short);
-      return 1;
-    }
-    return 0;
-  }
-
-  function shortenSelectedModelButtonLabels(root) {
-    const pairs = modelDisplayLabelPairs();
-    const rootNode = root && root.nodeType ? root : document.body;
-    if (!pairs.length || !rootNode) return;
-    const triggers = [];
-    if (rootNode.nodeType === Node.ELEMENT_NODE && rootNode.matches && rootNode.matches("button,[role=\"button\"]")) {
-      triggers.push(rootNode);
-    }
-    if (rootNode.querySelectorAll) {
-      triggers.push(...Array.from(rootNode.querySelectorAll("button,[role=\"button\"]")));
-    }
-    let replacements = 0;
-    for (const trigger of triggers) {
-      if (isInsideDropdownMenu(trigger)) continue;
-      const triggerText = String(trigger.innerText || trigger.textContent || "");
-      const matchingPairs = pairs.filter((pair) => triggerText.includes(pair.full));
-      if (!matchingPairs.length && !isModelSelectorTriggerElement(trigger)) continue;
-      for (const pair of matchingPairs) {
-        replacements += replaceModelLabelInElement(trigger, pair);
+  function patchStatsigClient(client) {
+    if (!client || typeof client.getDynamicConfig !== "function") return false;
+    if (client.__codeseexDynamicConfigPatch === VERSION) return true;
+    const original = client.getDynamicConfig;
+    client.getDynamicConfig = function codeseexGetDynamicConfig(name, options) {
+      const result = original.call(this, name, options);
+      if (String(name || "") !== STATSIG_MODEL_CONFIG_KEY) return result;
+      if (result && typeof result.then === "function") {
+        return result.then((value) => {
+          patchDynamicConfigValue(value);
+          return value;
+        });
       }
-    }
-    state.shortLabelPatch = {
-      scannedTriggers: triggers.length,
-      replacements,
-      patchVersion: VERSION
+      patchDynamicConfigValue(result);
+      return result;
     };
+    client.__codeseexDynamicConfigPatch = VERSION;
+    hooks.statsigClient = client;
+    hooks.statsigOriginal = original;
+    return true;
+  }
+
+  function patchStatsigDynamicConfig() {
+    let patched = 0;
+    for (const client of statsigClients()) {
+      if (patchStatsigClient(client)) patched += 1;
+    }
+    if (patched > 0) {
+      state.dynamicConfigPatch = {
+        installed: true,
+        clients: patched,
+        configKey: STATSIG_MODEL_CONFIG_KEY,
+        models: modelNames(),
+        patchVersion: VERSION
+      };
+    } else if (!(state.dynamicConfigPatch && state.dynamicConfigPatch.installed)) {
+      state.dynamicConfigPatch = {
+        installed: false,
+        clients: 0,
+        configKey: STATSIG_MODEL_CONFIG_KEY,
+        patchVersion: VERSION
+      };
+    }
+    return patched > 0;
+  }
+
+  /// Statsig may be created after this script runs, so the global is trapped
+  /// instead of polled into existence.
+  function installStatsigTrap() {
+    if (window.__codeseexStatsigTrapVersion === VERSION) return;
+    let current = window.__STATSIG__;
+    hooks.hadStatsig = current !== undefined;
+    hooks.statsigValue = current;
+    try {
+      Object.defineProperty(window, "__STATSIG__", {
+        configurable: true,
+        get() {
+          return current;
+        },
+        set(value) {
+          current = value;
+          hooks.statsigValue = value;
+          try { patchStatsigDynamicConfig(); } catch (error) { rememberFailure(error); }
+        }
+      });
+      window.__codeseexStatsigTrapVersion = VERSION;
+    } catch (error) {
+      rememberFailure(error);
+    }
+    try { patchStatsigDynamicConfig(); } catch (error) { rememberFailure(error); }
+  }
+
+  /// True only for a payload that is unambiguously a model list, so the network
+  /// hook can never rewrite unrelated JSON.
+  function isModelListPayload(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    const candidates = [payload.data, payload.models, payload.result && payload.result.data];
+    return candidates.some((value) => Array.isArray(value)
+      && value.length > 0
+      && value.every((item) => item && typeof item === "object" && typeof item.model === "string"));
+  }
+
+  /// Narrow safety net for the model list: only an OK JSON response whose body is
+  /// unambiguously a model list is rewritten. Everything else is returned as the
+  /// provider sent it, so the hook cannot disturb other renderer traffic.
+  function installFetchPatch() {
+    if (window.__codeseexModelFetchPatchVersion === VERSION) return;
+    const original = window.fetch;
+    if (typeof original !== "function") return;
+    window.fetch = async function codeseexFetch(input, init) {
+      const response = await original.call(this, input, init);
+      try {
+        const url = String((input && input.url) || input || "");
+        if (!/model/i.test(url) || !response || response.ok !== true || typeof response.clone !== "function") {
+          return response;
+        }
+        const contentType = String(response.headers && response.headers.get && response.headers.get("content-type") || "");
+        if (!contentType.includes("json")) return response;
+        const payload = await response.clone().json();
+        if (!isModelListPayload(payload)) return response;
+        if (patchModelContainer(payload, true)) {
+          state.fetchPatch = { patched: true, url: url.slice(0, 120), patchVersion: VERSION };
+          return new Response(JSON.stringify(payload), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        }
+      } catch (error) {
+        rememberFailure(error);
+      }
+      return response;
+    };
+    window.__codeseexModelFetchPatchVersion = VERSION;
+    hooks.fetch = original;
+    state.fetchPatch = state.fetchPatch || { patched: false, patchVersion: VERSION };
   }
 
   function rendererDiagnostic(reason) {
@@ -1529,60 +1441,46 @@ pub(crate) fn renderer_inject_script(catalog: &Value) -> String {
       version: VERSION,
       reason,
       models: modelNames(),
-      assetProbe: state.assetProbe || {},
-      hostConfig: state.hostConfig || {},
-      modules: state.modules || {},
-      appServerPatch: state.appServerPatch || { attempted: false, installed: false },
+      cleanup: state.cleanup || [],
+      installed: state.installed === true,
+      uninstalled: state.uninstalled === true,
+      uninstallReason: state.uninstallReason || "",
+      delivered: injectionDelivered(),
       dynamicConfigPatch: state.dynamicConfigPatch || { installed: false },
-      messagePatch: state.messagePatch || { installed: false },
-      shortLabelPatch: state.shortLabelPatch || { replacements: 0 },
+      fetchPatch: state.fetchPatch || { patched: false },
       failures: (state.failures || []).slice(-8)
     };
   }
 
-  async function refresh(reason) {
+  function refresh(reason) {
     try {
-      shortenSelectedModelButtonLabels(document.body);
-      await installAppServerPatch();
       patchStatsigDynamicConfig();
-      shortenSelectedModelButtonLabels(document.body);
     } catch (error) {
       rememberFailure(error);
     }
     return rendererDiagnostic(reason || "refresh");
   }
 
-  installMessagePatch();
-  const initialDiagnostic = await refresh("initial");
+  cleanupPreviousInjection();
+  hooks.installed = true;
+  installStatsigTrap();
+  installFetchPatch();
+  state.installed = true;
+  state.uninstalled = false;
+  state.uninstallReason = "";
 
-  if (window.__codeseexModelCatalogObserver) {
-    try { window.__codeseexModelCatalogObserver.disconnect(); } catch {}
-  }
-  let refreshTimer = 0;
-  window.__codeseexModelCatalogObserver = new MutationObserver(() => {
-    try { shortenSelectedModelButtonLabels(document.body); } catch {}
-    clearTimeout(refreshTimer);
-    refreshTimer = window.setTimeout(() => { void refresh("mutation"); }, 30);
-  });
-  window.__codeseexModelCatalogObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
-
-  if (window.__codeseexModelCatalogClickHandler) {
-    document.removeEventListener("click", window.__codeseexModelCatalogClickHandler, true);
-  }
-  window.__codeseexModelCatalogClickHandler = () => {
-    window.setTimeout(() => {
-      try { shortenSelectedModelButtonLabels(document.body); } catch {}
-    }, 0);
-  };
-  document.addEventListener("click", window.__codeseexModelCatalogClickHandler, true);
-
-  clearInterval(window.__codeseexModelCatalogInterval);
-  let remaining = 40;
-  window.__codeseexModelCatalogInterval = window.setInterval(() => {
-    void refresh("timer");
+  // The hooks stay installed so the widened model list keeps holding, but they
+  // stay controllable: `uninstall()` removes every one of them and restores the
+  // renderer to its original state.
+  state.uninstall = (reason) => uninstallInjection(reason || "manual");
+  let remaining = 120;
+  hooks.interval = window.setInterval(() => {
+    try { patchStatsigDynamicConfig(); } catch (error) { rememberFailure(error); }
     remaining -= 1;
-    if (remaining <= 0) clearInterval(window.__codeseexModelCatalogInterval);
+    if (remaining <= 0) window.clearInterval(hooks.interval);
   }, 500);
+
+  const initialDiagnostic = refresh("initial");
   return initialDiagnostic;
 })();
 "#;
@@ -1599,13 +1497,20 @@ pub(crate) async fn inject_model_catalog(debug_port: u16, catalog: Value) -> any
         .ok_or_else(|| anyhow::anyhow!("selected Codex CDP target has no websocket URL"))?;
     let script = renderer_inject_script(&catalog);
     let renderer_state = inject_script(websocket_url, &script).await?;
-    let app_server_patch_installed = renderer_state
-        .pointer("/appServerPatch/installed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // The injection now widens the renderer's model gate in place instead of
+    // importing an internal renderer module, so "effective" means one of the
+    // model-list hooks is live rather than "the removed appServer patch worked".
+    let injection_effective = ["/dynamicConfigPatch/installed", "/fetchPatch/patched"]
+        .iter()
+        .any(|pointer| {
+            renderer_state
+                .pointer(pointer)
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
     Ok(json!({
-        "ok": app_server_patch_installed,
-        "status": if app_server_patch_installed { "injected" } else { "evaluated_without_app_server_patch" },
+        "ok": injection_effective,
+        "status": if injection_effective { "injected" } else { "injected_without_statsig" },
         "debug_port": debug_port,
         "target": {
             "id": target.id,
@@ -1614,6 +1519,33 @@ pub(crate) async fn inject_model_catalog(debug_port: u16, catalog: Value) -> any
         },
         "renderer_state": renderer_state,
         "models": catalog.get("models").cloned().unwrap_or_else(|| json!([]))
+    }))
+}
+
+/// Removes a previously installed renderer injection from a live Codex App.
+/// The injection is controllable by design: this restores the renderer to its
+/// original state without restarting Codex.
+pub(crate) async fn remove_model_catalog_injection(debug_port: u16) -> anyhow::Result<Value> {
+    let target = pick_codex_target(&list_targets(debug_port).await?)?;
+    let websocket_url = target
+        .web_socket_debugger_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("selected Codex CDP target has no websocket URL"))?;
+    let outcome = inject_script(
+        websocket_url,
+        r#"(() => {
+  const state = window.__codeseexModelCatalogUnlock;
+  if (!state) return { removed: false, reason: "not-injected" };
+  if (typeof state.uninstall !== "function") return { removed: false, reason: "no-uninstall-hook" };
+  state.uninstall("requested");
+  return { removed: true, reason: "uninstalled" };
+})()"#,
+    )
+    .await?;
+    Ok(json!({
+        "ok": outcome.get("removed").and_then(Value::as_bool).unwrap_or(false),
+        "debug_port": debug_port,
+        "result": outcome
     }))
 }
 
@@ -1786,13 +1718,13 @@ fn renderer_probe_from_injected(value: &Value) -> Option<Value> {
         "version",
         "reason",
         "models",
-        "assetProbe",
-        "hostConfig",
-        "modules",
-        "appServerPatch",
+        "cleanup",
+        "installed",
+        "uninstalled",
+        "uninstallReason",
+        "delivered",
         "dynamicConfigPatch",
-        "messagePatch",
-        "shortLabelPatch",
+        "fetchPatch",
         "failures",
     ] {
         if let Some(value) = renderer_state.get(key) {
@@ -1805,14 +1737,23 @@ fn renderer_probe_from_injected(value: &Value) -> Option<Value> {
 fn injection_message_from_probe(probe: Option<&Value>) -> Option<String> {
     let probe = probe?;
     for pointer in [
-        "/appServerPatch/error",
-        "/modules/use-host-config:request-bridge/error",
-        "/hostConfig/error",
+        "/dynamicConfigPatch/error",
+        "/fetchPatch/error",
     ] {
         if let Some(message) = probe.pointer(pointer).and_then(Value::as_str) {
             if !message.trim().is_empty() {
                 return Some(message.trim().to_owned());
             }
+        }
+    }
+    if let Some(last) = probe
+        .get("failures")
+        .and_then(Value::as_array)
+        .and_then(|failures| failures.last())
+        .and_then(Value::as_str)
+    {
+        if !last.trim().is_empty() {
+            return Some(last.trim().to_owned());
         }
     }
     None
@@ -2641,33 +2582,42 @@ mod tests {
         let script = renderer_inject_script(&catalog);
         assert!(script.contains("deepseek-v4-flash"));
         assert!(script.contains("deepseek-v4-pro"));
-        assert!(script.contains("list-models-for-host"));
-        assert!(script.contains("model-queries-"));
-        assert!(script.contains("use-host-config:request-bridge"));
-        assert!(script.contains("module && module.Vt"));
-        assert!(script.contains("Object.entries(module)"));
-        assert!(script.contains("diagnostic.exportName"));
-        assert!(script.contains("shortenSelectedModelButtonLabels"));
-        assert!(script.contains("message.method"));
-        assert!(script.contains("modelListResultLooksPatchable"));
-        assert!(script.contains("replaceModelContainerWithCatalog"));
-        assert!(script.contains("if (Array.isArray(result)) return catalogModelArray();"));
-        assert!(script.contains("const initialDiagnostic = await refresh(\"initial\");"));
+        assert!(script.contains("isModelListPayload"));
+        assert!(script.contains("codeseex-model-catalog-unlock-v3"));
+        assert!(script.contains("cleanupPreviousInjection"));
+        assert!(script.contains("stale-window-message-listener"));
+        assert!(script.contains("uninstallInjection"));
+        assert!(script.contains("injectionDelivered"));
+        assert!(script.contains("uninstallReason"));
+        assert!(script.contains("response.ok !== true"));
+        assert!(!script.contains("addEventListener(\"message\""));
+        assert!(!script.contains("patchMcpModelResponseData"));
+        assert!(script.contains("const initialDiagnostic = refresh(\"initial\");"));
         assert!(script.contains("return initialDiagnostic;"));
-        assert!(script.contains("assetProbe"));
-        assert!(script.contains("appServerPatch"));
-        assert!(script.contains("const result = await original(method, params, options);"));
-        assert!(script.contains("return patchAppServerModelResult(resolvedMethod, result);"));
-        assert!(script.contains("return patchAppServerModelResult(resolvedMethod, { data: [] });"));
-        assert!(script.contains("button,[role=\\\"button\\\"]"));
-        assert!(script.contains("replaceAll(pair.full, pair.short)"));
-        assert!(script.contains("scannedTriggers"));
         assert!(script.contains("if (patchModelArray(value.data, patchEmpty))"));
         assert!(script.contains("patchStatsigDynamicConfig"));
-        assert!(script.contains("patchModelAvailabilityValue"));
+        assert!(script.contains("patchDynamicConfigValue"));
+        assert!(script.contains("__codeseexStatsigTrapVersion"));
+        assert!(script.contains("installFetchPatch"));
+        // Teardown clears those sentinels, so a repeat injection really
+        // re-installs instead of silently reporting success.
+        assert!(script.contains("delete window.__codeseexModelFetchPatchVersion"));
+        assert!(script.contains("delete window.__codeseexStatsigTrapVersion"));
+        assert!(script.contains("fetchPatch"));
         assert!(script.contains("available_models"));
         assert!(script.contains("107580212"));
         assert!(script.contains("dynamicConfigPatch"));
+        // The boundary-crossing mechanisms must be gone entirely.
+        assert!(!script.contains("model-queries-"));
+        assert!(!script.contains("use-host-config"));
+        assert!(!script.contains("installAppServerPatch"));
+        assert!(!script.contains("patchAppServerClient"));
+        assert!(!script.contains("loadCodexAppModule"));
+        assert!(!script.contains("codexAppAssetUrl"));
+        assert!(!script.contains("shortenSelectedModelButtonLabels"));
+        assert!(!script.contains("Object.create"));
+        assert!(!script.contains("MutationObserver"));
+        assert!(!script.contains("createTreeWalker"));
         assert!(!script.contains("Response.prototype.json"));
         assert!(!script.contains("window.dispatchEvent ="));
         assert!(!script.contains("MODEL_DYNAMIC_CONFIG_NAMES"));
@@ -2683,31 +2633,28 @@ mod tests {
         let injected = json!({
             "renderer_state": {
                 "version": "codeseex-test",
-                "appServerPatch": {
-                    "attempted": true,
+                "dynamicConfigPatch": {
                     "installed": false,
-                    "error": "Codex App use-host-config request bridge sendRequest export not found"
+                    "error": "Codex statsig client not found"
                 },
-                "modules": {
-                    "use-host-config:request-bridge": {
-                        "loaded": true,
-                        "exportKeys": ["At", "Bt"]
-                    }
+                "fetchPatch": {
+                    "installed": true,
+                    "patchVersion": "codeseex-test"
                 },
-                "failures": ["bridge missing"]
+                "failures": ["statsig missing"]
             }
         });
 
         let probe = renderer_probe_from_injected(&injected).expect("renderer probe");
         assert_eq!(
             probe
-                .pointer("/appServerPatch/error")
+                .pointer("/dynamicConfigPatch/error")
                 .and_then(Value::as_str),
-            Some("Codex App use-host-config request bridge sendRequest export not found")
+            Some("Codex statsig client not found")
         );
         assert_eq!(
             injection_message_from_probe(Some(&probe)).as_deref(),
-            Some("Codex App use-host-config request bridge sendRequest export not found")
+            Some("Codex statsig client not found")
         );
         assert!(probe.get("ignored").is_none());
     }

@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.7.1" src="https://img.shields.io/badge/version-0.7.1-1f6feb">
+  <img alt="Version 0.8.0" src="https://img.shields.io/badge/version-0.8.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  A local Codex-native runtime for DeepSeek V4, built for real agent work rather than plain API forwarding.
+  A local Codex-native runtime that connects Codex Desktop to DeepSeek-compatible upstreams, built for real agent work rather than plain API forwarding.
 </p>
 
 <p align="center">
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.7.1`
+Current version: `0.8.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -48,7 +48,7 @@ CodeSeeX focuses on that hard part:
 
 - Preserve Codex-native semantics instead of treating every request as a normal chat message.
 - Keep tool execution observable, bounded, and replayable.
-- Prevent tool results, visible thinking, service requests, and full-context payloads from polluting later turns.
+- Prevent tool results, replayed reasoning, service requests, and full-context payloads from polluting later turns.
 - Show usage as user tasks and agent phases, not just a flat list of upstream API calls.
 - Provide a local desktop control plane for logs, settings, model catalog, balance checks, tools, and runtime state.
 
@@ -72,11 +72,15 @@ The result is a tool for people who want DeepSeek inside Codex without giving up
 
 ## What You Get
 
-- DeepSeek V4 models exposed to Codex as `deepseek-v4-pro` and `deepseek-v4-flash`.
+- DeepSeek V4 models exposed to Codex as `deepseek-v4-pro` and `deepseek-flash`.
 - Official DeepSeek endpoints use the native Responses API by default; Chat API compatibility is an explicit experimental fallback.
 - Image understanding and image generation are separate optional tools; DeepSeek Vision does not enter the main Codex model catalog.
 - Web Search can use the default CodeSeeX local backend or the separately selected DeepSeek official backend.
-- Requests that require CodeSeeX-owned local workspace, Vision, community, or local Web Search execution use the established Chat compatibility executor path; this ownership-based selection is diagnosed separately from upstream failure recovery.
+- CodeSeeX-hosted local tools such as local Web Search run inside the native Responses transport, so tool ownership never changes silently. A request that mixes provider-owned official search with a hosted tool fails closed and points you at Chat compatibility instead of choosing an owner for you.
+- Model list, aliases, capabilities, and pricing come from one versioned catalog document, resolved in layers: user overrides, the remote manifest `catalog/model-catalog.json`, a local cache, then the built-in document.
+- Catalog entries are typed `chat` or `billing_only` with a semantic `role`, so a pricing-only vision model is accounted for without being offered as a Codex model, and any model card can be locked to a fixed upstream.
+- Reasoning summary mirroring is configurable (`none`, `smart`, `fixed`, `full`) and only changes what Codex displays, never what CodeSeeX sends upstream.
+- Logs have a user/debug level, and the dashboard reports rolling 60-second RPM, TPM, and average latency.
 - Generated Codex TOML with machine-specific `model_catalog_json` and local `base_url`.
 - Embedded model catalog for first-run machines without a native Codex catalog.
 - 1M context metadata with a 95% effective context window for Flash and Pro.
@@ -153,7 +157,7 @@ The gallery below uses English UI sample data and real CodeSeeX/Codex screens.
 4. Copy the generated Codex TOML from the CodeSeeX adapter card.
 5. Put that TOML into the Codex configuration you use for DeepSeek.
 6. Restart Codex after changing TOML.
-7. Select `deepseek-v4-pro` or `deepseek-v4-flash` in Codex.
+7. Select `deepseek-v4-pro` or `deepseek-flash` in Codex.
 
 Prefer the generated TOML because the catalog path and local port are machine-specific.
 
@@ -170,9 +174,10 @@ wire_api = "responses"
 requires_openai_auth = true
 base_url = "http://127.0.0.1:8787/v1"
 
-# Optional: retarget the CodeSeeX upstream (defaults to the official DeepSeek API).
+# Optional: retarget the CodeSeeX upstream. Omit this table to use the
+# official DeepSeek API; CodeSeeX never writes the default value for you.
 [codeseex]
-upstream_base_url = "https://api.deepseek.com"
+upstream_base_url = "https://your-upstream.example/v1"
 ```
 
 The generated TOML pins the Flash model by default. To switch to the larger model, change:
@@ -185,9 +190,9 @@ model = "deepseek-v4-pro"
 
 The desktop app is the control plane for the local runtime:
 
-- Dashboard: proxy status, current port, balance, update status, and troubleshooting hints.
+- Dashboard: proxy status, current port, rolling 60-second RPM/TPM, average latency, balance, update status, and troubleshooting hints.
 - Usage: user-task-level records with model phases, tool phases, cache hit/miss, output, latency, and cost.
-- Logs: compact operational events and safe diagnostics.
+- Logs: compact operational events and safe diagnostics, with a user/debug level.
 - Settings: upstream URL (written into Codex's `config.toml`), model behavior, proxy mode, UI options, billing rates, and tools.
 - Adapter: generated Codex TOML and model catalog status.
 - Tools: built-in tool enablement, Web Search, separate image settings, and community tool discovery.
@@ -218,7 +223,7 @@ CodeSeeX is careful about:
 - service requests such as titles and ambient suggestions,
 - client tool handoffs,
 - tool result replay,
-- visible thinking display,
+- reasoning summary mirroring,
 - cache hit and miss accounting,
 - per-user-turn usage grouping.
 
@@ -226,14 +231,14 @@ This matters because a direct relay can appear to work while silently resending 
 
 ## Upstream And Models
 
-CodeSeeX exposes `deepseek-v4-pro` and `deepseek-v4-flash` to Codex through its generated catalog. The upstream URL is configured in Codex's own `config.toml`, next to the provider it complements:
+CodeSeeX exposes `deepseek-v4-pro` and `deepseek-flash` to Codex through its generated catalog. The upstream URL is configured in Codex's own `config.toml`, next to the provider it complements:
 
 ```toml
 [codeseex]
-upstream_base_url = "https://api.deepseek.com"  # omit to use the official DeepSeek API
+upstream_base_url = "https://your-upstream.example/v1"  # omit to use the official DeepSeek API
 ```
 
-The CodeSeeX settings page edits that key in place, so the address stays in Codex's own file. CodeSeeX re-reads it on the next settings save, and `DEEPSEEK_BASE_URL` still overrides it for automation.
+The CodeSeeX settings page edits that key in place, so the address stays in Codex's own file. CodeSeeX re-reads it when it builds the runtime snapshot and on the next settings save, and `DEEPSEEK_BASE_URL` still overrides it for automation. The credential source is explicit (`auto`, `request`, `env`, `codex_auth`, `secret`), and client identity headers are forwarded the way the client sent them.
 
 The local Codex endpoint remains under `http://127.0.0.1:8787/v1` by default. If you change the listen port, copy the generated TOML again and restart Codex.
 

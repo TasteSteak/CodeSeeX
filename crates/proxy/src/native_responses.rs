@@ -8,6 +8,7 @@
 //! copy remains authoritative for tool continuations.
 
 use crate::reasoning_summary::SummaryProjector;
+use crate::tools::response_items::ApplyPatchRepairTally;
 use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -140,11 +141,13 @@ pub(crate) fn native_tool_output_item(call: &NativeToolCall, output: impl Into<S
 ///
 /// The native transport forwards provider items, and Codex only executes the
 /// native `@@` grammar, so the repair Chat compatibility already applies has to
-/// run here too. Returns `true` when the payload changed.
-pub(crate) fn normalize_apply_patch_event_payload(payload: &mut Value) -> bool {
-    let mut repaired = false;
+/// run here too. The returned tally describes what changed.
+pub(crate) fn normalize_apply_patch_event_payload(
+    payload: &mut Value,
+) -> ApplyPatchRepairTally {
+    let mut tally = ApplyPatchRepairTally::default();
     if let Some(item) = payload.get_mut("item").filter(|item| item.is_object()) {
-        repaired |= normalize_apply_patch_item_input(item);
+        tally.merge(normalize_apply_patch_item_input(item));
     }
     let output = payload
         .get_mut("response")
@@ -152,32 +155,37 @@ pub(crate) fn normalize_apply_patch_event_payload(payload: &mut Value) -> bool {
         .and_then(Value::as_array_mut);
     if let Some(items) = output {
         for item in items.iter_mut() {
-            repaired |= normalize_apply_patch_item_input(item);
+            tally.merge(normalize_apply_patch_item_input(item));
         }
     }
-    repaired
+    tally
 }
 
-fn normalize_apply_patch_item_input(item: &mut Value) -> bool {
+fn normalize_apply_patch_item_input(item: &mut Value) -> ApplyPatchRepairTally {
+    let empty = ApplyPatchRepairTally::default();
     if item.get("type").and_then(Value::as_str) != Some("custom_tool_call")
         || item.get("name").and_then(Value::as_str) != Some("apply_patch")
     {
-        return false;
+        return empty;
     }
     let Some(input) = item.get("input").and_then(Value::as_str) else {
-        return false;
+        return empty;
     };
     let normalized =
         crate::tools::response_items::normalize_apply_patch_response_input_with_diagnostic(input);
     if normalized.input == input {
-        return false;
+        return empty;
     }
+    let tally = ApplyPatchRepairTally::from_normalization(&normalized);
     item["input"] = Value::String(normalized.input);
-    true
+    tally
 }
 
-/// Rewrites one provider SSE frame when it carries an `apply_patch` call.
-pub(crate) fn normalize_apply_patch_sse_frame(frame_text: &str) -> Option<Vec<u8>> {
+/// Rewrites one provider SSE frame when it carries an `apply_patch` call, and
+/// reports what the normalizer changed so the caller can record a diagnostic.
+pub(crate) fn normalize_apply_patch_sse_frame(
+    frame_text: &str,
+) -> Option<(Vec<u8>, ApplyPatchRepairTally)> {
     if !frame_text.contains("custom_tool_call") {
         return None;
     }
@@ -188,11 +196,12 @@ pub(crate) fn normalize_apply_patch_sse_frame(frame_text: &str) -> Option<Vec<u8
         .collect::<Vec<_>>()
         .join("\n");
     let mut payload = serde_json::from_str::<Value>(data.trim()).ok()?;
-    if !normalize_apply_patch_event_payload(&mut payload) {
+    let tally = normalize_apply_patch_event_payload(&mut payload);
+    if tally.is_empty() {
         return None;
     }
     let serialized = serde_json::to_string(&payload).ok()?;
-    Some(rewrite_sse_data_lines(frame_text, &serialized))
+    Some((rewrite_sse_data_lines(frame_text, &serialized), tally))
 }
 
 /// Repairs every `apply_patch` call in a buffered provider body. The body may be
@@ -212,7 +221,7 @@ pub(crate) fn normalize_apply_patch_sse_body(body: Vec<u8>) -> Vec<u8> {
             None => (part, ""),
         };
         match normalize_apply_patch_sse_frame(frame) {
-            Some(rewritten) => {
+            Some((rewritten, _tally)) => {
                 changed = true;
                 output.extend_from_slice(&rewritten);
                 output.extend_from_slice(delimiter.as_bytes());
@@ -322,7 +331,7 @@ pub(crate) fn plan_native_tools(
             // CodeSeeX-hosted local search is executed by the native hosted
             // tool loop; ownership never changes silently.
             requires_local_execution = true;
-        } else if is_codeseex_local_tool(name) {
+        } else if crate::tools::is_known_code_tool(name) {
             // Workspace tools (list_directory, read_file_range,
             // workspace_search, vision_analyze) are callable by the Codex
             // client itself, so a native request keeps them in the provider
@@ -810,18 +819,6 @@ fn tool_identity(definition: &Value) -> &str {
         .unwrap_or_default()
 }
 
-fn is_codeseex_local_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "web_search"
-            | "list_directory"
-            | "read_file_range"
-            | "workspace_search"
-            | "vision_analyze"
-            | "image_gen"
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeResponseTerminal {
     Completed,
@@ -1053,6 +1050,7 @@ pub(crate) struct NativeResponseSseRelay {
     reasoning_summary_mode: ReasoningSummaryMode,
     sequence_offset: u64,
     reasoning: ReasoningSummaryMirror,
+    apply_patch_repairs: ApplyPatchRepairTally,
 }
 
 impl NativeResponseSseRelay {
@@ -1066,6 +1064,7 @@ impl NativeResponseSseRelay {
             reasoning_summary_mode: ReasoningSummaryMode::default(),
             sequence_offset: 0,
             reasoning: ReasoningSummaryMirror::new(ReasoningSummaryMode::default()),
+            apply_patch_repairs: ApplyPatchRepairTally::default(),
         }
     }
 
@@ -1097,10 +1096,17 @@ impl NativeResponseSseRelay {
             // Codex only executes the native `@@` grammar, so an apply_patch call
             // is repaired before the frame is inspected and relayed; the client
             // executes this text and the retained group replays it upstream.
-            let frame = std::str::from_utf8(&frame)
-                .ok()
-                .and_then(normalize_apply_patch_sse_frame)
-                .unwrap_or(frame);
+            let normalized_frame =
+                std::str::from_utf8(&frame)
+                    .ok()
+                    .and_then(normalize_apply_patch_sse_frame);
+            let frame = match normalized_frame {
+                Some((rewritten, tally)) => {
+                    self.apply_patch_repairs.merge(tally);
+                    rewritten
+                }
+                None => frame,
+            };
             self.inspector.observe_bytes(&frame);
             self.inspector.observe_bytes(&delimiter);
             self.relay_frame(frame, delimiter, &mut ready);
@@ -1140,6 +1146,12 @@ impl NativeResponseSseRelay {
 
     pub(crate) fn inspection(&self) -> &NativeResponseStreamInspection {
         self.inspector.inspection()
+    }
+
+    /// Repair counts gathered while normalizing relayed frames, so the caller can
+    /// emit the same apply_patch diagnostic the Chat compatibility layer emits.
+    pub(crate) fn apply_patch_repairs(&self) -> ApplyPatchRepairTally {
+        self.apply_patch_repairs
     }
 
     fn relay_frame(&mut self, frame: Vec<u8>, delimiter: Vec<u8>, out: &mut Vec<Vec<u8>>) {
@@ -1822,7 +1834,9 @@ mod tests {
             }
         });
 
-        assert!(normalize_apply_patch_event_payload(&mut payload));
+        let tally = normalize_apply_patch_event_payload(&mut payload);
+        assert_eq!(tally.unified_hunk_headers, 1);
+        assert_eq!(tally.blank_context_lines, 0);
         let input = payload
             .pointer("/item/input")
             .and_then(Value::as_str)
@@ -1830,7 +1844,7 @@ mod tests {
         assert!(input.contains("@@\n"), "{input}");
         assert!(!input.contains("@@ -1,2 +1,2 @@"), "{input}");
         // A repaired payload is left alone on the next pass.
-        assert!(!normalize_apply_patch_event_payload(&mut payload));
+        assert!(normalize_apply_patch_event_payload(&mut payload).is_empty());
 
         // A completed response carries the same item inside `response.output`.
         let mut response = json!({
@@ -1842,7 +1856,7 @@ mod tests {
                 "input": "*** Begin Patch\n*** Update File: b.txt\n@@ -3 +3 @@\n-x\n+y\n*** End Patch"
             }]}
         });
-        assert!(normalize_apply_patch_event_payload(&mut response));
+        assert!(!normalize_apply_patch_event_payload(&mut response).is_empty());
         let input = response
             .pointer("/response/output/0/input")
             .and_then(Value::as_str)
@@ -1875,6 +1889,31 @@ mod tests {
             "{normalized}"
         );
         assert_eq!(normalized.matches("response.output_item.done").count(), 2);
+    }
+
+    /// The streaming relay has to hand the repair counts back to its caller,
+    /// otherwise the native transport can never report the diagnostic the Chat
+    /// path already reports.
+    #[test]
+    fn native_apply_patch_sse_relay_tallies_repairs() {
+        let mut relay = NativeResponseSseRelay::new("resp_local");
+        let frame = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"apply_patch\",\"call_id\":\"call_1\",\"input\":\"*** Begin Patch\\n*** Update File: a.txt\\n@@ -1,2 +1,2 @@\\n-old\\n+new\\n*** End Patch\"}}\n",
+            "\n"
+        );
+        assert!(relay.apply_patch_repairs().is_empty());
+        let frames = relay.relay_bytes(frame.as_bytes());
+        assert_eq!(relay.apply_patch_repairs().unified_hunk_headers, 1);
+        assert_eq!(relay.apply_patch_repairs().blank_context_lines, 0);
+        let relayed = String::from_utf8(frames.concat()).expect("relayed utf8");
+        assert!(!relayed.contains("@@ -1,2 +1,2 @@"), "{relayed}");
+
+        // A clean frame adds nothing.
+        relay.relay_bytes(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+        );
+        assert_eq!(relay.apply_patch_repairs().unified_hunk_headers, 1);
     }
 
     fn chat_function(name: &str) -> Value {

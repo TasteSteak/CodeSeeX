@@ -2,51 +2,55 @@
 
 ## 0.8.0 - 2026-09-13
 
-CodeSeeX 0.8.0 covers every change since 0.7.0: the upstream address moves into Codex's own `config.toml`, the catalog becomes the single source of model truth, and the proxy's defaults — transport, logging and feedback — are re-tuned for a resident client.
+This release reworks a large amount of underlying behaviour: the upstream address, model list, pricing and tool ownership collapse into a single source of truth, and the transport, logging and feedback are re-tuned for a resident client. The configuration, model-picking, usage-viewing and troubleshooting experience is improved, and the issues left over from earlier versions — the silently falling-back upstream, broken usage chains, rejected native tool declarations, apply_patch compatibility and silent unpriced billing — are fixed.
 
-### Highlights
+### Models and pricing
 
-- The upstream address now lives in Codex's `config.toml` as `[codeseex] upstream_base_url`. The settings field edits that file directly, the runtime resolves it on demand (so every entry point agrees), a pre-0.8.0 CodeSeeX-side value is migrated once, and the generated Codex TOML only pins the key when the user actually set one.
-- The model list, aliases, capabilities and prices are one versioned catalog document resolved in layers (user overrides → remote manifest → cache → built-in). The published manifest moves to `catalog/model-catalog.json` and now carries the real DeepSeek models and official CNY prices.
-- A catalog entry can be `billing_only`: still priced and still resolvable for a replay, but never offered for chat, pinning or the tray.
+- The model list, aliases, capabilities and prices are one versioned catalog document resolved in layers (user overrides → remote manifest → cache → built-in), so models and prices update without shipping a client.
+- The remote manifest is rechecked at startup, every six hours and on a manual refresh; any failure keeps the previous layer and never blocks the proxy.
+- The published manifest moved to `catalog/model-catalog.json` and now carries the real DeepSeek models and official CNY prices.
+- Catalog `kind` (`chat` | `billing_only`) and a semantic `role` (`chat` | `vision`): a billing-only entry is still priced and still resolvable for a replay, but never offered for chat, pinning or the tray.
+- Pricing resolves exact slug → rate group → explicit unpriced; peak/valley windows and multiplier have a single implementation shared by the store and the UI.
+
+### Upstream and transport
+
+- The upstream address lives in Codex's `config.toml` as `[codeseex] upstream_base_url`; the settings field edits that file directly, and the key is only written when the user actually set one.
 - Native Responses is the default and only implicit transport; the `auto` mode is gone.
-- The log page defaults to lifecycle and failures only. A `User` / `Debug` control in Settings brings the per-round diagnostics back, and transient feedback moved into a queued toast manager.
-- One user turn is one usage session: native tool handoffs are marked so intermediate replies stay inside their turn, and the dashboard reports live RPM / TPM alongside average latency.
-
-### Added
-
-- A toast manager for transient feedback: top-centre, whole row clickable to dismiss, at most three visible with the rest queued, one row per key (a repeat refreshes it and bumps a `×N` counter instead of stacking), and an overflow summary once the queue is full.
-- A log detail control in Settings → Client → Other: `User` keeps the log to necessary messages, `Debug` also shows the per-round bookkeeping. The events endpoint defaults to the user-facing set.
-- Dashboard throughput cards: RPM and TPM over a rolling 60-second window, plus average latency.
-- Catalog `kind` (`chat` | `billing_only`) and a semantic `role` (`chat` | `vision`), so capability defaults such as the vision model are data, not slugs in code.
-- Thinking-chain mirror modes: `none`, `smart`, `fixed`, `full`, configurable without changing what the upstream model receives.
-- Model pinning from the model card: hover a card to reveal a lock and pin that catalog model as the upstream, or unlock to follow the client.
-- A tray model menu that mirrors the active catalog instead of the built-in slugs.
+- The upstream credential source is explicit (`auto` / `request` / `env` / `codex_auth` / `secret`), client identity headers are passed through unchanged, and relays stop rejecting requests for a missing Codex identity.
 - Management endpoints for the catalog layer: `GET /api/catalog`, `POST /api/catalog/refresh`, `GET /api/upstream/probe`, `POST /api/upstream/test`, `POST /api/upstream/credential`.
 
-### Changed
+### Proxy runtime
 
-- The upstream URL source moved from CodeSeeX's own `config.toml` to Codex's `config.toml` (`[codeseex] upstream_base_url`); the settings page is an editor for that file.
-- Alias and outbound slug handling is fully catalog-driven; the hardcoded `gpt-5*` mapping is gone.
-- Settings were regrouped into Client (personalization, other), Proxy (connection, model behaviour) and Tools, and the web-search backend moved into the web-search tool card.
-- The log page no longer narrates every round trip: per-request and per-round bookkeeping carries a diagnostic audience, while warnings and errors are always shown.
-- Usage rows now come from every retained request — only the outgoing history is trimmed — so long turns keep their earlier rounds, groups are built in one pass, and the session revision is a small hash instead of a serialized payload.
-- The model list caps at three rows with scrolling, and billing-only entries are excluded from selection, pinning and the tray.
-- Pricing resolves exact slug → rate group → explicit unpriced; peak/valley windows and multiplier have a single implementation shared by the store and the UI.
-- Client identity headers are passed through unchanged, and the upstream credential source is explicit (`auto` / `request` / `env` / `codex_auth` / `secret`).
-
-### Fixed
-
-- The embedded desktop proxy silently fell back to the official DeepSeek endpoint, so a relay key 401'd on every request. The environment-only base constructor is now private, the Codex-side override resolves on demand, and existing installs migrate their old value automatically.
-- Image understanding follows the configured upstream and shares its credential instead of inventing a second one, forwards the client identity so relays stop rejecting it, and takes its default model from the catalog.
-- Usage accounting keeps a turn whole: native tool handoffs are marked so a turn is one session, a turn that ran longer than the old window still matches its own handoffs, and a failed round stays a failed row inside its turn.
-- Workspace scope and the full-access flag are only trusted from Codex-injected context, never from tool output; log summaries run through the same redaction as the model-facing path; a credential store that cannot be read is no longer reported as "not configured".
-- The chat-compatibility stream's usage scan is bounded like the native relay, so an upstream that never delimits a frame can no longer grow the buffer without limit.
-- The catalog layer is reported truthfully (`builtin` / `cache` / `remote`), `[model] thinking` is resolved once instead of re-read per request, and an unspecified model request resolves to the catalog default on every path.
+- apply_patch input is normalized on both transports: a legacy unified range header becomes a bare `@@`, a whitespace-only context line is repaired, and the repair is reported as an `apply_patch_input_micro_repair_diagnostic` event.
 - Native Responses continuations no longer fail on grouped tool declarations, on a repeated namespace after a Codex App restart, or on a tool schema built only from a top-level union; the repairs are recorded in the event log.
-- Unpriced models are never silently billed at the Pro rate, and the settings page states the unpriced case explicitly.
+- The log page defaults to lifecycle and failures only; a `User` / `Debug` control brings the per-round bookkeeping back, and the events endpoint defaults to the user-facing set.
+- The chat-compatibility stream's usage scan is bounded like the native relay, so an upstream that never delimits a frame can no longer grow the buffer without limit.
 
-### Compatibility Notes
+### Tools
+
+- Tool ownership has one authoritative source: the built-in tool list, alias normalization and the "who executes this" decision are defined once instead of being copied per transport.
+- An upstream-native `web_search` declaration is executed inside the native transport instead of switching to Chat compatibility, so tool ownership never changes silently.
+- Workspace scope and the full-access flag are only trusted from Codex-injected context, never from tool output.
+
+### Usage and logs
+
+- One user turn is one usage session: native tool handoffs are marked so intermediate replies stay inside their turn, and a failed round stays a failed row inside its turn.
+- Usage rows come from every retained request — only the outgoing history is trimmed — so long turns keep their earlier rounds; groups are built in one pass and the session revision is a small hash.
+- Dashboard throughput cards: RPM and TPM over a rolling 60-second window, plus average latency.
+
+### Client UI
+
+- Settings were regrouped into Client (personalization, other), Proxy (connection, model behaviour) and Tools, and the web-search backend moved into the web-search tool card.
+- A toast manager for transient feedback: top-centre, whole row clickable to dismiss, at most three visible with the rest queued, one row per key with a `×N` counter, and an overflow summary once the queue is full.
+- Model pinning from the model card, and a model list that caps at three rows with scrolling.
+- Thinking-chain mirror modes: `none`, `smart`, `fixed`, `full`, configurable without changing what the upstream model receives.
+
+### Codex App integration
+
+- Launch Codex with or without injection: the no-injection mode never touches the renderer, and an installed injection can be removed at any time without restarting Codex.
+- A tray model menu that mirrors the active catalog instead of the built-in slugs.
+
+### Migration and compatibility
 
 - The CodeSeeX-side `[upstream] base_url` is gone. On first load, a value found there is written into Codex's `config.toml` as `[codeseex] upstream_base_url`; after that the Codex file is authoritative. `DEEPSEEK_BASE_URL` still overrides both.
 - `transport = "auto"` in an existing file still loads (as native Responses) but is never written back; an unset transport is the default.

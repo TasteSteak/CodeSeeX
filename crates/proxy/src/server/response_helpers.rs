@@ -338,6 +338,38 @@ pub(super) async fn record_apply_patch_input_micro_repair_diagnostic(
         .await;
 }
 
+/// Native-transport twin of `record_apply_patch_input_micro_repair_diagnostic`.
+/// The native path normalizes provider items inside the relay, so it hands the
+/// repair counts here instead of a Chat tool call. The event type and the
+/// `repair_kind` vocabulary stay identical so both transports read the same way.
+pub(super) async fn record_apply_patch_input_micro_repairs(
+    store: &Store,
+    response_id: &str,
+    tally: crate::tools::response_items::ApplyPatchRepairTally,
+) {
+    let repair_kind = match (tally.unified_hunk_headers > 0, tally.blank_context_lines > 0) {
+        (true, true) => "unified_hunk_header_and_blank_context_line",
+        (true, false) => "unified_hunk_header",
+        (false, true) => "blank_update_hunk_context_line",
+        (false, false) => return,
+    };
+    let _ = store
+        .record_event(
+            "info",
+            "apply_patch_input_micro_repair_diagnostic",
+            "CodeSeeX repaired apply_patch hunk input.",
+            Some(&json!({
+                "id": response_id,
+                "tool_name": "apply_patch",
+                "transport": "native_responses",
+                "repair_kind": repair_kind,
+                "unified_hunk_headers_repaired": tally.unified_hunk_headers,
+                "blank_context_lines_repaired": tally.blank_context_lines,
+            })),
+        )
+        .await;
+}
+
 pub(super) fn native_apply_patch_client_tool_sse_events(
     response_id: &str,
     call: &ChatToolCall,

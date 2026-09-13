@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.7.1" src="https://img.shields.io/badge/version-0.7.1-1f6feb">
+  <img alt="Version 0.8.0" src="https://img.shields.io/badge/version-0.8.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  面向 Codex 与 DeepSeek V4 的本地原生 Agent Runtime，而不是普通 API 转发器。
+  把 Codex Desktop 连接到 DeepSeek 兼容上游的本地原生 Agent Runtime，而不是普通 API 转发器。
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
   非官方项目，和 Codex、OpenAI、DeepSeek、图像服务及搜索服务商均无隶属关系。请使用你自己的凭据，并遵守相关服务条款。
 </p>
 
-CodeSeeX 通过本地 `/v1` 适配器把 Codex Desktop 连接到 DeepSeek 兼容上游。它的目标不是简单把一个 HTTP API 转成另一个 HTTP API，而是在 Codex Agent 边界处理请求语义、工具调用、上下文回放、推理展示、网络搜索、本地文件操作、用量统计和桌面管理。
+CodeSeeX 通过本地 `/v1` 适配器把 Codex Desktop 连接到 DeepSeek 兼容上游。它的目标不是简单把一个 HTTP API 转成另一个 HTTP API，而是在 Codex Agent 边界处理请求语义、工具调用、上下文回放、思考链镜像、网络搜索、本地文件操作、用量统计和桌面管理。
 
 CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.7.1`
+当前版本：`0.8.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -48,7 +48,7 @@ CodeSeeX 关注的是这部分工程问题：
 
 - 保留 Codex 原生语义，而不是把所有请求都当成普通聊天。
 - 让工具执行过程可观测、可限制、可回放。
-- 避免工具结果、可见 thinking、服务请求和 full-context payload 污染后续上下文。
+- 避免工具结果、回放的思考链、服务请求和 full-context payload 污染后续上下文。
 - 按用户任务和 Agent 阶段展示用量，而不是只给出一串上游 API 调用记录。
 - 提供本地桌面控制面，用于日志、设置、模型目录、余额、工具和运行状态管理。
 
@@ -72,11 +72,15 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 
 ## 你会得到什么
 
-- 在 Codex 中使用 DeepSeek V4 模型：`deepseek-v4-pro` 和 `deepseek-v4-flash`。
+- 在 Codex 中使用 DeepSeek V4 模型：`deepseek-v4-pro` 和 `deepseek-flash`。
 - 官方 DeepSeek endpoint 默认使用原生 Responses，Chat API 兼容模式仅作为实验性、用户主动选择的回退。
 - 图像理解与图像生成是两个独立可选工具；DeepSeek Vision 不会加入 Codex 主模型 catalog。
 - Web Search 可使用默认的 CodeSeeX 本地后端，也可以独立选择 DeepSeek 官方后端。
-- 需要 CodeSeeX 本地 workspace、Vision、社区工具或本地 Web Search 执行器的请求，会使用成熟的 Chat 兼容执行路径；这种按工具归属选择的路径会单独记录诊断，不等同于上游失败回退。
+- CodeSeeX 托管的本地工具（例如本地 Web Search）在原生 Responses 链路内执行，工具归属不会被静默改变；当一次请求同时混入上游官方的 web search 与托管工具时，CodeSeeX 会直接失败并提示改用 Chat 兼容模式，而不是替你二选一。
+- 模型清单、别名、能力与定价来自同一份带版本的目录文档，按「用户覆盖 → 远程清单 → 本地缓存 → 内置文档」分层解析。
+- 目录条目区分 `chat` 与 `billing_only`，并带有语义化 `role`：只计费的识图模型会照常计价，但不会作为 Codex 模型提供；任意模型卡片都可以上锁，固定为指定上游。
+- 思考链镜像支持 `none` / `smart` / `fixed` / `full`，只改变 Codex 的显示，不改变发给上游的内容。
+- 日志区分用户与调试两档，仪表盘提供滚动 60 秒的 RPM、TPM 和平均延迟。
 - 自动生成 Codex TOML，包含机器相关的 `model_catalog_json` 和本地 `base_url`。
 - 内置模型目录，用于首次运行或缺少原生 Codex catalog 的环境。
 - Flash 与 Pro 的 1M context 元数据和 95% effective context window。
@@ -153,7 +157,7 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 4. 从 CodeSeeX 的 Adapter 卡片复制生成的 Codex TOML。
 5. 将该 TOML 放入你用于 DeepSeek 的 Codex 配置中。
 6. 修改 TOML 后重启 Codex。
-7. 在 Codex 中选择 `deepseek-v4-pro` 或 `deepseek-v4-flash`。
+7. 在 Codex 中选择 `deepseek-v4-pro` 或 `deepseek-flash`。
 
 建议优先使用应用内生成的 TOML，因为 catalog 路径和本地端口都和当前机器有关。
 
@@ -170,9 +174,10 @@ wire_api = "responses"
 requires_openai_auth = true
 base_url = "http://127.0.0.1:8787/v1"
 
-# 可选：改写 CodeSeeX 上游地址（默认使用官方 DeepSeek API）。
+# 可选：改写 CodeSeeX 上游地址。省略整段即使用官方 DeepSeek API；
+# CodeSeeX 不会替你写入默认值。
 [codeseex]
-upstream_base_url = "https://api.deepseek.com"
+upstream_base_url = "https://your-upstream.example/v1"
 ```
 
 生成的 TOML 默认固定为 Flash 模型。要切换到更大的模型，改为：
@@ -185,9 +190,9 @@ model = "deepseek-v4-pro"
 
 桌面应用是本地 Runtime 的控制面：
 
-- Dashboard：代理状态、当前端口、余额、更新状态和故障排查提示。
+- Dashboard：代理状态、当前端口、滚动 60 秒 RPM/TPM、平均延迟、余额、更新状态和故障排查提示。
 - Usage：按用户任务展示模型阶段、工具阶段、缓存命中/未命中、输出、耗时和费用。
-- Logs：紧凑运行日志和安全诊断。
+- Logs：紧凑运行日志和安全诊断，并区分用户与调试两档。
 - Settings：上游 URL（写入 Codex 的 `config.toml`）、模型行为、代理模式、UI 选项、计费单价和工具设置。
 - Adapter：生成 Codex TOML 并展示模型目录状态。
 - Tools：内置工具开关、Web Search、独立图像设置和 community tool discovery。
@@ -218,7 +223,7 @@ CodeSeeX 会重点处理：
 - 标题和 ambient suggestions 等服务请求，
 - client tool handoff，
 - 工具结果 replay，
-- 可见 thinking 展示，
+- 思考链镜像，
 - cache hit / cache miss 统计，
 - 按用户 turn 聚合用量。
 
@@ -226,14 +231,14 @@ CodeSeeX 会重点处理：
 
 ## 上游与模型
 
-CodeSeeX 通过生成的 catalog 向 Codex 暴露 `deepseek-v4-pro` 和 `deepseek-v4-flash`。上游地址改在 Codex 自己的 `config.toml` 中配置，紧挨它服务的 provider：
+CodeSeeX 通过生成的 catalog 向 Codex 暴露 `deepseek-v4-pro` 和 `deepseek-flash`。上游地址改在 Codex 自己的 `config.toml` 中配置，紧挨它服务的 provider：
 
 ```toml
 [codeseex]
-upstream_base_url = "https://api.deepseek.com"  # 省略则使用官方 DeepSeek API
+upstream_base_url = "https://your-upstream.example/v1"  # 省略则使用官方 DeepSeek API
 ```
 
-CodeSeeX 设置页会就地编辑该键，地址仍保存在 Codex 自己的文件里。下次保存设置时 CodeSeeX 会重新读取，`DEEPSEEK_BASE_URL` 环境变量仍可覆盖它，用于自动化。
+CodeSeeX 设置页会就地编辑该键，地址仍保存在 Codex 自己的文件里。CodeSeeX 在构建运行时快照与下次保存设置时都会重新读取；`DEEPSEEK_BASE_URL` 环境变量仍可覆盖它，用于自动化。凭据来源是显式的（`auto` / `request` / `env` / `codex_auth` / `secret`），客户端身份请求头按原样转发给上游。
 
 默认本地 Codex endpoint 是 `http://127.0.0.1:8787/v1`。如果修改监听端口，请重新复制生成的 TOML 并重启 Codex。
 
