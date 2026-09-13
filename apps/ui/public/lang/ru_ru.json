@@ -366,7 +366,6 @@
   "reasoningSummaryMode_full": "Полный",
   "modelLockPin": "Закрепить как модель провайдера",
   "modelLockClear": "Снять закрепление и следовать за клиентом",
-  "modelKindBillingOnly": "Только тариф",
   "toolVisionAnalyzeName": "Понимание изображений",
   "toolVisionAnalyzeDescription": "Анализируйте изображения через DeepSeek Vision или пользовательский OpenAI-совместимый endpoint.",
   "toolVisionGenerateName": "Генерация изображений",

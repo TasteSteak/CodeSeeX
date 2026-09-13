@@ -366,7 +366,6 @@
   "reasoningSummaryMode_full": "全文",
   "modelLockPin": "上流モデルとして固定",
   "modelLockClear": "固定を解除してクライアントに従う",
-  "modelKindBillingOnly": "課金のみ",
   "toolVisionAnalyzeName": "画像理解",
   "toolVisionAnalyzeDescription": "DeepSeek Visionまたは独自のOpenAI互換エンドポイントで画像を解析します。",
   "toolVisionGenerateName": "画像生成",

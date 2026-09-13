@@ -366,7 +366,6 @@
   "reasoningSummaryMode_full": "Complet",
   "modelLockPin": "Épingler comme modèle amont",
   "modelLockClear": "Détacher et suivre le modèle du client",
-  "modelKindBillingOnly": "Facturation seule",
   "toolVisionAnalyzeName": "Compréhension d'image",
   "toolVisionAnalyzeDescription": "Analyser les images avec DeepSeek Vision ou un endpoint compatible OpenAI personnalisé.",
   "toolVisionGenerateName": "Génération d'images",

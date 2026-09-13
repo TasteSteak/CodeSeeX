@@ -366,7 +366,6 @@
   "reasoningSummaryMode_full": "전체",
   "modelLockPin": "업스트림 모델로 고정",
   "modelLockClear": "고정을 해제하고 클라이언트 따르기",
-  "modelKindBillingOnly": "과금 전용",
   "toolVisionAnalyzeName": "이미지 이해",
   "toolVisionAnalyzeDescription": "DeepSeek Vision 또는 사용자 지정 OpenAI 호환 엔드포인트로 이미지를 분석합니다.",
   "toolVisionGenerateName": "이미지 생성",

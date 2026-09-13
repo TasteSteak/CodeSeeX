@@ -4850,14 +4850,6 @@ function renderBillingModelList(models) {
       badgeEl.textContent = badge;
       head.append(badgeEl);
     }
-    if (isBillingOnlyModel(model)) {
-      // Pricing-only entries are visible so their rate can be edited, but they
-      // are not models: the label keeps that readable, and no lock is offered.
-      const kindEl = document.createElement("span");
-      kindEl.className = "billing-model-badge is-muted";
-      kindEl.textContent = t("modelKindBillingOnly");
-      head.append(kindEl);
-    }
     card.append(head);
     const slug = String(model.slug || "").trim();
     if (slug) {

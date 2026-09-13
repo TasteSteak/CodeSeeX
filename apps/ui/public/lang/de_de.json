@@ -366,7 +366,6 @@
   "reasoningSummaryMode_full": "Vollständig",
   "modelLockPin": "Als Upstream-Modell festlegen",
   "modelLockClear": "Festlegung aufheben und dem Client folgen",
-  "modelKindBillingOnly": "Nur Abrechnung",
   "toolVisionAnalyzeName": "Bildverständnis",
   "toolVisionAnalyzeDescription": "Bilder mit DeepSeek Vision oder einem eigenen OpenAI-kompatiblen Endpoint analysieren.",
   "toolVisionGenerateName": "Bilderzeugung",

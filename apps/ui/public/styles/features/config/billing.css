@@ -45,8 +45,6 @@
 .billing-model-meta .muted { font-size: 12px; line-height: 1.35; }
 .billing-model-badge { flex: none; display: inline-flex; align-items: center; min-height: 24px; padding: 3px 9px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--hover-bg); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; transition: var(--theme-transition); }
 .billing-model-badge.is-warn { color: var(--warn); background: var(--warn-badge-bg); border-color: transparent; }
-/* Pricing-only entries: visible so their rate can be edited, marked as not a model. */
-.billing-model-badge.is-muted { color: var(--text-muted); background: transparent; border-style: dashed; font-weight: 600; }
 .billing-card-badges { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .billing-row { display: grid; grid-template-columns: 1fr; gap: 8px; width: 100%; }
 .billing-field { display: grid; grid-template-columns: minmax(112px, 1fr) minmax(76px, 88px) auto; align-items: center; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); overflow: hidden; transition: var(--theme-transition); }
