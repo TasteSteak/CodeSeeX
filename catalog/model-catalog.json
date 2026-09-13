@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "0.7.1.4",
+  "revision": "0.8.0.1",
   "issued_at": "2026-09-13T00:00:00Z",
   "min_app_version": "0.7.1",
   "provider_name": "DeepSeek",
@@ -162,7 +162,7 @@
     }
   ],
   "pricing": {
-    "revision": "0.7.1.4",
+    "revision": "0.8.0.1",
     "currency": "CNY",
     "unit": "per_1m_tokens",
     "peak_valley": {

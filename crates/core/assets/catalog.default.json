@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "0.7.1.4",
+  "revision": "0.8.0.1",
   "provider_name": "DeepSeek",
   "default_model": "deepseek-flash",
   "models": [
@@ -160,7 +160,7 @@
     }
   ],
   "pricing": {
-    "revision": "0.7.1.4",
+    "revision": "0.8.0.1",
     "currency": "CNY",
     "unit": "per_1m_tokens",
     "peak_valley": {
