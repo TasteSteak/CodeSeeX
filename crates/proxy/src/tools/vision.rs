@@ -26,7 +26,6 @@ pub(crate) const GENERATE_MODEL_KEY: &str = "VISION_GENERATE_MODEL";
 pub(crate) const ANALYZE_API_KEY_KEY: &str = "VISION_ANALYZE_API_KEY";
 pub(crate) const GENERATE_API_KEY_KEY: &str = "VISION_GENERATE_API_KEY";
 pub(crate) const API_KEY_KEY: &str = "VISION_API_KEY";
-const DEEPSEEK_VISION_ENDPOINT: &str = "https://api.deepseek.com/responses";
 
 const MAX_IMAGE_REFERENCES: usize = 4;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -546,7 +545,10 @@ fn deepseek_vision_model(app_config: &AppConfig) -> String {
 
 fn vision_upstream_request_url(app_config: &AppConfig) -> String {
     codeseex_core::urls::responses_url(&app_config.upstream.base_url)
-        .unwrap_or_else(|_| DEEPSEEK_VISION_ENDPOINT.to_owned())
+        // Resolving the empty base yields the official endpoint, so no literal
+        // endpoint lives in the code.
+        .or_else(|_| codeseex_core::urls::responses_url(""))
+        .unwrap_or_default()
 }
 
 /// Resolves the credential for the default image understanding backend the same
@@ -2057,7 +2059,7 @@ mod tests {
             ..Default::default()
         };
         let vision = VisionAnalyzeConfig::load(&config).expect("official vision config");
-        assert_eq!(vision.request_url, DEEPSEEK_VISION_ENDPOINT);
+        assert_eq!(vision.request_url, "https://api.deepseek.com/responses");
         assert_eq!(vision.api_key, "sk-test");
     }
 

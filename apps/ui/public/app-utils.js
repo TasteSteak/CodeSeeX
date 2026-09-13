@@ -1,7 +1,3 @@
-function escapeHtml(value) {
-  return String(value || "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[ch]);
-}
-
 function formatCost(value) {
   const amount = Number(value) || 0;
   return "CNY " + amount.toFixed(4);

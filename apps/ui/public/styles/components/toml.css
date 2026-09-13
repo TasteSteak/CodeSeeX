@@ -8,9 +8,6 @@
 .config-toml-title p { color: var(--text-muted); font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.35; word-break: break-all; transition: var(--theme-transition); }
 .config-toml-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .config-toml-actions .btn-icon-label { min-height: 32px; padding: 7px 11px; font-size: 12px; }
-.copy-status { color: var(--success); font-size: 12px; font-weight: 700; min-height: 1em; transition: var(--theme-transition); }
-.config-toml-actions .copy-status { margin-left: 0; white-space: nowrap; }
-.copy-status.warning { color: var(--danger); }
 .catalog-notice { margin: 10px 12px 0; padding: 9px 10px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--hover-bg); color: var(--text-secondary); font-size: 12px; line-height: 1.45; transition: var(--theme-transition); }
 .catalog-notice[hidden] { display: none; }
 .catalog-notice.is-warning, .catalog-notice.is-repaired { border-color: var(--warn); background: var(--warn-badge-bg); color: var(--text-main); }
