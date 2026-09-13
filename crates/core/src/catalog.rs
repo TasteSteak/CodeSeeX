@@ -78,6 +78,40 @@ pub struct Catalog {
     pub models: Vec<CatalogModel>,
 }
 
+/// What a catalog entry is for, taken from the document's `kind` key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CatalogModelKind {
+    /// A model a client can select and chat with.
+    #[default]
+    Chat,
+    /// Pricing data only: no client sees it as a model.
+    BillingOnly,
+}
+
+impl CatalogModelKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::BillingOnly => "billing_only",
+        }
+    }
+
+    /// An absent or unrecognised kind stays a chat model, so a document written
+    /// for this version keeps working with an older reader.
+    fn from_value(value: Option<&Value>) -> Self {
+        let kind = value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        match kind.as_deref() {
+            Some("billing_only") | Some("billing") | Some("pricing") | Some("pricing_only") => {
+                Self::BillingOnly
+            }
+            _ => Self::Chat,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogModel {
     pub slug: String,
@@ -242,6 +276,11 @@ fn catalog_from_seed_and_document(
     }
     let mut models = Vec::with_capacity(document.models.len());
     for document_model in &document.models {
+        // Pricing-only entries never reach Codex's model list: they are not
+        // chat models, and they do not have to satisfy the Codex model contract.
+        if document_model.is_billing_only() {
+            continue;
+        }
         let mut model = document_model.clone();
         if let Some(seed_model) = seed
             .models
@@ -962,6 +1001,19 @@ impl CatalogDocument {
 }
 
 impl CatalogModel {
+    /// What this entry is for.
+    ///
+    /// `BillingOnly` entries exist so usage can still be priced - a retired or
+    /// specialised upstream model keeps appearing in someone's history - without
+    /// CodeSeeX offering it as a model anyone can chat with or pin.
+    pub fn kind(&self) -> CatalogModelKind {
+        CatalogModelKind::from_value(self.extra.get("kind"))
+    }
+
+    pub fn is_billing_only(&self) -> bool {
+        self.kind() == CatalogModelKind::BillingOnly
+    }
+
     pub fn aliases(&self) -> impl Iterator<Item = &str> {
         self.extra
             .get("aliases")
@@ -1334,18 +1386,68 @@ mod tests {
         assert!(slugs.contains(&"deepseek-v4-pro"));
     }
 
-    /// The names DeepSeek retired are still accepted by the API (billed as
-    /// Flash), so a client that asks for one keeps resolving to that model.
+    /// A `billing_only` entry is priced but never offered: it stays out of the
+    /// Codex model list while still resolving for a replay and for usage pricing.
+    #[test]
+    fn billing_only_entries_are_priced_but_not_offered() {
+        let mut document = embedded_catalog_document();
+        let mut vision = document.model("deepseek-flash").cloned().expect("flash model");
+        vision.slug = "deepseek-v4-flash-vision-exp".to_owned();
+        vision.display_name = "DeepSeek V4 Flash Vision".to_owned();
+        vision
+            .extra
+            .insert("kind".to_owned(), Value::String("billing_only".to_owned()));
+        document.models.push(vision);
+
+        let vision = document
+            .model("deepseek-v4-flash-vision-exp")
+            .expect("vision entry");
+        assert_eq!(vision.kind(), CatalogModelKind::BillingOnly);
+        assert_eq!(
+            document.upstream_slug_for("deepseek-v4-flash-vision-exp"),
+            "deepseek-v4-flash"
+        );
+        assert!(document
+            .pricing
+            .rate_for("deepseek-v4-flash-vision-exp", None)
+            .is_some());
+
+        let catalog = build_codeseex_catalog_from_document(&document);
+        assert!(
+            !catalog
+                .models
+                .iter()
+                .any(|model| model.slug == "deepseek-v4-flash-vision-exp"),
+            "a pricing-only entry must not reach Codex's model list"
+        );
+        let listed =
+            app_server_model_list_from_catalog(&catalog, AppServerModelListParams::default());
+        assert!(!listed
+            .data
+            .iter()
+            .any(|model| model.id == "deepseek-v4-flash-vision-exp"));
+    }
+
+    /// The names DeepSeek retired stay usable: the plain Flash name is an alias
+    /// of the current model, the retired vision name is its own pricing-only
+    /// entry, and both reach the same upstream model.
     #[test]
     fn retired_model_names_still_resolve() {
         let document = embedded_catalog_document();
-        for requested in ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
-            let model = document
-                .model_for_request(requested)
-                .unwrap_or_else(|| panic!("{requested} must resolve"));
-            assert_eq!(model.slug, "deepseek-flash");
-            assert_eq!(model.upstream_slug_or_slug(), "deepseek-v4-flash");
-        }
+
+        let flash = document
+            .model_for_request("deepseek-v4-flash")
+            .expect("the legacy flash name must resolve");
+        assert_eq!(flash.slug, "deepseek-flash");
+        assert_eq!(flash.upstream_slug_or_slug(), "deepseek-v4-flash");
+
+        let vision = document
+            .model_for_request("deepseek-v4-flash-vision-exp")
+            .expect("the legacy vision name must resolve");
+        assert_eq!(vision.slug, "deepseek-v4-flash-vision-exp");
+        assert!(vision.is_billing_only());
+        assert_eq!(vision.upstream_slug_or_slug(), "deepseek-v4-flash");
+
         assert_eq!(
             document.upstream_slug_for("deepseek-v4-flash"),
             "deepseek-v4-flash"

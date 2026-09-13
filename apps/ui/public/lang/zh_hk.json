@@ -366,6 +366,7 @@
   "reasoningSummaryMode_full": "完整",
   "modelLockPin": "鎖定為上游模型",
   "modelLockClear": "取消鎖定，回到跟隨用戶端",
+  "modelKindBillingOnly": "僅計費",
   "toolVisionAnalyzeName": "圖像理解",
   "toolVisionAnalyzeDescription": "使用 DeepSeek Vision 或自訂 OpenAI 相容圖像理解端點分析圖片。",
   "toolVisionGenerateName": "圖像生成",

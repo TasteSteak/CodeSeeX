@@ -146,6 +146,10 @@ impl CatalogService {
                     .rate_for(&model.slug, model.pricing_group().as_deref());
                 json!({
                     "slug": model.slug,
+                    // `chat` or `billing_only`: the settings list shows a
+                    // pricing-only entry, but it is never a model to select or
+                    // pin, and Codex never sees it.
+                    "kind": model.kind().label(),
                     "display_name": model.display_name,
                     "short_display_name": model.extra.get("short_display_name").cloned().unwrap_or(Value::Null),
                     "description": model.description,

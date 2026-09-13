@@ -4850,6 +4850,14 @@ function renderBillingModelList(models) {
       badgeEl.textContent = badge;
       head.append(badgeEl);
     }
+    if (isBillingOnlyModel(model)) {
+      // Pricing-only entries are visible so their rate can be edited, but they
+      // are not models: the label keeps that readable, and no lock is offered.
+      const kindEl = document.createElement("span");
+      kindEl.className = "billing-model-badge is-muted";
+      kindEl.textContent = t("modelKindBillingOnly");
+      head.append(kindEl);
+    }
     card.append(head);
     const slug = String(model.slug || "").trim();
     if (slug) {
@@ -4892,8 +4900,15 @@ const MODEL_LOCK_ICON =
 /// list long before the whole config payload is rendered again.
 function upstreamModelChoices() {
   return catalogModels()
+    // A pricing-only entry is not a model anyone can pin or chat with.
+    .filter((model) => !isBillingOnlyModel(model))
     .map((model) => String(model && model.slug ? model.slug : "").trim())
     .filter(Boolean);
+}
+
+/// Whether a catalog entry exists for pricing only (`kind: "billing_only"`).
+function isBillingOnlyModel(model) {
+  return String((model && model.kind) || "chat").trim().toLowerCase() === "billing_only";
 }
 
 /// The lock reads as part of the badge above it, so it is centred on the badge's

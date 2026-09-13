@@ -934,7 +934,12 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<Menu
             .checked(pinned.is_none())
             .build(manager)?,
     ];
-    for catalog_model in config.catalog_document().models.iter() {
+    for catalog_model in config
+        .catalog_document()
+        .models
+        .iter()
+        .filter(|model| !model.is_billing_only())
+    {
         model_items.push(
             CheckMenuItemBuilder::with_id(
                 format!("tray:model:{}", catalog_model.slug),

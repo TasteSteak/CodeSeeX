@@ -319,6 +319,7 @@
   "reasoningSummaryMode_full": "Complete",
   "modelLockPin": "Pin as upstream model",
   "modelLockClear": "Unpin and follow the client model",
+  "modelKindBillingOnly": "Pricing only",
   "toolApplyPatchName": "Apply Patch",
   "toolApplyPatchDescription": "Native Codex patch editor for precise file changes. This system tool follows Codex settings.",
   "toolWebSearchName": "Web Search",
