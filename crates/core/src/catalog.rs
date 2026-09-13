@@ -1871,9 +1871,12 @@ mod tests {
         let snippet = codex_toml_snippet(
             Path::new("C:/Users/test/.codeseex/model-catalog.json"),
             "http://127.0.0.1:8787/v1",
-            "https://api.deepseek.com",
+            "",
         );
         assert!(snippet.contains("model_catalog_json"));
         assert!(snippet.contains("http://127.0.0.1:8787/v1"));
+        // The official endpoint is the default: an unset upstream keeps the
+        // generated TOML free of a redundant [codeseex] table.
+        assert!(!snippet.contains("[codeseex]"));
     }
 }

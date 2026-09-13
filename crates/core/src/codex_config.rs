@@ -48,12 +48,25 @@ pub fn write_upstream_base_url(value: &str) -> io::Result<bool> {
 }
 
 /// Format-preserving upsert of `[codeseex] upstream_base_url` in `path`.
+///
+/// A blank value removes the key, and so does the official endpoint: it is the
+/// default, so pinning it would only add a redundant line to Codex's config.
 pub fn upsert_upstream_base_url(path: &Path, value: &str) -> io::Result<bool> {
     let text = fs::read_to_string(path).unwrap_or_default();
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut document = text.parse::<DocumentMut>().map_err(io::Error::other)?;
 
-    let desired = value.trim();
+    let trimmed = value.trim();
+    let normalized = if trimmed.is_empty() {
+        String::new()
+    } else {
+        crate::urls::normalize_base_url(trimmed)
+    };
+    let desired = if normalized == crate::urls::normalize_base_url("") {
+        ""
+    } else {
+        normalized.as_str()
+    };
     let current = document
         .get(TABLE)
         .and_then(|item| item.get(UPSTREAM_KEY))
@@ -81,14 +94,42 @@ pub fn upsert_upstream_base_url(path: &Path, value: &str) -> io::Result<bool> {
         if table_is_empty {
             document.remove(TABLE);
         }
-    } else {
-        document[TABLE][UPSTREAM_KEY] = toml_edit::value(desired);
+        let mut output = document.to_string();
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        write_atomic(path, &output)?;
+        return Ok(true);
     }
 
-    let mut output = document.to_string();
+    if document.get(TABLE).is_some() {
+        // The table already exists somewhere in the file: update it where it is.
+        document[TABLE][UPSTREAM_KEY] = toml_edit::value(desired);
+        let mut output = document.to_string();
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        write_atomic(path, &output)?;
+        return Ok(true);
+    }
+
+    // Brand-new table: place it next to the Codex provider it complements rather
+    // than appending after whatever tables the user keeps below.
+    let block = codeseex_table_block(desired);
+    let offset = codeseex_insert_offset(text);
+    let mut output = String::with_capacity(text.len() + block.len() + 4);
+    output.push_str(&text[..offset]);
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output.push_str(&block);
     if !output.ends_with('\n') {
         output.push('\n');
     }
+    output.push_str(&text[offset..]);
+    // The spliced text must still parse before it replaces the file.
+    output.parse::<DocumentMut>().map_err(io::Error::other)?;
     write_atomic(path, &output)?;
     Ok(true)
 }
@@ -97,6 +138,48 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     let temp = path.with_extension("toml.codeseex.tmp");
     fs::write(&temp, text)?;
     fs::rename(&temp, path)
+}
+
+/// Serialized `[codeseex]` table for `value`, produced by the same editor that
+/// formats an in-place update so quoting and spacing always match.
+fn codeseex_table_block(value: &str) -> String {
+    let literal = toml_edit::value(value)
+        .as_value()
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    format!("[{TABLE}]\n{UPSTREAM_KEY} = {literal}\n")
+}
+
+/// Where a brand-new `[codeseex]` table belongs.
+///
+/// Appending at the end of the file is wrong: a user's config can keep hundreds
+/// of unrelated tables after their provider block. The override goes right after
+/// the last `[model_providers.*]` table it complements; without one it goes after
+/// the top-level keys, before the first table header.
+fn codeseex_insert_offset(text: &str) -> usize {
+    let mut offset = 0usize;
+    let mut first_table: Option<usize> = None;
+    let mut provider_end: Option<usize> = None;
+    let mut inside_provider = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with('[') {
+            if first_table.is_none() {
+                first_table = Some(offset);
+            }
+            if inside_provider {
+                provider_end = Some(offset);
+                inside_provider = false;
+            }
+            if line.trim_start().starts_with("[model_providers.") {
+                inside_provider = true;
+            }
+        }
+        offset += line.len();
+    }
+    if inside_provider {
+        provider_end = Some(text.len());
+    }
+    provider_end.or(first_table).unwrap_or(text.len())
 }
 
 #[cfg(test)]
@@ -151,6 +234,13 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("# keep me"));
         assert!(text.contains("[projects.'c:\\work']"));
+        // No provider table: the override lands after the top-level keys, before
+        // the first table, not at the end of the file.
+        assert!(
+            text.find("upstream_base_url").expect("upstream key")
+                < text.find("[projects.'c:\\work']").expect("projects table"),
+            "{text}"
+        );
         assert_eq!(
             read_upstream_base_url_from(&path).as_deref(),
             Some("https://relay.example.com/v1")
@@ -164,6 +254,46 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(!text.contains("[codeseex]"));
         assert!(text.contains("# keep me"));
+
+        // The official endpoint is the default, so it is never written either.
+        assert!(!upsert_upstream_base_url(&path, "https://api.deepseek.com").expect("official"));
+        assert!(!std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("[codeseex]"));
+        // A path on the official host normalises to the same default.
+        assert!(!upsert_upstream_base_url(&path, "https://api.deepseek.com/v1").expect("official v1"));
+        assert!(!std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("[codeseex]"));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap_or(Path::new(".")));
+    }
+
+    /// A brand-new table goes next to the Codex provider it complements, not at
+    /// the end of a file that keeps unrelated tables below.
+    #[test]
+    fn upsert_places_the_new_table_after_the_provider_block() {
+        let path = temp_config("placement");
+        std::fs::write(
+            &path,
+            "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"DeepSeek\"\nbase_url = \"http://127.0.0.1:8787/v1\"\n\n[projects.'c:\\work']\ntrust_level = \"trusted\"\n",
+        )
+        .expect("write");
+
+        assert!(upsert_upstream_base_url(&path, "https://relay.example.com/v1").expect("upsert"));
+        let text = std::fs::read_to_string(&path).expect("read");
+        let provider = text.find("[model_providers.custom]").expect("provider table");
+        let codeseex = text.find("[codeseex]").expect("codeseex table");
+        let projects = text.find("[projects.'c:\\work']").expect("projects table");
+        assert!(provider < codeseex && codeseex < projects, "{text}");
+        assert!(
+            text.contains("base_url = \"http://127.0.0.1:8787/v1\""),
+            "{text}"
+        );
+        assert_eq!(
+            read_upstream_base_url_from(&path).as_deref(),
+            Some("https://relay.example.com/v1")
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap_or(Path::new(".")));
     }
