@@ -223,16 +223,18 @@ pub(crate) fn native_web_search_call_item(call_id: &str, arguments: &str) -> Val
     })
 }
 
-/// `true` for the search items CodeSeeX presents on the client's behalf. They
-/// carry the provider call id CodeSeeX replaced, so the provider must never see
-/// them again: the retained hosted round is its only record of the search.
+/// `true` for the search items CodeSeeX presents on the client's behalf, so the
+/// provider never sees them again: the retained hosted round is its only record
+/// of the search.
+///
+/// The test is deliberately type-only. Codex re-serialises these items from its
+/// own model, which keeps `action` but drops the provider `call_id`, so a
+/// `call_id` test would let the echo through. Recognising the type is safe here
+/// because this predicate is only consulted on a CodeSeeX-local search turn,
+/// where the provider never produces a hosted `web_search_call` of its own.
 pub(crate) fn is_codeseex_presented_web_search_item(item: &Value) -> bool {
     match item.get("type").and_then(Value::as_str) {
-        Some("web_search_call_output") => true,
-        Some("web_search_call") => item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty()),
+        Some("web_search_call") | Some("web_search_call_output") => true,
         _ => false,
     }
 }
@@ -553,12 +555,13 @@ mod tests {
             "the CodeSeeX-only output item must never be replayed upstream"
         );
         assert!(
-            !is_codeseex_presented_web_search_item(&json!({
-                "id": "ws_provider",
+            is_codeseex_presented_web_search_item(&json!({
+                "id": "ws_echoed",
                 "type": "web_search_call",
-                "status": "completed"
+                "status": "completed",
+                "action": { "type": "search", "query": "probe" }
             })),
-            "a provider-hosted search item must keep passing through"
+            "the client echoes the item without the provider call id, so the presented shape must be recognized by type alone"
         );
         assert!(!is_codeseex_presented_web_search_item(&json!({
             "type": "function_call",

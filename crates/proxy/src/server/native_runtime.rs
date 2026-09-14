@@ -4011,6 +4011,44 @@ mod tests {
     }
 
     #[test]
+    fn an_echoed_search_item_is_withheld_from_upstream() {
+        // Codex echoes the presented search item from its own model, which keeps
+        // `action` but drops the provider `call_id`. Forwarding it makes the
+        // provider reject the whole turn with `missing field queries`, so the
+        // replayed payload must never carry it.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                { "role": "user", "content": [{ "type": "input_text", "text": "ping" }] },
+                {
+                    "type": "web_search_call",
+                    "id": "ws_echoed",
+                    "status": "completed",
+                    "action": { "type": "search", "query": "probe" }
+                },
+                { "type": "function_call_output", "call_id": "call_shell", "output": "ok" }
+            ]
+        });
+
+        let upstream = native_upstream_payload(&payload);
+        let items = upstream["input"].as_array().expect("input array");
+
+        assert_eq!(items.len(), 2, "the echoed search item must be dropped");
+        assert!(
+            items
+                .iter()
+                .all(|item| item.get("type").and_then(Value::as_str) != Some("web_search_call")),
+            "no presented search item may reach the provider"
+        );
+        assert!(
+            items.iter().any(
+                |item| item.get("type").and_then(Value::as_str) == Some("function_call_output")
+            ),
+            "the client's own tool output must survive the strip"
+        );
+    }
+
+    #[test]
     fn a_dual_shaped_reasoning_item_reaches_upstream_as_the_providers_own_shape() {
         // The client copy carries both shapes: the provider's `reasoning_text`
         // and the summary Codex renders. Upstream must see only the provider's.
