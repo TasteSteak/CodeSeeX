@@ -11,13 +11,35 @@ use scraper::{ElementRef, Html, Selector};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use super::text::{char_count, clean_visible_text, truncate_chars};
+use super::sanitize::sanitize_block_text;
+use super::text::{char_count, clean_code_text, clean_visible_text, truncate_chars};
+
+/// What kind of page text a block holds. The kind selects both the text
+/// pipeline (code keeps its layout) and the payload rule it is held to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BlockKind {
+    Prose,
+    Code,
+    TableRow,
+}
+
+impl BlockKind {
+    fn clean(self, text: &str) -> String {
+        match self {
+            BlockKind::Code => clean_code_text(text),
+            BlockKind::Prose | BlockKind::TableRow => clean_visible_text(text),
+        }
+    }
+}
 
 /// A single readable block of a page.
 #[derive(Clone, Debug)]
 pub(super) struct TextBlock {
     pub(super) heading_path: String,
     pub(super) text: String,
+    pub(super) kind: BlockKind,
+    /// Absolute link targets this block pointed at, deduplicated and bounded.
+    pub(super) links: Vec<String>,
     pub(super) link_ratio: f64,
     pub(super) weight: f64,
     pub(super) boilerplate: bool,
@@ -61,6 +83,11 @@ const CONTENT_BLOCK_TAGS: &[&str] = &[
     "caption",
 ];
 const HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+/// Tags whose text must keep its own line breaks and indentation.
+const CODE_TAGS: &[&str] = &["pre", "kbd", "samp", "textarea"];
+/// Longest link target kept per block, and how many are kept per block.
+const MAX_BLOCK_LINKS: usize = 6;
+const MAX_BLOCK_LINK_CHARS: usize = 300;
 /// Tags whose text is emitted as its own block.
 const EMIT_TAGS: &[&str] = &[
     "body",
@@ -92,25 +119,29 @@ const NOISE_TAGS: &[&str] = &[
     "aside", "header", "footer", "form", "dialog", "select", "button", "head",
 ];
 
-pub(super) fn html_to_document(html: &str) -> ExtractedDocument {
+pub(super) fn html_to_document(html: &str, base_url: Option<&str>) -> ExtractedDocument {
     let document = Html::parse_document(&redact_inline_data_urls(html));
     let title = document_title(&document);
     let mut blocks = Vec::new();
     let root = document.root_element();
     let mut headings: HeadingStack = Vec::new();
-    walk_element(root, &mut headings, &mut blocks);
+    walk_element(root, base_url, &mut headings, &mut blocks);
     if blocks.is_empty() {
         // A DOM that produced nothing readable still has raw text; fall back to
         // the body's own text so tiny fragments are not silently dropped.
         let fallback = clean_visible_text(&visible_text(root));
         if !fallback.is_empty() {
-            blocks.push(TextBlock {
-                heading_path: String::new(),
-                link_ratio: 0.0,
-                weight: 0.5,
-                boilerplate: false,
-                text: fallback,
-            });
+            if let Some(block) = build_block(
+                BlockKind::Prose,
+                String::new(),
+                fallback,
+                Vec::new(),
+                0.0,
+                "p",
+                &ElementHints::default(),
+            ) {
+                blocks.push(block);
+            }
         }
     }
     let stats = summarize_blocks(&blocks);
@@ -125,16 +156,17 @@ pub(super) fn plain_text_to_document(text: &str) -> ExtractedDocument {
     let mut blocks = Vec::new();
     for paragraph in text.split("\n\n") {
         let cleaned = clean_visible_text(paragraph);
-        if cleaned.is_empty() {
-            continue;
+        if let Some(block) = build_block(
+            BlockKind::Prose,
+            String::new(),
+            cleaned,
+            Vec::new(),
+            0.0,
+            "p",
+            &ElementHints::default(),
+        ) {
+            blocks.push(block);
         }
-        blocks.push(TextBlock {
-            heading_path: String::new(),
-            link_ratio: 0.0,
-            weight: block_weight("p", "", &cleaned, 0.0),
-            boilerplate: false,
-            text: cleaned,
-        });
     }
     let stats = summarize_blocks(&blocks);
     ExtractedDocument {
@@ -144,44 +176,68 @@ pub(super) fn plain_text_to_document(text: &str) -> ExtractedDocument {
     }
 }
 
-pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
+pub(super) fn markdown_to_document(markdown: &str, base_url: Option<&str>) -> ExtractedDocument {
     let mut blocks = Vec::new();
     let mut headings: HeadingStack = Vec::new();
     let mut paragraph = String::new();
+    let mut paragraph_links: Vec<String> = Vec::new();
+    let mut code = String::new();
     let mut in_code = false;
     for line in markdown.replace("\r\n", "\n").replace('\r', "\n").lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            flush_paragraph(&mut paragraph, &mut blocks, &headings);
+            flush_paragraph(&mut paragraph, &mut paragraph_links, &mut blocks, &headings);
             in_code = !in_code;
+            if !in_code {
+                // One block for the whole fence keeps indentation and line
+                // structure together.
+                push_block(
+                    BlockKind::Code,
+                    &headings,
+                    std::mem::take(&mut code),
+                    Vec::new(),
+                    0.0,
+                    "pre",
+                    &ElementHints::default(),
+                    &mut blocks,
+                );
+            }
             continue;
         }
         if in_code {
-            blocks.push(TextBlock {
-                heading_path: heading_path(&headings),
-                link_ratio: 0.0,
-                weight: 1.0,
-                boilerplate: false,
-                text: line.trim_end().to_owned(),
-            });
+            code.push_str(line.trim_end());
+            code.push('\n');
             continue;
         }
         if let Some(level) = markdown_heading_level(trimmed) {
-            flush_paragraph(&mut paragraph, &mut blocks, &headings);
+            flush_paragraph(&mut paragraph, &mut paragraph_links, &mut blocks, &headings);
             let text = clean_visible_text(trimmed.trim_start_matches('#'));
             apply_heading(&mut headings, level, text);
             continue;
         }
         if trimmed.is_empty() {
-            flush_paragraph(&mut paragraph, &mut blocks, &headings);
+            flush_paragraph(&mut paragraph, &mut paragraph_links, &mut blocks, &headings);
             continue;
         }
         if !paragraph.is_empty() {
             paragraph.push(' ');
         }
         paragraph.push_str(trimmed);
+        collect_markdown_links(trimmed, base_url, &mut paragraph_links);
     }
-    flush_paragraph(&mut paragraph, &mut blocks, &headings);
+    flush_paragraph(&mut paragraph, &mut paragraph_links, &mut blocks, &headings);
+    if !code.trim().is_empty() {
+        push_block(
+            BlockKind::Code,
+            &headings,
+            std::mem::take(&mut code),
+            Vec::new(),
+            0.0,
+            "pre",
+            &ElementHints::default(),
+            &mut blocks,
+        );
+    }
     let stats = summarize_blocks(&blocks);
     ExtractedDocument {
         title: blocks
@@ -193,19 +249,43 @@ pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
     }
 }
 
-fn flush_paragraph(paragraph: &mut String, blocks: &mut Vec<TextBlock>, headings: &HeadingStack) {
+fn flush_paragraph(
+    paragraph: &mut String,
+    links: &mut Vec<String>,
+    blocks: &mut Vec<TextBlock>,
+    headings: &HeadingStack,
+) {
     let cleaned = clean_visible_text(paragraph);
     paragraph.clear();
-    if cleaned.is_empty() {
+    let links = dedupe_links(std::mem::take(links));
+    push_block(
+        BlockKind::Prose,
+        headings,
+        cleaned,
+        links,
+        0.0,
+        "p",
+        &ElementHints::default(),
+        blocks,
+    );
+}
+
+/// Collects inline markdown link targets (`[text](url)`) resolved absolutely.
+fn collect_markdown_links(line: &str, base_url: Option<&str>, output: &mut Vec<String>) {
+    let Some(base_url) = base_url else {
         return;
+    };
+    let mut rest = line;
+    while let Some(open) = rest.find("](") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find(')') else {
+            break;
+        };
+        if let Some(url) = resolve_link(&after[..close], base_url) {
+            output.push(url);
+        }
+        rest = &after[close + 1..];
     }
-    blocks.push(TextBlock {
-        heading_path: heading_path(headings),
-        link_ratio: 0.0,
-        weight: block_weight("p", "", &cleaned, 0.0),
-        boilerplate: false,
-        text: cleaned,
-    });
 }
 
 /// Active section path: each entry carries its heading level so a sibling
@@ -239,6 +319,7 @@ fn markdown_heading_level(line: &str) -> Option<usize> {
 
 fn walk_element(
     element: ElementRef<'_>,
+    base_url: Option<&str>,
     headings: &mut HeadingStack,
     blocks: &mut Vec<TextBlock>,
 ) -> bool {
@@ -248,6 +329,7 @@ fn walk_element(
     }
     let hints = element_hints(element);
     let mut buffer = String::new();
+    let mut buffer_links: Vec<String> = Vec::new();
     let mut emitted = false;
     for child in element.children() {
         match child.value() {
@@ -256,24 +338,71 @@ fn walk_element(
                 let Some(child_element) = ElementRef::wrap(child.clone()) else {
                     continue;
                 };
+                let child_tag = child_element.value().name();
                 // A heading updates the section path for everything that
                 // follows it. It is not published as a block of its own: the
                 // rendering already shows the path, so emitting the text too
                 // would repeat the heading on every section.
-                if let Some(level) = heading_level(child_element.value().name()) {
-                    push_buffer(&mut buffer, tag, &hints, headings, blocks);
+                if let Some(level) = heading_level(child_tag) {
+                    push_buffer(
+                        &mut buffer,
+                        &mut buffer_links,
+                        tag,
+                        &hints,
+                        headings,
+                        blocks,
+                    );
                     let text = clean_visible_text(&child_element.text().collect::<String>());
                     apply_heading(headings, level, text);
                     emitted = true;
                     continue;
                 }
-                if walk_element(child_element, headings, blocks) {
-                    push_buffer(&mut buffer, tag, &hints, headings, blocks);
+                // A table row is one unit: its cells read as columns instead of
+                // becoming unrelated blocks.
+                if child_tag == "tr" {
+                    push_buffer(
+                        &mut buffer,
+                        &mut buffer_links,
+                        tag,
+                        &hints,
+                        headings,
+                        blocks,
+                    );
+                    let cells = child_element
+                        .select(&selector_or("td, th"))
+                        .map(|cell| clean_visible_text(&cell.text().collect::<String>()))
+                        .filter(|cell| !cell.is_empty())
+                        .collect::<Vec<_>>();
+                    if !cells.is_empty() {
+                        push_block(
+                            BlockKind::TableRow,
+                            headings,
+                            cells.join(" | "),
+                            links_of(child_element, base_url),
+                            element_link_ratio(child_element),
+                            "tr",
+                            &element_hints(child_element),
+                            blocks,
+                        );
+                    }
                     emitted = true;
-                } else if !NOISE_TAGS.contains(&child_element.value().name()) {
+                    continue;
+                }
+                if walk_element(child_element, base_url, headings, blocks) {
+                    push_buffer(
+                        &mut buffer,
+                        &mut buffer_links,
+                        tag,
+                        &hints,
+                        headings,
+                        blocks,
+                    );
+                    emitted = true;
+                } else if !NOISE_TAGS.contains(&child_tag) {
                     // A container that produced no block of its own is folded
                     // into its parent, but never carries noise-subtree text.
                     buffer.push_str(&visible_text(child_element));
+                    buffer_links.extend(links_of(child_element, base_url));
                 }
             }
             _ => {}
@@ -284,10 +413,28 @@ fn walk_element(
     let is_emit_point = EMIT_TAGS.contains(&tag);
     if has_text && (is_emit_point || emitted) {
         let link_ratio = element_link_ratio(element);
-        push_text_block(buffer, tag, &hints, link_ratio, headings, blocks);
+        push_block(
+            kind_for_tag(tag),
+            headings,
+            buffer,
+            dedupe_links(buffer_links),
+            link_ratio,
+            tag,
+            &hints,
+            blocks,
+        );
         emitted = true;
     }
     emitted
+}
+
+/// Code keeps its layout; everything else is cleaned as flowing text.
+fn kind_for_tag(tag: &str) -> BlockKind {
+    if CODE_TAGS.contains(&tag) {
+        BlockKind::Code
+    } else {
+        BlockKind::Prose
+    }
 }
 
 /// Heading level for `h1`-`h6`, `None` for anything else.
@@ -302,42 +449,143 @@ fn heading_level(tag: &str) -> Option<usize> {
 
 fn push_buffer(
     buffer: &mut String,
+    links: &mut Vec<String>,
     tag: &str,
     hints: &ElementHints,
     headings: &HeadingStack,
     blocks: &mut Vec<TextBlock>,
 ) {
     let text = std::mem::take(buffer);
-    if text.trim().is_empty() {
-        return;
-    }
-    push_text_block(text, tag, hints, 0.0, headings, blocks);
+    let text_links = dedupe_links(std::mem::take(links));
+    push_block(
+        kind_for_tag(tag),
+        headings,
+        text,
+        text_links,
+        0.0,
+        tag,
+        hints,
+        blocks,
+    );
 }
 
-fn push_text_block(
-    text: String,
+/// Cleans, sanitizes, scores, and stores one block. This is the only place a
+/// block is created, so every path shares the same text and payload rules.
+#[allow(clippy::too_many_arguments)]
+fn push_block(
+    kind: BlockKind,
+    headings: &HeadingStack,
+    raw_text: String,
+    links: Vec<String>,
+    link_ratio: f64,
     tag: &str,
     hints: &ElementHints,
-    link_ratio: f64,
-    headings: &HeadingStack,
     blocks: &mut Vec<TextBlock>,
 ) {
-    let text = clean_visible_text(&text);
-    if text.is_empty() {
-        return;
+    let cleaned = kind.clean(&raw_text);
+    if let Some(block) = build_block(
+        kind,
+        heading_path(headings),
+        cleaned,
+        links,
+        link_ratio,
+        tag,
+        hints,
+    ) {
+        blocks.push(block);
+    }
+}
+
+fn build_block(
+    kind: BlockKind,
+    heading_path: String,
+    cleaned: String,
+    links: Vec<String>,
+    link_ratio: f64,
+    tag: &str,
+    hints: &ElementHints,
+) -> Option<TextBlock> {
+    if cleaned.trim().is_empty() {
+        return None;
+    }
+    let text = sanitize_block_text(&cleaned, kind);
+    if text.trim().is_empty() {
+        return None;
     }
     let boilerplate = hints.boilerplate;
-    blocks.push(TextBlock {
-        heading_path: heading_path(headings),
-        weight: if boilerplate {
-            0.0
-        } else {
-            block_weight(tag, &hints.keywords, &text, link_ratio)
-        },
-        link_ratio,
-        boilerplate,
+    let mut weight = if boilerplate {
+        0.0
+    } else {
+        block_weight(tag, &hints.keywords, &text, link_ratio)
+    };
+    // Code is the reason a reader opened the page, so it is never treated as
+    // furniture just because it is short.
+    if kind == BlockKind::Code {
+        weight = (weight + 0.5).min(2.0);
+    }
+    Some(TextBlock {
+        heading_path,
         text,
-    });
+        kind,
+        links,
+        link_ratio,
+        weight,
+        boilerplate,
+    })
+}
+
+/// Link targets of a subtree, resolved to absolute http(s) URLs.
+fn links_of(element: ElementRef<'_>, base_url: Option<&str>) -> Vec<String> {
+    let Some(base_url) = base_url else {
+        return Vec::new();
+    };
+    let mut links = Vec::new();
+    // An inline `<a>` is usually handed to us as the element itself rather than
+    // as a subtree, so check the element before looking at its descendants.
+    if element.value().name() == "a" {
+        if let Some(url) = element
+            .value()
+            .attr("href")
+            .and_then(|href| resolve_link(href, base_url))
+        {
+            links.push(url);
+        }
+    }
+    links.extend(
+        element
+            .select(&selector_or("a[href]"))
+            .filter_map(|anchor| anchor.value().attr("href"))
+            .filter_map(|href| resolve_link(href, base_url)),
+    );
+    links
+}
+
+fn resolve_link(href: &str, base_url: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || href.starts_with('#') {
+        return None;
+    }
+    let base = reqwest::Url::parse(base_url).ok()?;
+    let resolved = base.join(href).ok()?;
+    matches!(resolved.scheme(), "http" | "https")
+        .then(|| truncate_chars(resolved.as_str(), MAX_BLOCK_LINK_CHARS))
+}
+
+fn dedupe_links(links: Vec<String>) -> Vec<String> {
+    let mut output: Vec<String> = Vec::new();
+    for link in links {
+        if output.len() >= MAX_BLOCK_LINKS {
+            break;
+        }
+        if !output.iter().any(|existing| existing == &link) {
+            output.push(link);
+        }
+    }
+    output
+}
+
+fn selector_or(selector: &str) -> Selector {
+    Selector::parse(selector).expect("static selector")
 }
 
 #[derive(Default)]
@@ -511,6 +759,8 @@ fn summarize_blocks(blocks: &[TextBlock]) -> ExtractionStats {
 pub(super) struct SelectedBlock {
     pub(super) heading_path: String,
     pub(super) text: String,
+    pub(super) kind: BlockKind,
+    pub(super) links: Vec<String>,
     /// Number of page blocks skipped between this block and the previous one.
     pub(super) skipped_blocks: usize,
     pub(super) skipped_chars: usize,
@@ -579,30 +829,55 @@ pub(super) fn select_blocks(
     // any non-trivial block so the budget buys new information instead of the
     // same sentence again.
     let mut seen: HashSet<String> = HashSet::new();
+    // Code is the reason a reader opens a technical page, so it gets a share of
+    // the budget before the remaining blocks compete for what is left. The
+    // share is a floor, not a ceiling: unused code budget flows back.
+    let code_reserve = budget.saturating_mul(3) / 5;
+    let mut code_used = 0usize;
+    let mut admits = |index: usize,
+                      used: &mut usize,
+                      seen: &mut HashSet<String>,
+                      chosen: &mut Vec<(usize, usize)>,
+                      is_code_pass: bool|
+     -> bool {
+        if *used >= budget {
+            return false;
+        }
+        let block = &blocks[index];
+        if block.boilerplate || block.weight < 0.5 {
+            return false;
+        }
+        if is_code_pass && (block.kind != BlockKind::Code || code_used >= code_reserve) {
+            return false;
+        }
+        if let Some(signature) = repeated_block_signature(&block.text) {
+            if !seen.insert(signature) {
+                return false;
+            }
+        }
+        let length = char_count(&block.text);
+        let remaining = budget - *used;
+        if length > remaining {
+            // Keep a partial slice rather than dropping a long, relevant block.
+            chosen.push((index, remaining));
+            *used = budget;
+        } else {
+            chosen.push((index, length));
+            *used += length;
+        }
+        if block.kind == BlockKind::Code {
+            code_used += length.min(remaining);
+        }
+        true
+    };
+    for index in order.iter().copied() {
+        admits(index, &mut used, &mut seen, &mut chosen, true);
+    }
     for index in order {
         if used >= budget {
             break;
         }
-        let block = &blocks[index];
-        if block.boilerplate || block.weight < 0.5 {
-            continue;
-        }
-        let signature = repeated_block_signature(&block.text);
-        if let Some(signature) = signature {
-            if !seen.insert(signature) {
-                continue;
-            }
-        }
-        let length = char_count(&block.text);
-        let remaining = budget - used;
-        if length > remaining {
-            // Keep a partial slice rather than dropping a long, relevant block.
-            chosen.push((index, remaining));
-            used = budget;
-            continue;
-        }
-        chosen.push((index, length));
-        used += length;
+        admits(index, &mut used, &mut seen, &mut chosen, false);
     }
     chosen.sort_by_key(|(index, _)| *index);
 
@@ -641,6 +916,12 @@ pub(super) fn select_blocks(
         kept_chars += char_count(&text);
         selected.push(SelectedBlock {
             heading_path: block.heading_path.clone(),
+            kind: block.kind,
+            links: if keep >= char_count(&block.text) {
+                block.links.clone()
+            } else {
+                Vec::new()
+            },
             text,
             skipped_blocks,
             skipped_chars,
@@ -799,7 +1080,7 @@ mod tests {
               <main><article><p>Primary documentation content.</p></article></main>
               <footer>FOOTER_NOISE</footer>
             </body></html>"#;
-        let document = html_to_document(html);
+        let document = html_to_document(html, None);
         let text = document
             .blocks
             .iter()
@@ -818,7 +1099,7 @@ mod tests {
     #[test]
     fn preserves_angle_brackets_inside_code() {
         let html = "<html><body><p>Compare a &lt; b and x &lt;&lt; 2.</p></body></html>";
-        let document = html_to_document(html);
+        let document = html_to_document(html, None);
         let text = document
             .blocks
             .iter()
@@ -831,9 +1112,100 @@ mod tests {
     }
 
     #[test]
+    fn code_blocks_keep_their_line_structure_and_indentation() {
+        let html = r#"<html><body>
+            <p>Install it:</p>
+            <pre><code>fn main() {
+    let x = 1;
+    if x &lt; 2 {
+        println!("{}", x);
+    }
+}</code></pre>
+        </body></html>"#;
+        let document = html_to_document(html, None);
+        let code = document
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::Code)
+            .expect("a code block");
+
+        assert_eq!(
+            code.text,
+            "fn main() {\n    let x = 1;\n    if x < 2 {\n        println!(\"{}\", x);\n    }\n}"
+        );
+        assert_eq!(document.stats.blocks_total, 2);
+    }
+
+    #[test]
+    fn a_table_row_reads_as_one_row_of_columns() {
+        let html = r#"<html><body><table>
+            <tr><th>Flag</th><th>Meaning</th></tr>
+            <tr><td>--json</td><td>emit JSON</td></tr>
+        </table></body></html>"#;
+        let document = html_to_document(html, None);
+        let rows = document
+            .blocks
+            .iter()
+            .filter(|block| block.kind == BlockKind::TableRow)
+            .map(|block| block.text.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rows, vec!["Flag | Meaning", "--json | emit JSON"]);
+    }
+
+    #[test]
+    fn block_links_are_resolved_absolutely_and_bounded() {
+        let html = r#"<html><body><p>See <a href="/docs/a">A</a> and <a href="https://example.com/b">B</a>.</p></body></html>"#;
+        let document = html_to_document(html, Some("https://example.com/guide/"));
+        let links = &document.blocks[0].links;
+
+        assert_eq!(
+            links,
+            &vec![
+                "https://example.com/docs/a".to_owned(),
+                "https://example.com/b".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn resource_payloads_never_reach_block_text() {
+        let html = r#"<html><body>
+            <p>Logo: <img src="data:image/png;base64,AAAABBBBCCCC" alt="logo"> inline data:text/plain;base64,DDDDEEEE tail.</p>
+            <pre>const blob = "AAAAAAAABBBBBBBB"</pre>
+        </body></html>"#;
+        let document = html_to_document(html, None);
+        let all = document
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!all.contains("base64,AAAA"), "{all}");
+        assert!(!all.contains("base64,DDDD"), "{all}");
+        assert!(all.contains("Logo"), "{all}");
+        // The short literal inside the code block is legitimate content.
+        assert!(all.contains("const blob"), "{all}");
+    }
+
+    #[test]
+    fn markdown_code_keeps_its_fence_contents_together() {
+        let markdown = "# Run\n\n```bash\ncargo test \\\n  --workspace\n```\n";
+        let document = markdown_to_document(markdown, None);
+        let code = document
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::Code)
+            .expect("a code block");
+
+        assert_eq!(code.text, "cargo test \\\n  --workspace");
+    }
+
+    #[test]
     fn headings_set_the_section_path_without_repeating_the_heading() {
         let html = "<html><body><h2>Install</h2><p>Use rustup.</p><h2>Usage</h2><p>Run cargo.</p></body></html>";
-        let document = html_to_document(html);
+        let document = html_to_document(html, None);
         let blocks = document
             .blocks
             .iter()
@@ -854,7 +1226,7 @@ mod tests {
     fn inline_links_stay_inside_their_paragraph() {
         let html =
             r#"<html><body><p>Read the <a href="/docs">install guide</a> first.</p></body></html>"#;
-        let document = html_to_document(html);
+        let document = html_to_document(html, None);
 
         assert_eq!(document.blocks.len(), 1);
         assert!(document.blocks[0].text.contains("install guide"));
@@ -866,7 +1238,7 @@ mod tests {
             .map(|index| format!("<li><a href=\"/p/{index}\">Menu item {index}</a></li>"))
             .collect::<String>();
         let html = format!("<html><body><ul class=\"menu\">{items}</ul><p>short</p></body></html>");
-        let document = html_to_document(&html);
+        let document = html_to_document(&html, None);
 
         assert!(document.is_low_confidence(), "{:?}", document.stats);
     }
@@ -878,7 +1250,7 @@ mod tests {
             html.push_str(&format!("<p>Paragraph number {index} with some text.</p>"));
         }
         html.push_str("</body></html>");
-        let document = html_to_document(&html);
+        let document = html_to_document(&html, None);
         let selection = select_blocks(&document, &[], 200);
 
         assert!(selection.kept_chars <= 260);
@@ -906,8 +1278,10 @@ mod tests {
 
     #[test]
     fn markdown_headings_become_block_paths() {
-        let document =
-            markdown_to_document("# Rust\n\nRust is a language.\n\n## Install\n\nUse rustup.");
+        let document = markdown_to_document(
+            "# Rust\n\nRust is a language.\n\n## Install\n\nUse rustup.",
+            None,
+        );
         let paths = document
             .blocks
             .iter()

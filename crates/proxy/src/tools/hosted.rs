@@ -199,6 +199,7 @@ fn compact_web_search_result_for_model(result: &Value) -> Value {
         "sources_attempted": result.get("sources_attempted").cloned().unwrap_or(Value::Null),
         "sources_skipped": result.get("sources_skipped").cloned().unwrap_or(Value::Null),
         "errors": compact_web_diagnostic_array(result.get("errors")),
+        "payload_guard": result.get("payload_guard").cloned().unwrap_or(Value::Null),
         "unresolved_ids": result.get("unresolved_ids").cloned().unwrap_or(Value::Null),
         "per_query": result.get("per_query").cloned().unwrap_or(Value::Null),
         "next_action": result.get("next_action").cloned().unwrap_or(Value::Null),
@@ -298,6 +299,7 @@ fn compact_web_evidence_array(value: Option<&Value>) -> Value {
                         .and_then(Value::as_str)
                         .map(|text| Value::String(bounded_text(text, MAX_MODEL_EVIDENCE_CHARS)))
                         .unwrap_or(Value::Null),
+                    "links": compact_string_array(item.get("links"), 8),
                     "chars": item.get("chars").cloned().unwrap_or(Value::Null),
                     "omitted_chars": item.get("omitted_chars").cloned().unwrap_or(Value::Null),
                     "omitted_blocks": item.get("omitted_blocks").cloned().unwrap_or(Value::Null),
@@ -309,10 +311,25 @@ fn compact_web_evidence_array(value: Option<&Value>) -> Value {
     )
 }
 
-/// Upper bound on one evidence excerpt in the model-facing replay. The pipeline
-/// already budgets the page text; this is defence in depth so a future producer
-/// cannot blow up the model prompt.
-const MAX_MODEL_EVIDENCE_CHARS: usize = 2_000;
+fn compact_string_array(value: Option<&Value>, max_items: usize) -> Value {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .take(max_items)
+            .map(|item| Value::String(item.to_owned()))
+            .collect(),
+    )
+}
+
+/// Upper bound on one evidence excerpt in the model-facing replay. The web
+/// pipeline already bounds the rendered excerpt to its own budget; this adds a
+/// little headroom so it never cuts content the pipeline deliberately kept, and
+/// still caps a future producer that forgets to bound itself.
+const MAX_MODEL_EVIDENCE_CHARS: usize = crate::tools::web::EVIDENCE_BUDGET_CHARS + 256;
 
 fn bounded_text(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
@@ -562,7 +579,13 @@ mod tests {
 
         assert!(replay.contains("cand_weather"));
         assert!(replay.contains("https://example.com/weather"));
-        assert!(replay.chars().count() <= 3_000);
+        // One 32k excerpt must come back bounded by the evidence budget, not by
+        // its original size.
+        assert!(
+            replay.chars().count() <= MAX_MODEL_EVIDENCE_CHARS + 1_200,
+            "replay was {} chars",
+            replay.chars().count()
+        );
         assert!(replay.contains("truncated chars="));
     }
 

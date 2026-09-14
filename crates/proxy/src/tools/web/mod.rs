@@ -13,6 +13,7 @@ mod parsers;
 mod rank;
 mod request;
 mod safety;
+mod sanitize;
 mod sources;
 mod text;
 
@@ -21,6 +22,16 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 pub(crate) use request::client_action_from_arguments;
+
+/// Character-bounded truncation, shared with the model-facing compaction so the
+/// two boundaries cannot drift apart.
+pub(crate) fn truncate_to_chars(text: &str, max_chars: usize) -> String {
+    text::truncate_chars(text, max_chars)
+}
+
+pub(crate) fn text_char_count(text: &str) -> usize {
+    text::char_count(text)
+}
 
 /// Hard cap on how many bytes of a single response are read.
 const MAX_BYTES: u64 = 524_288;
@@ -32,8 +43,10 @@ const MAX_QUERIES: usize = 3;
 const MAX_OPEN_TARGETS: usize = 6;
 /// How many top candidates are opened automatically for evidence.
 const EVIDENCE_TARGETS: usize = 3;
-/// Character budget for one page's evidence excerpt.
-const EVIDENCE_BUDGET_CHARS: usize = 4_000;
+/// Character budget for one page's rendered evidence excerpt. This is the whole
+/// excerpt, including section markers and omission accounting, so what the
+/// pipeline selects is exactly what the model receives.
+pub(crate) const EVIDENCE_BUDGET_CHARS: usize = 2_000;
 /// Budget for the automatic evidence fetch.
 const AUTO_OPEN_TIMEOUT_SECS: u64 = 8;
 /// Whole-call budget, including automatic evidence.

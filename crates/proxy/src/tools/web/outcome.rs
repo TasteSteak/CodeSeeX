@@ -9,12 +9,13 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-use super::extract::{select_blocks, ExtractedDocument, SelectedBlock};
+use super::extract::{select_blocks, BlockKind, ExtractedDocument, SelectedBlock};
 use super::fetch::{fetch_page, FetchedPage};
 use super::ids::{lookup_from_messages, resolve_open_ids};
 use super::net::web_client;
 use super::rank::{average_relevance, meaningful_terms, rank, Candidate};
 use super::request::{WebMode, WebRequest};
+use super::sanitize::sanitize_value;
 use super::sources::{
     plan, proxy_cache_key, record_outcome, search_source, source_outcome_detail, RawHit,
     SourceOutcome,
@@ -26,6 +27,8 @@ use super::{
 /// How long a query's ranked candidates stay reusable.
 const CACHE_TTL: Duration = Duration::from_secs(600);
 const CACHE_MAX_ENTRIES: usize = 128;
+/// Link targets kept per evidence page.
+const MAX_EVIDENCE_LINKS: usize = 12;
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -73,10 +76,27 @@ pub(super) async fn run(
     request: WebRequest,
     messages: &[Value],
 ) -> Value {
-    match request.mode {
+    let outcome = match request.mode {
         WebMode::Open => run_open(proxy_mode, &request, messages).await,
         WebMode::Search => run_search(proxy_mode, &request).await,
+    };
+    payload_guard(outcome)
+}
+
+/// The last thing that touches a web result before it can reach the model.
+///
+/// Block text is already sanitized where it is produced; this pass exists so a
+/// future producer cannot leak a resource payload unnoticed. `payload_guard`
+/// in the result means the primary filter missed something, so the flag is a
+/// defect signal worth logging rather than a normal outcome.
+fn payload_guard(outcome: Value) -> Value {
+    let (mut outcome, changed) = sanitize_value(outcome);
+    if changed {
+        if let Some(object) = outcome.as_object_mut() {
+            object.insert("payload_guard".to_owned(), Value::Bool(true));
+        }
     }
+    outcome
 }
 
 async fn run_open(proxy_mode: NetworkProxyMode, request: &WebRequest, messages: &[Value]) -> Value {
@@ -340,13 +360,24 @@ fn evidence_item(page: &FetchedPage, terms: &[String], origin: &str) -> Option<V
     if selection.blocks.is_empty() {
         return None;
     }
+    let links = selection
+        .blocks
+        .iter()
+        .flat_map(|block| block.links.iter().cloned())
+        .fold(Vec::new(), |mut acc: Vec<String>, link| {
+            if acc.len() < MAX_EVIDENCE_LINKS && !acc.contains(&link) {
+                acc.push(link);
+            }
+            acc
+        });
     Some(json!({
         "id": Value::Null,
         "title": page.title(),
         "url": page.url,
         "status": page.status,
         "origin": origin,
-        "excerpt": render_blocks(&selection.blocks),
+        "excerpt": bound_excerpt(&render_blocks(&selection.blocks)),
+        "links": links,
         "chars": selection.kept_chars,
         "omitted_chars": selection.omitted_chars,
         "omitted_blocks": selection.omitted_blocks,
@@ -356,7 +387,17 @@ fn evidence_item(page: &FetchedPage, terms: &[String], origin: &str) -> Option<V
             "content_ratio": (document.stats.content_ratio * 100.0).round() / 100.0,
             "link_ratio": (document.stats.link_ratio * 100.0).round() / 100.0,
             "blocks_total": document.stats.blocks_total,
-            "blocks_content": document.stats.blocks_content
+            "blocks_content": document.stats.blocks_content,
+            "code_blocks": selection
+                .blocks
+                .iter()
+                .filter(|block| block.kind == BlockKind::Code)
+                .count(),
+            "table_blocks": selection
+                .blocks
+                .iter()
+                .filter(|block| block.kind == BlockKind::TableRow)
+                .count()
         },
         "confidence": confidence(document),
         "truncated": page.truncated
@@ -391,9 +432,45 @@ fn render_blocks(blocks: &[SelectedBlock]) -> String {
     output.trim().to_owned()
 }
 
+/// The rendered excerpt is the model-facing budget, markers included, so the
+/// selection is never partly discarded by a later cap.
+fn bound_excerpt(rendered: &str) -> String {
+    if crate::tools::web::text_char_count(rendered) <= EVIDENCE_BUDGET_CHARS {
+        return rendered.to_owned();
+    }
+    crate::tools::web::truncate_to_chars(rendered, EVIDENCE_BUDGET_CHARS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_guard_catches_a_producer_that_leaked_a_resource() {
+        // Stands in for a future producer that forgets to sanitize: the boundary
+        // must still strip the payload and raise the defect flag.
+        let leaky = json!({
+            "ok": true,
+            "evidence": [{
+                "url": "https://example.com/",
+                "excerpt": format!("logo data:image/png;base64,{} tail", "A".repeat(400))
+            }]
+        });
+        let guarded = payload_guard(leaky);
+
+        assert_eq!(guarded["payload_guard"], Value::Bool(true));
+        let excerpt = guarded["evidence"][0]["excerpt"].as_str().unwrap();
+        assert!(!excerpt.contains("base64,AAAA"));
+        assert!(excerpt.contains("tail"));
+    }
+
+    #[test]
+    fn payload_guard_stays_quiet_for_clean_results() {
+        let clean = json!({ "ok": true, "candidates": [{ "url": "https://example.com/" }] });
+        let guarded = payload_guard(clean);
+
+        assert!(guarded.get("payload_guard").is_none());
+    }
 
     #[test]
     fn rendered_evidence_marks_omitted_blocks() {
@@ -401,12 +478,16 @@ mod tests {
             SelectedBlock {
                 heading_path: "Docs".to_owned(),
                 text: "First paragraph.".to_owned(),
+                kind: BlockKind::Prose,
+                links: Vec::new(),
                 skipped_blocks: 0,
                 skipped_chars: 0,
             },
             SelectedBlock {
                 heading_path: "Docs".to_owned(),
                 text: "Late paragraph.".to_owned(),
+                kind: BlockKind::Prose,
+                links: Vec::new(),
                 skipped_blocks: 12,
                 skipped_chars: 3_000,
             },

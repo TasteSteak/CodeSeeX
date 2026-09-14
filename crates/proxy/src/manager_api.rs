@@ -9,6 +9,14 @@ use codeseex_core::{AppConfig, UserConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+#[derive(Debug, Default, Deserialize)]
+struct WebSearchProbeQuery {
+    q: Option<String>,
+    query: Option<String>,
+    url: Option<String>,
+    open_url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
     limit: Option<u32>,
@@ -79,6 +87,10 @@ pub(crate) fn router() -> Router<ProxyState> {
         .route("/api/upstream/credential", post(api_upstream_credential))
         .route("/api/deepseek/balance", get(api_balance))
         .route("/api/search-sources/health", get(search_sources_health))
+        .route(
+            "/api/web-search/probe",
+            get(web_search_probe).post(web_search_probe),
+        )
         .route("/api/events", get(api_events))
         .route("/api/start", post(api_start))
         .route("/api/restart", post(api_restart))
@@ -518,6 +530,63 @@ async fn search_sources_health(State(state): State<ProxyState>) -> impl IntoResp
     let proxy_mode = state.runtime_config.snapshot().config.network_proxy;
     let diagnostic = crate::tools::web::warm_search_sources(proxy_mode).await;
     Json(diagnostic)
+}
+
+/// Runs one CodeSeeX web search locally, so the pipeline can be exercised
+/// without a model in the loop. Local-only, like the rest of the manager API.
+async fn web_search_probe(
+    State(state): State<ProxyState>,
+    Query(query): Query<WebSearchProbeQuery>,
+    body: Option<Json<Value>>,
+) -> impl IntoResponse {
+    let body = body.map(|Json(value)| value);
+    let arguments = web_search_probe_arguments(&query, body.as_ref());
+    if arguments.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "missing_input",
+                "message": "Provide q/query for a search, or url/open_url for a single page."
+            })),
+        )
+            .into_response();
+    }
+    let proxy_mode = state.runtime_config.snapshot().config.network_proxy;
+    Json(crate::tools::web::execute(proxy_mode, &arguments.unwrap(), &[]).await).into_response()
+}
+
+fn web_search_probe_arguments(query: &WebSearchProbeQuery, body: Option<&Value>) -> Option<Value> {
+    let from = |key: &str| -> Option<&Value> { body.and_then(|value| value.get(key)) };
+    let mut arguments = serde_json::Map::new();
+    for key in [
+        "query",
+        "q",
+        "queries",
+        "url",
+        "open_urls",
+        "open_ids",
+        "max_results",
+        "mode",
+    ] {
+        if let Some(value) = from(key) {
+            arguments.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(value) = query.q.as_ref().or(query.query.as_ref()) {
+        arguments
+            .entry("query".to_owned())
+            .or_insert_with(|| Value::String(value.clone()));
+    }
+    if let Some(value) = query.url.as_ref().or(query.open_url.as_ref()) {
+        arguments
+            .entry("open_urls".to_owned())
+            .or_insert_with(|| json!([value]));
+    }
+    if arguments.is_empty() {
+        return None;
+    }
+    Some(Value::Object(arguments))
 }
 
 async fn compatibility_action(state: ProxyState, path: &'static str) -> axum::response::Response {

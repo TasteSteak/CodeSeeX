@@ -8,6 +8,25 @@ pub(super) fn clean_visible_text(text: &str) -> String {
     compact_whitespace(&remove_token_noise(&decode_basic_html_entities(text)))
 }
 
+/// Text that must keep its layout: entities are decoded and invisible tokens
+/// dropped, but newlines and indentation survive so code stays readable.
+pub(super) fn clean_code_text(text: &str) -> String {
+    let decoded = remove_token_noise(&decode_basic_html_entities(text))
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut lines = decoded
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>();
+    while lines.first().is_some_and(|line| line.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
 pub(super) fn truncate_chars(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars {

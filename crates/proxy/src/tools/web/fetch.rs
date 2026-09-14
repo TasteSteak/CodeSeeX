@@ -184,10 +184,11 @@ pub(super) async fn fetch_page(proxy_mode: NetworkProxyMode, raw_url: &str) -> F
             };
         }
         let (text, _encoding, _had_errors) = decode_text_bytes(&bytes, &content_type);
+        let base_url = current_url.as_str();
         let document = if response_looks_like_html(&content_type, &text) {
-            html_to_document(&text)
+            html_to_document(&text, Some(base_url))
         } else if response_looks_like_markdown(&content_type, current_url.as_str()) {
-            markdown_to_document(&text)
+            markdown_to_document(&text, Some(base_url))
         } else {
             plain_text_to_document(&text)
         };

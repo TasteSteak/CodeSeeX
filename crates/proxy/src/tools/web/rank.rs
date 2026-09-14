@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use super::ids::candidate_id_for;
 use super::safety::normalize_candidate_url;
+use super::sanitize::sanitize_prose;
 use super::sources::RawHit;
 use super::text::{clean_visible_text, truncate_chars};
 
@@ -64,7 +65,9 @@ pub(super) fn rank(query: &str, hits: &[RawHit], max_results: usize) -> RankedSe
             continue;
         }
         let title = clean_visible_text(&hit.title);
-        let snippet = truncate_chars(&clean_visible_text(&hit.snippet), 600);
+        // Snippets come from a search engine's own markup, so they pass the same
+        // payload rule as page text before the model sees them.
+        let snippet = truncate_chars(&sanitize_prose(&clean_visible_text(&hit.snippet)), 600);
         if title.is_empty() && snippet.is_empty() {
             continue;
         }
