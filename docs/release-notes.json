@@ -2,6 +2,94 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.8.1",
+      "released_at": "2026-09-14",
+      "notes": {
+        "en_us": {
+          "summary": "Rebuilds CodeSeeX local Web Search from the request down to the evidence: one result contract shared by the model view and the client view, and fixes for a search that was invisible, unusable on CJK queries, wasteful with page text, or able to break a continuation.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "A search CodeSeeX runs itself now reaches the client as a standard web_search_call item, so the user sees the query and the step instead of only a final answer.",
+                "The presented item carries the field shape the upstream accepts on replay and is withheld from the replayed payload, so a continuation can no longer be rejected for it.",
+                "The pipeline is layered as request -> sources -> rank -> fetch -> extract -> outcome, with one result contract instead of near-copies of the same fields.",
+                "A mixed tool group no longer fails the whole turn: CodeSeeX executes its own calls, hands the client-owned calls back, and replays the round as one group."
+              ]
+            },
+            {
+              "title": "Search quality",
+              "items": [
+                "Requests carry the query and nothing else, with no market, language, or locale parameter, and the source set stays region-neutral.",
+                "Sources are fused with reciprocal-rank fusion instead of whichever response arrived first, so a URL found by several sources ranks higher and the ordering is not a race.",
+                "Scripts without spaces are matched by bigram, so a Chinese phrase matches documents that contain its parts instead of only an exact whole-string hit.",
+                "A result page whose entries are unrelated to the query is dropped instead of handed to the model.",
+                "Source health separates unreachable from reachable-but-empty, cools down only after repeated failures, paces requests, and caches a query's candidates for ten minutes."
+              ]
+            },
+            {
+              "title": "Extraction and evidence",
+              "items": [
+                "Pages parse as a real DOM into scored blocks with content ratio and a confidence verdict, and code keeps its line breaks and indentation.",
+                "A long page is sampled by budget with the omitted parts accounted for, instead of truncating from the top, and blocks repeated across a page are kept once.",
+                "Resource payloads never reach the model: whole data: URLs and opaque runs over a size limit become a bounded marker, and images stay references. The rule is size and markup based, never per site or per language.",
+                "The evidence budget is the model-facing budget, so what the pipeline selects is what the model receives."
+              ]
+            },
+            {
+              "title": "Fixed",
+              "items": [
+                "A continuation is no longer rejected because a replayed search item was missing a field the provider requires.",
+                "Client-owned tool calls are never executed by the proxy, and the client's own tool output is unaffected by the search-item handling.",
+                "The context cost hint is written only when a size threshold is actually crossed instead of on every turn."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "重写 CodeSeeX 本地 Web Search 的整条链路：从请求到证据收敛为一份结果契约，由模型视图与客户端视图共用，并修复了搜索不可见、中文查询检索不到、页面文本浪费以及续接请求被拒等问题。",
+          "sections": [
+            {
+              "title": "重点更新",
+              "items": [
+                "CodeSeeX 自己执行的搜索现在会作为标准 web_search_call 条目回给客户端，用户能看到搜索词与搜索步骤，而不是只看到最终答案。",
+                "该条目采用上游回放时认可的字段形态，且不会回传给上游，续接请求不会再因为它被拒绝。",
+                "链路按「请求 → 搜索源 → 融合排序 → 抓页 → 正文提取 → 结果」重新分层，模型视图与客户端视图共用同一份结果契约。",
+                "混合工具组不再让整轮失败：CodeSeeX 只执行属于自己的一侧，客户端工具照常归还，整轮作为一组完成回放。"
+              ]
+            },
+            {
+              "title": "搜索质量",
+              "items": [
+                "请求只携带查询词，不注入 market、language 或 locale 参数，来源保持地区中立。",
+                "跨来源改为按倒数排名融合，取代「先到先得」，排序不再取决于哪个响应先返回，同一网址被多源命中会获得更高位次。",
+                "无空格文字按二元切分参与匹配，中文等查询不再因为要求整段原样命中而检索不到。",
+                "搜索结果页里与查询无关的条目会被丢弃，而不是塞给模型。",
+                "来源健康区分「不可达」与「可达但无结果」，仅在连续失败后退避，并按最小间隔节流、缓存查询结果十分钟。"
+              ]
+            },
+            {
+              "title": "正文与证据",
+              "items": [
+                "页面按真实 DOM 解析成块并逐块打分，给出正文占比与置信度；代码块保留换行与缩进。",
+                "超长页面按预算挑选并对省略部分给出显式账目，不再从头部截断；页内重复的块只保留首次。",
+                "资源载荷不进入模型：整段 data: URL 与超过体量阈值的不透明串替换为有界标记，图片只保留引用。判定只看体量与标签，不针对任何站点或语言。",
+                "证据预算即模型可见预算，管线选中的内容不会被再次截掉。"
+              ]
+            },
+            {
+              "title": "修复",
+              "items": [
+                "续接请求不再因为回传的搜索条目缺少上游必需字段而被拒绝。",
+                "代理不代跑客户端自己的工具，客户端工具输出不受搜索条目处理的影响。",
+                "上下文成本提示仅在真正超过尺寸阈值时记录，不再每轮写入。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "version": "0.8.0",
       "released_at": "2026-09-13",
       "notes": {

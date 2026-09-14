@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.8.0" src="https://img.shields.io/badge/version-0.8.0-1f6feb">
+  <img alt="Version 0.8.1" src="https://img.shields.io/badge/version-0.8.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.8.0`
+当前版本：`0.8.1`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -85,7 +85,7 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 - 内置模型目录，用于首次运行或缺少原生 Codex catalog 的环境。
 - Flash 与 Pro 的 1M context 元数据和 95% effective context window。
 - Codex 原生 Apply Patch 处理和客户端工具 handoff 行为。
-- CodeSeeX 托管的 Web Search，包含有界执行、source diagnostics、自动打开证据页和本地/私网目标保护。
+- CodeSeeX 托管的 Web Search 有界且来源可查：搜索步骤对客户端可见，结果在地区中立的多个来源间融合，正文按块提取、代码保持原样、资源载荷不进入模型，并阻止本地/私网目标。
 - 只读 workspace 工具，用于文件和仓库检查。
 - 可选图像能力，支持 DeepSeek Vision、自定义图像理解和独立图像生成 endpoint。
 - 上下文编译：以 Codex full replay 为权威输入，保持工具调用/结果原子组、限制工具输出、脱敏 binary/data URL；真实窗口超限时返回可诊断错误，不由代理静默截断 replay。
@@ -206,7 +206,7 @@ CodeSeeX 将工具视为 Agent Runtime 的一部分，而不是普通 function c
 - Codex 客户端工具会以 Codex 期望的形态交还给 Codex 执行。
 - 启用的 CodeSeeX 基础工具可以直接暴露给模型。
 - Codex 延迟/原生工具仍可通过 tool-search bridge 发现。
-- Web Search 是有边界的，具备 source 诊断，并阻止 localhost/private-network 目标。
+- Web Search 有界、来源可查，代码保持可读、资源载荷被排除，并阻止 localhost/private-network 目标。
 - 工具结果会在 replay 前压缩，降低 token 污染风险。
 - 重复失败和重复 tool signature 会被追踪，避免死循环，同时不阻断正常复杂工具链。
 

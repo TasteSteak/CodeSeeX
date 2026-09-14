@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.8.0" src="https://img.shields.io/badge/version-0.8.0-1f6feb">
+  <img alt="Version 0.8.1" src="https://img.shields.io/badge/version-0.8.1-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.8.0`
+Current version: `0.8.1`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -85,7 +85,7 @@ The result is a tool for people who want DeepSeek inside Codex without giving up
 - Embedded model catalog for first-run machines without a native Codex catalog.
 - 1M context metadata with a 95% effective context window for Flash and Pro.
 - Codex-native Apply Patch handling and client-tool handoff behavior.
-- CodeSeeX-hosted Web Search with bounded execution, source diagnostics, automatic evidence opening, and local/private target protection.
+- CodeSeeX-hosted Web Search is bounded and source-aware: the search step is shown to the client, results are fused across region-neutral sources, page text is extracted block by block with code kept intact and resource payloads left out, and local/private targets stay blocked.
 - Read-only workspace tools for file and repository inspection.
 - Optional image capabilities for DeepSeek Vision, custom image understanding, and independent image generation endpoints.
 - Context compilation with authoritative Codex full replay, atomic tool-call/result groups, bounded tool outputs, binary/data URL redaction, and controlled context-limit diagnostics instead of proxy-side replay truncation.
@@ -206,7 +206,7 @@ CodeSeeX treats tools as part of the agent runtime, not as incidental function c
 - Codex client tools such as native patch application are handed back to Codex in the shape Codex expects.
 - CodeSeeX base tools can be exposed directly to the model when enabled.
 - Deferred/native Codex tools can still be discovered through the tool-search bridge.
-- Web Search is bounded, source-aware, and protected against localhost/private-network targets.
+- Web Search is bounded and source-aware, keeps code readable while excluding resource payloads, and blocks localhost/private-network targets.
 - Tool results are compacted before replay to reduce token pollution.
 - Repeated failures and repeated tool signatures are tracked to prevent dead loops without blocking normal complex tool chains.
 

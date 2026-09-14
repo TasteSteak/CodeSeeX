@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.1 - 2026-09-14
+
+This release rebuilds CodeSeeX local Web Search from the request down to the evidence: the pipeline becomes one contract shared by the model view and the client view, and the problems that made search invisible, unusable on CJK queries, wasteful with page text, or able to break a continuation are fixed.
+
+### Local search
+
+- The pipeline is layered as request → sources → rank → fetch → extract → outcome, and the model view and the client view read the same result contract instead of each defining its own near-copies of the same fields.
+- A search CodeSeeX runs itself now reaches the client as a standard `web_search_call` item, so the user sees the query and the step instead of only a final answer.
+- The presented item carries the field shape the upstream accepts on replay and is withheld from the replayed payload, so a continuation can no longer be rejected for it.
+- A mixed tool group no longer fails the whole turn: CodeSeeX executes its own calls, hands the client-owned calls back, and replays the round as one group.
+- Tooling: `POST /api/web-search/probe` runs one search or page open locally for diagnostics, with no model in the loop.
+
+### Search quality
+
+- Requests carry the query and nothing else — no market, language, or locale parameter — and the source set stays region-neutral.
+- Sources are fused with reciprocal-rank fusion instead of keeping whichever response arrived first, so the ordering no longer depends on a race and a URL found by several sources ranks higher.
+- Scripts without spaces are matched by bigram, so a query like a Chinese phrase matches documents that contain its parts instead of only an exact whole-string hit.
+- Candidates pass a relevance gate: a result page whose entries are unrelated to the query is dropped rather than handed to the model.
+- Source health distinguishes unreachable from reachable-but-empty, cools a source down only after repeated failures, paces requests per source, caches a query's candidates for ten minutes, and probes every source with a query it must actually parse.
+
+### Extraction and evidence
+
+- Pages are parsed as a real DOM into scored blocks, with content ratio, link ratio, and a confidence verdict instead of a flat string of text.
+- Code keeps its line breaks and indentation, a table row reads as one row of columns, and a block's link targets are resolved and reported.
+- A long page is sampled by budget — opening blocks, highest scoring blocks, and query matches — with the omitted parts accounted for, instead of truncating from the top.
+- Blocks repeated across a page are kept once, so a template does not spend the budget on the same sentence.
+- Resource payloads never reach the model: whole `data:` URLs and opaque runs over a size limit are replaced with a bounded marker, and images and media are kept as references only. The rule is size and markup based, never per site or per language.
+- The evidence budget is the model-facing budget, so what the pipeline selects is what the model receives.
+
+### Session and logs
+
+- A continuation is no longer rejected because a replayed search item was missing a field the provider requires.
+- Client-owned tool calls are never executed by the proxy, and the client's own tool output is unaffected by the search-item handling.
+- Page fetching keeps address pinning, per-hop redirect validation, and the private-network block, with additional reserved ranges covered.
+- The web search log line is a user-level summary, and the context cost hint is written only when a size threshold is actually crossed instead of on every turn.
+
 ## 0.8.0 - 2026-09-13
 
 This release reworks a large amount of underlying behaviour: the upstream address, model list, pricing and tool ownership collapse into a single source of truth, and the transport, logging and feedback are re-tuned for a resident client. The configuration, model-picking, usage-viewing and troubleshooting experience is improved, and the issues left over from earlier versions — the silently falling-back upstream, broken usage chains, rejected native tool declarations, apply_patch compatibility and silent unpriced billing — are fixed.
