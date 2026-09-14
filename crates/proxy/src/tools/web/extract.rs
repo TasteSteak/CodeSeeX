@@ -8,6 +8,7 @@
 use encoding_rs::{Encoding, GB18030, UTF_8, WINDOWS_1252};
 use scraper::node::Node;
 use scraper::{ElementRef, Html, Selector};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use super::text::{char_count, clean_visible_text, truncate_chars};
@@ -96,7 +97,7 @@ pub(super) fn html_to_document(html: &str) -> ExtractedDocument {
     let title = document_title(&document);
     let mut blocks = Vec::new();
     let root = document.root_element();
-    let mut headings: Vec<String> = Vec::new();
+    let mut headings: HeadingStack = Vec::new();
     walk_element(root, &mut headings, &mut blocks);
     if blocks.is_empty() {
         // A DOM that produced nothing readable still has raw text; fall back to
@@ -145,7 +146,7 @@ pub(super) fn plain_text_to_document(text: &str) -> ExtractedDocument {
 
 pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
     let mut blocks = Vec::new();
-    let mut headings: Vec<String> = Vec::new();
+    let mut headings: HeadingStack = Vec::new();
     let mut paragraph = String::new();
     let mut in_code = false;
     for line in markdown.replace("\r\n", "\n").replace('\r', "\n").lines() {
@@ -157,7 +158,7 @@ pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
         }
         if in_code {
             blocks.push(TextBlock {
-                heading_path: headings.join(" > "),
+                heading_path: heading_path(&headings),
                 link_ratio: 0.0,
                 weight: 1.0,
                 boilerplate: false,
@@ -168,10 +169,7 @@ pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
         if let Some(level) = markdown_heading_level(trimmed) {
             flush_paragraph(&mut paragraph, &mut blocks, &headings);
             let text = clean_visible_text(trimmed.trim_start_matches('#'));
-            headings.truncate(level.saturating_sub(1));
-            if !text.is_empty() {
-                headings.push(text);
-            }
+            apply_heading(&mut headings, level, text);
             continue;
         }
         if trimmed.is_empty() {
@@ -195,19 +193,40 @@ pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
     }
 }
 
-fn flush_paragraph(paragraph: &mut String, blocks: &mut Vec<TextBlock>, headings: &[String]) {
+fn flush_paragraph(paragraph: &mut String, blocks: &mut Vec<TextBlock>, headings: &HeadingStack) {
     let cleaned = clean_visible_text(paragraph);
     paragraph.clear();
     if cleaned.is_empty() {
         return;
     }
     blocks.push(TextBlock {
-        heading_path: headings.join(" > "),
+        heading_path: heading_path(headings),
         link_ratio: 0.0,
         weight: block_weight("p", "", &cleaned, 0.0),
         boilerplate: false,
         text: cleaned,
     });
+}
+
+/// Active section path: each entry carries its heading level so a sibling
+/// heading replaces the previous one instead of nesting under it.
+type HeadingStack = Vec<(usize, String)>;
+
+fn apply_heading(headings: &mut HeadingStack, level: usize, text: String) {
+    while headings.last().is_some_and(|(open, _)| *open >= level) {
+        headings.pop();
+    }
+    if !text.is_empty() {
+        headings.push((level, text));
+    }
+}
+
+fn heading_path(headings: &HeadingStack) -> String {
+    headings
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join(" > ")
 }
 
 fn markdown_heading_level(line: &str) -> Option<usize> {
@@ -220,23 +239,13 @@ fn markdown_heading_level(line: &str) -> Option<usize> {
 
 fn walk_element(
     element: ElementRef<'_>,
-    headings: &mut Vec<String>,
+    headings: &mut HeadingStack,
     blocks: &mut Vec<TextBlock>,
 ) -> bool {
     let tag = element.value().name();
     if NOISE_TAGS.contains(&tag) {
         return false;
     }
-    let heading = HEADING_TAGS.contains(&tag);
-    let heading_text = if heading {
-        clean_visible_text(&element.text().collect::<String>())
-    } else {
-        String::new()
-    };
-    if heading && !heading_text.is_empty() {
-        headings.push(heading_text);
-    }
-
     let hints = element_hints(element);
     let mut buffer = String::new();
     let mut emitted = false;
@@ -247,6 +256,17 @@ fn walk_element(
                 let Some(child_element) = ElementRef::wrap(child.clone()) else {
                     continue;
                 };
+                // A heading updates the section path for everything that
+                // follows it. It is not published as a block of its own: the
+                // rendering already shows the path, so emitting the text too
+                // would repeat the heading on every section.
+                if let Some(level) = heading_level(child_element.value().name()) {
+                    push_buffer(&mut buffer, tag, &hints, headings, blocks);
+                    let text = clean_visible_text(&child_element.text().collect::<String>());
+                    apply_heading(headings, level, text);
+                    emitted = true;
+                    continue;
+                }
                 if walk_element(child_element, headings, blocks) {
                     push_buffer(&mut buffer, tag, &hints, headings, blocks);
                     emitted = true;
@@ -261,24 +281,30 @@ fn walk_element(
     }
 
     let has_text = !buffer.trim().is_empty();
-    let is_emit_point = EMIT_TAGS.contains(&tag) || heading;
+    let is_emit_point = EMIT_TAGS.contains(&tag);
     if has_text && (is_emit_point || emitted) {
         let link_ratio = element_link_ratio(element);
         push_text_block(buffer, tag, &hints, link_ratio, headings, blocks);
         emitted = true;
     }
-
-    if heading {
-        headings.pop();
-    }
     emitted
+}
+
+/// Heading level for `h1`-`h6`, `None` for anything else.
+fn heading_level(tag: &str) -> Option<usize> {
+    let mut chars = tag.chars();
+    if chars.next() != Some('h') {
+        return None;
+    }
+    let level = chars.next()?.to_digit(10)? as usize;
+    (1..=6).contains(&level).then_some(level)
 }
 
 fn push_buffer(
     buffer: &mut String,
     tag: &str,
     hints: &ElementHints,
-    headings: &[String],
+    headings: &HeadingStack,
     blocks: &mut Vec<TextBlock>,
 ) {
     let text = std::mem::take(buffer);
@@ -293,7 +319,7 @@ fn push_text_block(
     tag: &str,
     hints: &ElementHints,
     link_ratio: f64,
-    headings: &[String],
+    headings: &HeadingStack,
     blocks: &mut Vec<TextBlock>,
 ) {
     let text = clean_visible_text(&text);
@@ -302,7 +328,7 @@ fn push_text_block(
     }
     let boilerplate = hints.boilerplate;
     blocks.push(TextBlock {
-        heading_path: headings.join(" > "),
+        heading_path: heading_path(headings),
         weight: if boilerplate {
             0.0
         } else {
@@ -548,6 +574,11 @@ pub(super) fn select_blocks(
 
     let mut chosen: Vec<(usize, usize)> = Vec::new();
     let mut used = 0usize;
+    // Page templates repeat themselves: the same tag row, nav block, or
+    // "related" line shows up in several sections. Keep the first occurrence of
+    // any non-trivial block so the budget buys new information instead of the
+    // same sentence again.
+    let mut seen: HashSet<String> = HashSet::new();
     for index in order {
         if used >= budget {
             break;
@@ -555,6 +586,12 @@ pub(super) fn select_blocks(
         let block = &blocks[index];
         if block.boilerplate || block.weight < 0.5 {
             continue;
+        }
+        let signature = repeated_block_signature(&block.text);
+        if let Some(signature) = signature {
+            if !seen.insert(signature) {
+                continue;
+            }
         }
         let length = char_count(&block.text);
         let remaining = budget - used;
@@ -622,6 +659,21 @@ pub(super) fn select_blocks(
         omitted_chars: total_chars.saturating_sub(kept_chars),
         omitted_blocks,
     }
+}
+
+/// Normalised signature of a block that is long enough to be worth de-duplicating.
+/// Short blocks ("OK", "Home") are left alone: repeating them is meaningful.
+fn repeated_block_signature(text: &str) -> Option<String> {
+    const MIN_REPEAT_CHARS: usize = 40;
+    if char_count(text) < MIN_REPEAT_CHARS {
+        return None;
+    }
+    Some(
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase(),
+    )
 }
 
 fn document_title(document: &Html) -> Option<String> {
@@ -776,6 +828,26 @@ mod tests {
 
         assert!(text.contains("a < b"), "{text}");
         assert!(text.contains("x << 2"), "{text}");
+    }
+
+    #[test]
+    fn headings_set_the_section_path_without_repeating_the_heading() {
+        let html = "<html><body><h2>Install</h2><p>Use rustup.</p><h2>Usage</h2><p>Run cargo.</p></body></html>";
+        let document = html_to_document(html);
+        let blocks = document
+            .blocks
+            .iter()
+            .map(|block| (block.heading_path.clone(), block.text.clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            blocks,
+            vec![
+                ("Install".to_owned(), "Use rustup.".to_owned()),
+                ("Usage".to_owned(), "Run cargo.".to_owned()),
+            ],
+            "the heading must label its section, not become a block of its own"
+        );
     }
 
     #[test]
