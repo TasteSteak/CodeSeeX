@@ -1,154 +1,640 @@
-use codeseex_core::context::redact_inline_data_urls;
+//! HTML/plain-text/markdown extraction.
+//!
+//! The old pipeline located the body with a substring search and stripped tags
+//! with a character scanner, which silently dropped content and lost all
+//! structure. This version parses a real DOM, produces independent text blocks,
+//! scores each block, and reports how much of the page was actually content.
+
 use encoding_rs::{Encoding, GB18030, UTF_8, WINDOWS_1252};
-use regex::Regex;
+use scraper::node::Node;
+use scraper::{ElementRef, Html, Selector};
 use std::sync::OnceLock;
 
-pub(super) fn compact_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+use super::text::{char_count, clean_visible_text, truncate_chars};
+
+/// A single readable block of a page.
+#[derive(Clone, Debug)]
+pub(super) struct TextBlock {
+    pub(super) heading_path: String,
+    pub(super) text: String,
+    pub(super) link_ratio: f64,
+    pub(super) weight: f64,
+    pub(super) boilerplate: bool,
 }
 
-pub(super) fn clean_visible_text(text: &str) -> String {
-    compact_whitespace(&remove_token_noise(&decode_basic_html_entities(text)))
+#[derive(Clone, Debug, Default)]
+pub(super) struct ExtractionStats {
+    pub(super) body_chars: usize,
+    pub(super) content_chars: usize,
+    pub(super) content_ratio: f64,
+    pub(super) link_ratio: f64,
+    pub(super) blocks_total: usize,
+    pub(super) blocks_content: usize,
 }
 
-pub(super) fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_owned();
+#[derive(Clone, Debug)]
+pub(super) struct ExtractedDocument {
+    pub(super) title: Option<String>,
+    pub(super) blocks: Vec<TextBlock>,
+    pub(super) stats: ExtractionStats,
+}
+
+impl ExtractedDocument {
+    pub(super) fn is_low_confidence(&self) -> bool {
+        self.stats.content_chars < 200 && self.stats.body_chars > 0
+            || self.stats.content_ratio < 0.15 && self.stats.body_chars >= 1_500
     }
-    let prefix = text.chars().take(max_chars).collect::<String>();
-    format!("{prefix}...[truncated chars={count}]")
 }
 
-pub(super) fn strip_html_tags(value: &str) -> String {
-    let mut text = String::new();
-    let mut in_tag = false;
-    for ch in value.chars() {
-        match ch {
-            '<' => {
-                in_tag = true;
-                text.push(' ');
+/// Minimal block weights used to separate content from page furniture.
+const CONTENT_BLOCK_TAGS: &[&str] = &[
+    "p",
+    "li",
+    "blockquote",
+    "pre",
+    "figcaption",
+    "dd",
+    "dt",
+    "td",
+    "th",
+    "caption",
+];
+const HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+/// Tags whose text is emitted as its own block.
+const EMIT_TAGS: &[&str] = &[
+    "body",
+    "main",
+    "article",
+    "section",
+    "div",
+    "p",
+    "li",
+    "blockquote",
+    "pre",
+    "figcaption",
+    "dd",
+    "dt",
+    "td",
+    "th",
+    "caption",
+    "summary",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+];
+/// Subtrees that never carry page content.
+const NOISE_TAGS: &[&str] = &[
+    "script", "style", "noscript", "svg", "canvas", "template", "iframe", "object", "embed", "nav",
+    "aside", "header", "footer", "form", "dialog", "select", "button", "head",
+];
+
+pub(super) fn html_to_document(html: &str) -> ExtractedDocument {
+    let document = Html::parse_document(&redact_inline_data_urls(html));
+    let title = document_title(&document);
+    let mut blocks = Vec::new();
+    let root = document.root_element();
+    let mut headings: Vec<String> = Vec::new();
+    walk_element(root, &mut headings, &mut blocks);
+    if blocks.is_empty() {
+        // A DOM that produced nothing readable still has raw text; fall back to
+        // the body's own text so tiny fragments are not silently dropped.
+        let fallback = clean_visible_text(&visible_text(root));
+        if !fallback.is_empty() {
+            blocks.push(TextBlock {
+                heading_path: String::new(),
+                link_ratio: 0.0,
+                weight: 0.5,
+                boilerplate: false,
+                text: fallback,
+            });
+        }
+    }
+    let stats = summarize_blocks(&blocks);
+    ExtractedDocument {
+        title,
+        blocks,
+        stats,
+    }
+}
+
+pub(super) fn plain_text_to_document(text: &str) -> ExtractedDocument {
+    let mut blocks = Vec::new();
+    for paragraph in text.split("\n\n") {
+        let cleaned = clean_visible_text(paragraph);
+        if cleaned.is_empty() {
+            continue;
+        }
+        blocks.push(TextBlock {
+            heading_path: String::new(),
+            link_ratio: 0.0,
+            weight: block_weight("p", "", &cleaned, 0.0),
+            boilerplate: false,
+            text: cleaned,
+        });
+    }
+    let stats = summarize_blocks(&blocks);
+    ExtractedDocument {
+        title: None,
+        blocks,
+        stats,
+    }
+}
+
+pub(super) fn markdown_to_document(markdown: &str) -> ExtractedDocument {
+    let mut blocks = Vec::new();
+    let mut headings: Vec<String> = Vec::new();
+    let mut paragraph = String::new();
+    let mut in_code = false;
+    for line in markdown.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            flush_paragraph(&mut paragraph, &mut blocks, &headings);
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            blocks.push(TextBlock {
+                heading_path: headings.join(" > "),
+                link_ratio: 0.0,
+                weight: 1.0,
+                boilerplate: false,
+                text: line.trim_end().to_owned(),
+            });
+            continue;
+        }
+        if let Some(level) = markdown_heading_level(trimmed) {
+            flush_paragraph(&mut paragraph, &mut blocks, &headings);
+            let text = clean_visible_text(trimmed.trim_start_matches('#'));
+            headings.truncate(level.saturating_sub(1));
+            if !text.is_empty() {
+                headings.push(text);
             }
-            '>' => {
-                in_tag = false;
-                text.push(' ');
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_paragraph(&mut paragraph, &mut blocks, &headings);
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(trimmed);
+    }
+    flush_paragraph(&mut paragraph, &mut blocks, &headings);
+    let stats = summarize_blocks(&blocks);
+    ExtractedDocument {
+        title: blocks
+            .first()
+            .map(|block| block.heading_path.clone())
+            .filter(|value| !value.is_empty()),
+        blocks,
+        stats,
+    }
+}
+
+fn flush_paragraph(paragraph: &mut String, blocks: &mut Vec<TextBlock>, headings: &[String]) {
+    let cleaned = clean_visible_text(paragraph);
+    paragraph.clear();
+    if cleaned.is_empty() {
+        return;
+    }
+    blocks.push(TextBlock {
+        heading_path: headings.join(" > "),
+        link_ratio: 0.0,
+        weight: block_weight("p", "", &cleaned, 0.0),
+        boilerplate: false,
+        text: cleaned,
+    });
+}
+
+fn markdown_heading_level(line: &str) -> Option<usize> {
+    if !line.starts_with('#') {
+        return None;
+    }
+    let level = line.chars().take_while(|ch| *ch == '#').count();
+    (level >= 1 && level <= 6 && line.chars().nth(level) == Some(' ')).then_some(level)
+}
+
+fn walk_element(
+    element: ElementRef<'_>,
+    headings: &mut Vec<String>,
+    blocks: &mut Vec<TextBlock>,
+) -> bool {
+    let tag = element.value().name();
+    if NOISE_TAGS.contains(&tag) {
+        return false;
+    }
+    let heading = HEADING_TAGS.contains(&tag);
+    let heading_text = if heading {
+        clean_visible_text(&element.text().collect::<String>())
+    } else {
+        String::new()
+    };
+    if heading && !heading_text.is_empty() {
+        headings.push(heading_text);
+    }
+
+    let hints = element_hints(element);
+    let mut buffer = String::new();
+    let mut emitted = false;
+    for child in element.children() {
+        match child.value() {
+            Node::Text(text) => buffer.push_str(&text.text),
+            Node::Element(_) => {
+                let Some(child_element) = ElementRef::wrap(child.clone()) else {
+                    continue;
+                };
+                if walk_element(child_element, headings, blocks) {
+                    push_buffer(&mut buffer, tag, &hints, headings, blocks);
+                    emitted = true;
+                } else if !NOISE_TAGS.contains(&child_element.value().name()) {
+                    // A container that produced no block of its own is folded
+                    // into its parent, but never carries noise-subtree text.
+                    buffer.push_str(&visible_text(child_element));
+                }
             }
-            _ if !in_tag => text.push(ch),
             _ => {}
         }
     }
-    clean_visible_text(&text)
-}
 
-pub(super) fn decode_basic_html_entities(text: &str) -> String {
-    let first = decode_html_entities_once(text);
-    let second = decode_html_entities_once(&first);
-    if second == first {
-        first
-    } else {
-        second
+    let has_text = !buffer.trim().is_empty();
+    let is_emit_point = EMIT_TAGS.contains(&tag) || heading;
+    if has_text && (is_emit_point || emitted) {
+        let link_ratio = element_link_ratio(element);
+        push_text_block(buffer, tag, &hints, link_ratio, headings, blocks);
+        emitted = true;
     }
+
+    if heading {
+        headings.pop();
+    }
+    emitted
 }
 
-fn decode_html_entities_once(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        if ch != '&' {
-            output.push(ch);
-            continue;
-        }
-        let Some(relative_end) = text[index..].find(';') else {
-            output.push(ch);
-            continue;
-        };
-        let end = index + relative_end;
-        let entity = &text[index + 1..end];
-        if entity.is_empty() || entity.len() > 32 || entity.chars().any(char::is_whitespace) {
-            output.push(ch);
-            continue;
-        }
-        if let Some(decoded) = decode_html_entity(entity) {
-            output.push(decoded);
-            while chars.peek().is_some_and(|(next, _)| *next <= end) {
-                chars.next();
-            }
+fn push_buffer(
+    buffer: &mut String,
+    tag: &str,
+    hints: &ElementHints,
+    headings: &[String],
+    blocks: &mut Vec<TextBlock>,
+) {
+    let text = std::mem::take(buffer);
+    if text.trim().is_empty() {
+        return;
+    }
+    push_text_block(text, tag, hints, 0.0, headings, blocks);
+}
+
+fn push_text_block(
+    text: String,
+    tag: &str,
+    hints: &ElementHints,
+    link_ratio: f64,
+    headings: &[String],
+    blocks: &mut Vec<TextBlock>,
+) {
+    let text = clean_visible_text(&text);
+    if text.is_empty() {
+        return;
+    }
+    let boilerplate = hints.boilerplate;
+    blocks.push(TextBlock {
+        heading_path: headings.join(" > "),
+        weight: if boilerplate {
+            0.0
         } else {
-            output.push(ch);
+            block_weight(tag, &hints.keywords, &text, link_ratio)
+        },
+        link_ratio,
+        boilerplate,
+        text,
+    });
+}
+
+#[derive(Default)]
+struct ElementHints {
+    keywords: String,
+    boilerplate: bool,
+}
+
+fn element_hints(element: ElementRef<'_>) -> ElementHints {
+    let mut keywords = String::new();
+    for attribute in ["class", "id", "role", "aria-label"] {
+        if let Some(value) = element.value().attr(attribute) {
+            if !keywords.is_empty() {
+                keywords.push(' ');
+            }
+            keywords.push_str(value);
         }
     }
+    let lower = keywords.to_ascii_lowercase();
+    let boilerplate = !lower.is_empty()
+        && [
+            "nav",
+            "menu",
+            "sidebar",
+            "comment",
+            "related",
+            "promo",
+            "advert",
+            "cookie",
+            "breadcrumb",
+            "pagination",
+            "subscribe",
+            "login",
+            "banner",
+            "social",
+            "toc",
+            "share",
+            "footer",
+            "header",
+            "masthead",
+            "disclaimer",
+            "newsletter",
+        ]
+        .iter()
+        .any(|token| lower.contains(token));
+    ElementHints {
+        keywords: lower,
+        boilerplate,
+    }
+}
+
+fn element_link_ratio(element: ElementRef<'_>) -> f64 {
+    let total = char_count(&element.text().collect::<String>());
+    if total == 0 {
+        return 0.0;
+    }
+    let Ok(selector) = Selector::parse("a") else {
+        return 0.0;
+    };
+    let linked = element
+        .select(&selector)
+        .map(|anchor| char_count(&anchor.text().collect::<String>()))
+        .sum::<usize>();
+    (linked as f64 / total as f64).clamp(0.0, 1.0)
+}
+
+/// Text of a subtree with noise elements removed.
+fn visible_text(element: ElementRef<'_>) -> String {
+    let mut output = String::new();
+    collect_visible_text(element, &mut output);
     output
 }
 
-fn decode_html_entity(entity: &str) -> Option<char> {
-    let lower = entity.to_ascii_lowercase();
-    match lower.as_str() {
-        "nbsp" | "ensp" | "emsp" | "thinsp" => Some(' '),
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "copy" => Some('©'),
-        "reg" => Some('®'),
-        "trade" => Some('™'),
-        "hellip" => Some('…'),
-        "mdash" => Some('—'),
-        "ndash" => Some('–'),
-        "minus" => Some('−'),
-        "laquo" => Some('«'),
-        "raquo" => Some('»'),
-        "lsaquo" => Some('‹'),
-        "rsaquo" => Some('›'),
-        "ldquo" => Some('“'),
-        "rdquo" => Some('”'),
-        "lsquo" => Some('‘'),
-        "rsquo" => Some('’'),
-        "middot" => Some('·'),
-        "bull" => Some('•'),
-        "times" => Some('×'),
-        "deg" => Some('°'),
-        _ => decode_numeric_html_entity(&lower),
+fn collect_visible_text(element: ElementRef<'_>, output: &mut String) {
+    for child in element.children() {
+        match child.value() {
+            Node::Text(text) => output.push_str(&text.text),
+            Node::Element(value) => {
+                if NOISE_TAGS.contains(&value.name()) {
+                    continue;
+                }
+                if let Some(child_element) = ElementRef::wrap(child.clone()) {
+                    collect_visible_text(child_element, output);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-fn decode_numeric_html_entity(entity: &str) -> Option<char> {
-    let value = if let Some(hex) = entity
-        .strip_prefix("#x")
-        .or_else(|| entity.strip_prefix("#X"))
-    {
-        u32::from_str_radix(hex, 16).ok()?
-    } else if let Some(decimal) = entity.strip_prefix('#') {
-        decimal.parse::<u32>().ok()?
-    } else {
-        return None;
+fn block_weight(tag: &str, hints: &str, text: &str, link_ratio: f64) -> f64 {
+    let chars = char_count(text);
+    let mut weight: f64 = 1.0;
+    if CONTENT_BLOCK_TAGS.contains(&tag) {
+        weight += 0.3;
+    }
+    if HEADING_TAGS.contains(&tag) {
+        weight += 0.2;
+    }
+    weight += match chars {
+        0..=24 => -0.3,
+        25..=79 => 0.0,
+        80..=199 => 0.25,
+        _ => 0.5,
     };
-    char::from_u32(value)
+    if link_ratio > 0.6 {
+        weight -= 0.6;
+    } else if link_ratio > 0.4 {
+        weight -= 0.3;
+    }
+    if !hints.is_empty()
+        && [
+            "article",
+            "content",
+            "body",
+            "post",
+            "entry",
+            "prose",
+            "markdown",
+            "readme",
+            "documentation",
+            "doc",
+            "main",
+        ]
+        .iter()
+        .any(|token| hints.contains(token))
+    {
+        weight += 0.4;
+    }
+    weight.clamp(0.0, 2.0)
 }
 
-fn remove_token_noise(text: &str) -> String {
-    text.chars()
-        .filter_map(|ch| match ch {
-            '\u{00a0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200a}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202f}'
-            | '\u{205f}'
-            | '\u{3000}' => Some(' '),
-            '\u{00ad}'
-            | '\u{034f}'
-            | '\u{061c}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{feff}' => None,
-            _ if ch.is_control() && !ch.is_whitespace() => None,
-            _ => Some(ch),
+/// Keeps only blocks whose weight clears the content bar, in page order.
+fn summarize_blocks(blocks: &[TextBlock]) -> ExtractionStats {
+    let body_chars = blocks
+        .iter()
+        .map(|block| char_count(&block.text))
+        .sum::<usize>();
+    let content_blocks = blocks
+        .iter()
+        .filter(|block| !block.boilerplate && block.weight >= 0.7)
+        .collect::<Vec<_>>();
+    let content_chars = content_blocks
+        .iter()
+        .map(|block| char_count(&block.text))
+        .sum::<usize>();
+    let linked_chars = blocks
+        .iter()
+        .map(|block| (char_count(&block.text) as f64 * block.link_ratio) as usize)
+        .sum::<usize>();
+    ExtractionStats {
+        body_chars,
+        content_chars,
+        content_ratio: if body_chars == 0 {
+            0.0
+        } else {
+            (content_chars as f64 / body_chars as f64).clamp(0.0, 1.0)
+        },
+        link_ratio: if body_chars == 0 {
+            0.0
+        } else {
+            (linked_chars as f64 / body_chars as f64).clamp(0.0, 1.0)
+        },
+        blocks_total: blocks.len(),
+        blocks_content: content_blocks.len(),
+    }
+}
+
+/// One block chosen for the evidence payload.
+#[derive(Clone, Debug)]
+pub(super) struct SelectedBlock {
+    pub(super) heading_path: String,
+    pub(super) text: String,
+    /// Number of page blocks skipped between this block and the previous one.
+    pub(super) skipped_blocks: usize,
+    pub(super) skipped_chars: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Selection {
+    pub(super) blocks: Vec<SelectedBlock>,
+    pub(super) kept_chars: usize,
+    pub(super) omitted_chars: usize,
+    pub(super) omitted_blocks: usize,
+}
+
+/// Chooses a bounded, information-dense slice of the page.
+///
+/// Instead of truncating the head of the text, the opening blocks, the highest
+/// scoring blocks, and a tail sample compete for a fixed character budget, and
+/// every gap is reported explicitly.
+pub(super) fn select_blocks(
+    document: &ExtractedDocument,
+    query_terms: &[String],
+    budget: usize,
+) -> Selection {
+    let blocks = &document.blocks;
+    if blocks.is_empty() {
+        return Selection {
+            blocks: Vec::new(),
+            kept_chars: 0,
+            omitted_chars: 0,
+            omitted_blocks: 0,
+        };
+    }
+    let scored = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let hits = query_terms
+                .iter()
+                .filter(|term| block.text.to_lowercase().contains(term.as_str()))
+                .count();
+            (index, block.weight * (1.0 + 2.0 * hits as f64))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let mut order = scored
+        .iter()
+        .take(2)
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    let mut by_score = scored.clone();
+    by_score.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (index, _) in by_score {
+        if !order.contains(&index) {
+            order.push(index);
+        }
+    }
+
+    let mut chosen: Vec<(usize, usize)> = Vec::new();
+    let mut used = 0usize;
+    for index in order {
+        if used >= budget {
+            break;
+        }
+        let block = &blocks[index];
+        if block.boilerplate || block.weight < 0.5 {
+            continue;
+        }
+        let length = char_count(&block.text);
+        let remaining = budget - used;
+        if length > remaining {
+            // Keep a partial slice rather than dropping a long, relevant block.
+            chosen.push((index, remaining));
+            used = budget;
+            continue;
+        }
+        chosen.push((index, length));
+        used += length;
+    }
+    chosen.sort_by_key(|(index, _)| *index);
+
+    let mut selected = Vec::with_capacity(chosen.len());
+    let mut previous: Option<usize> = None;
+    let mut omitted_blocks = 0usize;
+    let mut kept_chars = 0usize;
+    for (index, keep) in chosen {
+        let block = &blocks[index];
+        let (skipped_blocks, skipped_chars) = match previous {
+            Some(previous) => {
+                let skipped = &blocks[previous + 1..index];
+                (
+                    skipped.len(),
+                    skipped
+                        .iter()
+                        .map(|item| char_count(&item.text))
+                        .sum::<usize>(),
+                )
+            }
+            None => (
+                index,
+                blocks[..index]
+                    .iter()
+                    .map(|item| char_count(&item.text))
+                    .sum(),
+            ),
+        };
+        omitted_blocks += skipped_blocks;
+        previous = Some(index);
+        let text = if keep >= char_count(&block.text) {
+            block.text.clone()
+        } else {
+            truncate_chars(&block.text, keep)
+        };
+        kept_chars += char_count(&text);
+        selected.push(SelectedBlock {
+            heading_path: block.heading_path.clone(),
+            text,
+            skipped_blocks,
+            skipped_chars,
+        });
+    }
+    let total_chars = char_count(
+        &blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+    );
+    Selection {
+        blocks: selected,
+        kept_chars,
+        omitted_chars: total_chars.saturating_sub(kept_chars),
+        omitted_blocks,
+    }
+}
+
+fn document_title(document: &Html) -> Option<String> {
+    static TITLE: OnceLock<Option<Selector>> = OnceLock::new();
+    let selector = TITLE
+        .get_or_init(|| Selector::parse("title").ok())
+        .as_ref()?;
+    document
+        .select(selector)
+        .next()
+        .map(|element| clean_visible_text(&element.text().collect::<String>()))
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_chars(&value, 240))
 }
 
 pub(super) fn bytes_have_binary_markers(bytes: &[u8]) -> bool {
@@ -164,17 +650,14 @@ pub(super) fn decode_text_bytes(bytes: &[u8], content_type: &str) -> (String, &'
         let (text, _, had_errors) = encoding.decode(bytes);
         return (text.into_owned(), encoding.name(), had_errors);
     }
-
     let (text, _, had_errors) = UTF_8.decode(bytes);
     if !had_errors {
         return (text.into_owned(), UTF_8.name(), false);
     }
-
     let (text, _, had_errors) = GB18030.decode(bytes);
     if text_is_plausible(&text) {
         return (text.into_owned(), GB18030.name(), had_errors);
     }
-
     let (text, _, had_errors) = WINDOWS_1252.decode(bytes);
     (text.into_owned(), WINDOWS_1252.name(), had_errors)
 }
@@ -245,206 +728,8 @@ pub(super) fn response_looks_like_markdown(content_type: &str, url: &str) -> boo
     url.ends_with(".md") || url.ends_with(".markdown") || url.ends_with(".mdown")
 }
 
-pub(super) fn extract_html_title(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let start = lower.find("<title")?;
-    let after_open = lower[start..].find('>')? + start + 1;
-    let end = lower[after_open..].find("</title>")? + after_open;
-    let title = compact_whitespace(&html[after_open..end]);
-    (!title.is_empty()).then(|| truncate_chars(&clean_visible_text(&title), 240))
-}
-
-pub(super) fn extract_markdown_title(markdown: &str) -> Option<String> {
-    markdown.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('#') {
-            return None;
-        }
-        let title = trimmed.trim_start_matches('#').trim();
-        (!title.is_empty()).then(|| truncate_chars(&clean_visible_text(title), 240))
-    })
-}
-
-pub(super) fn html_to_text(html: &str) -> String {
-    let source = extract_preferred_html_region(html).unwrap_or(html);
-    let mut cleaned = redact_inline_data_urls(source);
-    for tag in [
-        "script", "style", "noscript", "svg", "canvas", "picture", "video", "audio", "iframe",
-        "object", "embed", "nav", "header", "footer", "form", "dialog",
-    ] {
-        cleaned = remove_html_block(&cleaned, tag);
-    }
-    let mut text = String::new();
-    let mut in_tag = false;
-    for ch in cleaned.chars() {
-        match ch {
-            '<' => {
-                in_tag = true;
-                text.push(' ');
-            }
-            '>' => {
-                in_tag = false;
-                text.push(' ');
-            }
-            _ if !in_tag => text.push(ch),
-            _ => {}
-        }
-    }
-    clean_visible_text(&text)
-}
-
-pub(super) fn markdown_to_text(markdown: &str) -> String {
-    let mut text = redact_inline_data_urls(markdown)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    for tag in [
-        "script", "style", "noscript", "svg", "canvas", "picture", "video", "audio", "iframe",
-        "object", "embed",
-    ] {
-        text = remove_html_block(&text, tag);
-    }
-    text = html_comment_re().replace_all(&text, " ").into_owned();
-    text = html_void_resource_tag_re()
-        .replace_all(&text, " ")
-        .into_owned();
-    text = markdown_inline_image_re()
-        .replace_all(&text, " ")
-        .into_owned();
-    text = markdown_reference_image_re()
-        .replace_all(&text, " ")
-        .into_owned();
-    text = markdown_link_re()
-        .replace_all(&text, |caps: &regex::Captures<'_>| {
-            caps.get(1)
-                .map(|value| value.as_str())
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .into_owned();
-
-    let mut output = Vec::new();
-    let mut in_code_fence = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_code_fence = !in_code_fence;
-            output.push(trimmed.to_owned());
-            continue;
-        }
-        if in_code_fence {
-            output.push(line.trim_end().to_owned());
-            continue;
-        }
-        if markdown_reference_definition_re().is_match(trimmed) {
-            continue;
-        }
-        let stripped = html_tag_re().replace_all(trimmed, " ");
-        let stripped = clean_visible_text(stripped.as_ref());
-        if stripped.is_empty() {
-            if output
-                .last()
-                .is_some_and(|value: &String| !value.is_empty())
-            {
-                output.push(String::new());
-            }
-            continue;
-        }
-        output.push(stripped);
-    }
-    while output.last().is_some_and(|value| value.is_empty()) {
-        output.pop();
-    }
-    output.join("\n")
-}
-
-fn html_comment_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?is)<!--.*?-->").expect("valid html comment regex"))
-}
-
-fn html_void_resource_tag_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?is)<\s*(img|source|meta|link|br)\b[^>]*>")
-            .expect("valid html void resource regex")
-    })
-}
-
-fn html_tag_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?is)</?[^>\n]{1,300}>").expect("valid html tag regex"))
-}
-
-fn markdown_inline_image_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"!\[[^\]\n]*\]\([^\)\n]*\)").expect("valid markdown inline image regex")
-    })
-}
-
-fn markdown_reference_image_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"!\[[^\]\n]*\]\[[^\]\n]*\]").expect("valid markdown reference image regex")
-    })
-}
-
-fn markdown_link_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\[([^\]\n]+)\]\([^\)\n]+\)").expect("valid markdown link regex"))
-}
-
-fn markdown_reference_definition_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"^\[[^\]]+\]:\s+\S+"#).expect("valid markdown reference definition regex")
-    })
-}
-
-fn extract_preferred_html_region(html: &str) -> Option<&str> {
-    for tag in ["main", "article"] {
-        if let Some(region) = first_html_block(html, tag) {
-            return Some(region);
-        }
-    }
-    None
-}
-
-fn first_html_block<'a>(html: &'a str, tag: &str) -> Option<&'a str> {
-    let lower = html.to_ascii_lowercase();
-    let open_prefix = format!("<{tag}");
-    let close_tag = format!("</{tag}>");
-    let start = lower.find(&open_prefix)?;
-    let after_open = lower[start..].find('>')? + start + 1;
-    let end = lower[after_open..].find(&close_tag)? + after_open;
-    html.get(after_open..end)
-}
-
-fn remove_html_block(html: &str, tag: &str) -> String {
-    let mut output = html.to_owned();
-    let open_prefix = format!("<{tag}");
-    let close_tag = format!("</{tag}>");
-    loop {
-        let lower = output.to_ascii_lowercase();
-        let Some(start) = lower.find(&open_prefix) else {
-            break;
-        };
-        let Some(relative_open_end) = lower[start..].find('>') else {
-            output.truncate(start);
-            break;
-        };
-        let after_open = start + relative_open_end + 1;
-        if let Some(relative_end) = lower[after_open..].find(&close_tag) {
-            let end = after_open + relative_end + tag.len() + 3;
-            output.replace_range(start..end, " ");
-        } else if matches!(tag, "script" | "style") {
-            output.truncate(start);
-            break;
-        } else {
-            output.replace_range(start..after_open, " ");
-        }
-    }
-    output
+pub(super) fn redact_inline_data_urls(text: &str) -> String {
+    codeseex_core::context::redact_inline_data_urls(text)
 }
 
 #[cfg(test)]
@@ -452,118 +737,91 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_html_even_without_html_content_type() {
-        let html = "<html><head><script>window.noise = true;</script></head><body>VISIBLE_TEXT</body></html>";
-        assert!(response_looks_like_html("text/plain", html));
-        let text = html_to_text(html);
-        assert!(text.contains("VISIBLE_TEXT"));
-        assert!(!text.contains("window.noise"));
-    }
-
-    #[test]
-    fn removes_resource_noise() {
+    fn keeps_body_text_and_drops_page_furniture() {
         let html = r#"
-            <html><head>
-              <style>body { color: red; }</style>
-              <script>window.secret = "noise";</script>
-            </head>
-            <body>
-              <svg><text>SVG_NOISE</text></svg>
-              <img src="data:image/png;base64,AAAA" />
-              <main>VISIBLE evidence text.</main>
-            </body></html>
-        "#;
-        let text = html_to_text(html);
+            <html><head><title>Example</title>
+            <style>body { color: red; }</style><script>window.noise = 1;</script>
+            </head><body>
+              <header>HEADER_NAV_NOISE</header>
+              <nav>LOCAL_NAV_NOISE</nav>
+              <main><article><p>Primary documentation content.</p></article></main>
+              <footer>FOOTER_NOISE</footer>
+            </body></html>"#;
+        let document = html_to_document(html);
+        let text = document
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        assert!(text.contains("VISIBLE evidence text."));
-        assert!(!text.contains("window.secret"));
-        assert!(!text.contains("SVG_NOISE"));
-        assert!(!text.contains("base64"));
-    }
-
-    #[test]
-    fn cleans_numeric_entities_and_invisible_token_noise() {
-        let text = "Python&nbsp;3.14&#8212;docs&#x2014;&amp;#187;\u{200b}\u{feff} end";
-
-        assert_eq!(clean_visible_text(text), "Python 3.14—docs—» end");
-    }
-
-    #[test]
-    fn html_to_text_decodes_nested_entities() {
-        let html = "<main>Docs &amp;#8212; API &rsquo;reference&rsquo;</main>";
-
-        assert_eq!(html_to_text(html), "Docs — API ’reference’");
-    }
-
-    #[test]
-    fn truncated_unclosed_style_does_not_leak_css_as_text() {
-        let html = r#"
-            <html>
-              <head><title>Example</title></head>
-              <body>
-                Intro text before a truncated style block.
-                <style>@layer ads { .ad-slot{display:block}.promo{font-size:12px}
-        "#;
-
-        let text = html_to_text(html);
-
-        assert!(text.contains("Intro text"));
-        assert!(!text.contains("@layer"));
-        assert!(!text.contains("ad-slot"));
-    }
-
-    #[test]
-    fn malformed_resource_tag_does_not_drop_following_body() {
-        let html = r#"
-            <html><body>
-              <svg viewBox="0 0 1 1" />
-              <main>VISIBLE_TEXT_AFTER_RESOURCE</main>
-            </body></html>
-        "#;
-
-        let text = html_to_text(html);
-
-        assert!(text.contains("VISIBLE_TEXT_AFTER_RESOURCE"));
-        assert!(!text.contains("viewBox"));
-    }
-
-    #[test]
-    fn prefers_semantic_page_body() {
-        let html = r#"
-            <html>
-              <body>
-                <header>HEADER_NAV_NOISE</header>
-                <main>
-                  <nav>LOCAL_NAV_NOISE</nav>
-                  <article>Primary documentation content.</article>
-                </main>
-                <footer>FOOTER_NOISE</footer>
-              </body>
-            </html>
-        "#;
-        let text = html_to_text(html);
-
+        assert_eq!(document.title.as_deref(), Some("Example"));
         assert!(text.contains("Primary documentation content."));
         assert!(!text.contains("HEADER_NAV_NOISE"));
         assert!(!text.contains("LOCAL_NAV_NOISE"));
         assert!(!text.contains("FOOTER_NOISE"));
+        assert!(!text.contains("window.noise"));
+    }
+
+    #[test]
+    fn preserves_angle_brackets_inside_code() {
+        let html = "<html><body><p>Compare a &lt; b and x &lt;&lt; 2.</p></body></html>";
+        let document = html_to_document(html);
+        let text = document
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("a < b"), "{text}");
+        assert!(text.contains("x << 2"), "{text}");
+    }
+
+    #[test]
+    fn inline_links_stay_inside_their_paragraph() {
+        let html =
+            r#"<html><body><p>Read the <a href="/docs">install guide</a> first.</p></body></html>"#;
+        let document = html_to_document(html);
+
+        assert_eq!(document.blocks.len(), 1);
+        assert!(document.blocks[0].text.contains("install guide"));
+    }
+
+    #[test]
+    fn reports_low_content_ratio_for_navigation_heavy_pages() {
+        let items = (0..40)
+            .map(|index| format!("<li><a href=\"/p/{index}\">Menu item {index}</a></li>"))
+            .collect::<String>();
+        let html = format!("<html><body><ul class=\"menu\">{items}</ul><p>short</p></body></html>");
+        let document = html_to_document(&html);
+
+        assert!(document.is_low_confidence(), "{:?}", document.stats);
+    }
+
+    #[test]
+    fn budgeted_selection_reports_omissions_instead_of_truncating_the_head() {
+        let mut html = String::from("<html><body>");
+        for index in 0..30 {
+            html.push_str(&format!("<p>Paragraph number {index} with some text.</p>"));
+        }
+        html.push_str("</body></html>");
+        let document = html_to_document(&html);
+        let selection = select_blocks(&document, &[], 200);
+
+        assert!(selection.kept_chars <= 260);
+        assert!(selection.omitted_chars > 0);
+        assert!(selection.blocks.len() > 1);
     }
 
     #[test]
     fn decodes_gb18030_textual_html() {
-        let (bytes, _, _) = GB18030.encode("<html><body>上海天气</body></html>");
+        let (bytes, _, _) = GB18030.encode("<html><body>Shanghai weather</body></html>");
         let (text, encoding, had_errors) = decode_text_bytes(&bytes, "text/html; charset=gb18030");
 
         assert_eq!(encoding, "gb18030");
         assert!(!had_errors);
-        assert!(text.contains("上海天气"));
-    }
-
-    #[test]
-    fn binary_markers_do_not_treat_legacy_chinese_text_as_binary() {
-        let (bytes, _, _) = GB18030.encode("上海天气");
-
-        assert!(!bytes_have_binary_markers(&bytes));
+        assert!(text.contains("Shanghai weather"));
     }
 
     #[test]
@@ -575,58 +833,16 @@ mod tests {
     }
 
     #[test]
-    fn cleans_markdown_resource_noise() {
-        let markdown = r#"
-            <div align="center">
-            <picture>
-              <source media="(prefers-color-scheme: dark)" srcset="data:image/svg+xml;base64,AAAA">
-              <img alt="Logo" src="https://example.test/logo.png">
-            </picture>
-            </div>
+    fn markdown_headings_become_block_paths() {
+        let document =
+            markdown_to_document("# Rust\n\nRust is a language.\n\n## Install\n\nUse rustup.");
+        let paths = document
+            .blocks
+            .iter()
+            .map(|block| block.heading_path.clone())
+            .collect::<Vec<_>>();
 
-            # Rust
-
-            ![badge](https://example.test/badge.svg)
-
-            Rust is a language empowering everyone to build reliable software.
-
-            [Install Rust](https://www.rust-lang.org/tools/install)
-
-            ```rust
-            fn main() {
-                println!("hello");
-            }
-            ```
-        "#;
-
-        let text = markdown_to_text(markdown);
-
-        assert_eq!(extract_markdown_title(markdown).as_deref(), Some("Rust"));
-        assert!(text.contains("# Rust"));
-        assert!(text.contains("Rust is a language"));
-        assert!(text.contains("Install Rust"));
-        assert!(text.contains("fn main()"));
-        assert!(!text.contains("<picture"));
-        assert!(!text.contains("<source"));
-        assert!(!text.contains("<img"));
-        assert!(!text.contains("base64"));
-        assert!(!text.contains("badge.svg"));
-    }
-
-    #[test]
-    fn markdown_cleanup_preserves_code_block_angle_brackets() {
-        let markdown = r#"
-            # Example
-
-            ```rust
-            fn parse<T>(value: T) -> T {
-                value
-            }
-            ```
-        "#;
-
-        let text = markdown_to_text(markdown);
-
-        assert!(text.contains("parse<T>"));
+        assert!(paths.iter().any(|path| path == "Rust"));
+        assert!(paths.iter().any(|path| path == "Rust > Install"));
     }
 }

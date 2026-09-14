@@ -2464,14 +2464,12 @@ fn web_source_unreachable(object: Option<&Map<String, Value>>) -> bool {
 }
 
 fn web_unreachable_count(object: Option<&Map<String, Value>>) -> Option<usize> {
+    let nested = object.and_then(|object| object.get("web_search"));
     let health = object
-        .and_then(|object| {
-            object.get("source_health").or_else(|| {
-                object
-                    .get("web_search")
-                    .and_then(|value| value.get("source_health"))
-            })
-        })
+        .and_then(|object| object.get("source_health"))
+        .or_else(|| nested.and_then(|value| value.get("source_health")))
+        // Tool results publish per-source outcomes under `sources`.
+        .or_else(|| nested.and_then(|value| value.get("sources")))
         .and_then(Value::as_array)?;
     Some(
         health
@@ -2981,16 +2979,7 @@ fn compact_event_detail(event_type: &str, detail: &Value) -> Option<Value> {
                     ),
                     (
                         "web_search",
-                        &[
-                            "source_plan",
-                            "source_order",
-                            "source_health",
-                            "sources_attempted",
-                            "sources_deprioritized",
-                            "source_diagnostics",
-                            "fallback_errors",
-                            "browser_fallback",
-                        ][..],
+                        &["sources", "sources_attempted", "sources_skipped", "quality"][..],
                     ),
                     (
                         "vision",
@@ -8453,10 +8442,10 @@ mod tests {
                     "ok": false,
                     "summary": "web_search search ok=false candidates=0",
                     "web_search": {
-                        "source_order": ["bing_html", "duckduckgo_lite"],
-                        "source_health": [{
+                        "sources": [{
                             "source": "duckduckgo_lite",
                             "reachable": false,
+                            "ok": false,
                             "error": "timeout"
                         }]
                     }
@@ -8718,29 +8707,18 @@ mod tests {
                     "ok": false,
                     "summary": "web_search search ok=false candidates=0",
                     "web_search": {
-                        "source_plan": "on_demand_probe",
-                        "source_order": ["bing_html", "duckduckgo_lite"],
-                        "source_health": [{
+                        "sources": [{
                             "source": "bing_html",
-                            "reachable": true,
+                            "ok": true,
                             "latency_ms": 120,
                             "status": 200,
                             "error": null,
-                            "age_ms": 18,
-                            "message": "do not keep source health prose"
-                        }],
-                        "sources_attempted": ["bing_html"],
-                        "source_diagnostics": [{
-                            "source": "bing_html",
-                            "error": "filtered_low_confidence",
                             "result_count": 2,
-                            "usable_result_count": 0,
                             "unsafe_body": "do not keep me"
                         }],
-                        "fallback_errors": [{
-                            "source": "duckduckgo_lite",
-                            "error": "request_failed"
-                        }],
+                        "sources_attempted": ["bing_html"],
+                        "sources_skipped": ["duckduckgo_lite"],
+                        "quality": { "degraded": true, "low_confidence": true },
                         "unsafe_html": "<html>secret</html>"
                     }
                 })),
@@ -8750,25 +8728,18 @@ mod tests {
 
         let (events, _) = store.recent_events(10, None).await.expect("events");
         let detail = events[0].detail.as_ref().expect("detail");
-        assert_eq!(detail["web_search"]["source_plan"], "on_demand_probe");
-        assert_eq!(detail["web_search"]["source_order"][0], "bing_html");
-        assert_eq!(
-            detail["web_search"]["source_health"][0]["source"],
-            "bing_html"
-        );
-        assert_eq!(detail["web_search"]["source_health"][0]["reachable"], true);
-        assert!(detail["web_search"]["source_health"][0]
-            .get("message")
+        assert_eq!(detail["web_search"]["sources"][0]["source"], "bing_html");
+        assert_eq!(detail["web_search"]["sources"][0]["ok"], true);
+        assert!(detail["web_search"]["sources"][0]
+            .get("unsafe_body")
             .is_none());
         assert_eq!(detail["web_search"]["sources_attempted"][0], "bing_html");
         assert_eq!(
-            detail["web_search"]["source_diagnostics"][0]["error"],
-            "filtered_low_confidence"
+            detail["web_search"]["sources_skipped"][0],
+            "duckduckgo_lite"
         );
+        assert_eq!(detail["web_search"]["quality"]["degraded"], true);
         assert!(detail["web_search"].get("unsafe_html").is_none());
-        assert!(detail["web_search"]["source_diagnostics"][0]
-            .get("unsafe_body")
-            .is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

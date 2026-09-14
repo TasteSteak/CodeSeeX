@@ -8,9 +8,14 @@ pub(super) fn normalize_candidate_url(value: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let raw = raw.trim_end_matches([',', '.', ';', ')']);
+    let raw = trim_url_trailing_punctuation(raw);
+    // Search engines publish protocol-relative links (`//host/path`); treat them
+    // as https so they are not silently dropped.
+    let raw = raw
+        .strip_prefix("//")
+        .map_or_else(|| raw.to_owned(), |rest| format!("https://{rest}"));
     let parsed = if raw.starts_with("http://") || raw.starts_with("https://") {
-        reqwest::Url::parse(raw).ok()?
+        reqwest::Url::parse(&raw).ok()?
     } else if raw
         .split('/')
         .next()
@@ -21,11 +26,52 @@ pub(super) fn normalize_candidate_url(value: &str) -> Option<String> {
     } else {
         return None;
     };
-    let parsed = decode_bing_redirect_url(&parsed).unwrap_or(parsed);
+    let parsed = decode_search_redirect_url(&parsed).unwrap_or(parsed);
     match parsed.scheme() {
         "http" | "https" => Some(parsed.to_string()),
         _ => None,
     }
+}
+
+/// Drops punctuation that a sentence glued onto a URL, without dropping a
+/// parenthesis that is part of the URL itself (for example a Wikipedia title).
+fn trim_url_trailing_punctuation(value: &str) -> &str {
+    let mut end = value.len();
+    while let Some(last) = value[..end].chars().last() {
+        let trim = match last {
+            '.' | ',' | ';' => true,
+            ')' => {
+                let slice = &value[..end];
+                slice.chars().filter(|ch| *ch == ')').count()
+                    > slice.chars().filter(|ch| *ch == '(').count()
+            }
+            _ => false,
+        };
+        if !trim {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    &value[..end]
+}
+
+/// Unwraps the redirect endpoints search engines publish in their result links,
+/// so the rest of the pipeline only ever sees the real target URL.
+fn decode_search_redirect_url(url: &reqwest::Url) -> Option<reqwest::Url> {
+    decode_bing_redirect_url(url).or_else(|| decode_duckduckgo_redirect_url(url))
+}
+
+fn decode_duckduckgo_redirect_url(url: &reqwest::Url) -> Option<reqwest::Url> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    if !host.ends_with("duckduckgo.com") {
+        return None;
+    }
+    let target = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "uddg" || key == "u").then(|| value.into_owned()))?;
+    let target = target.trim_start_matches("a1");
+    let parsed = reqwest::Url::parse(target).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then_some(parsed)
 }
 
 fn decode_bing_redirect_url(url: &reqwest::Url) -> Option<reqwest::Url> {

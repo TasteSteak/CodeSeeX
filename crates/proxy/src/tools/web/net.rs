@@ -1,10 +1,8 @@
 use codeseex_core::NetworkProxyMode;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr};
 
-use super::extract::{bytes_have_binary_markers, decode_text_bytes};
 use super::MAX_BYTES;
 
 pub(super) const WEB_REQUEST_TIMEOUT_SECS: u64 = 12;
@@ -44,56 +42,6 @@ pub(super) fn pinned_no_redirect_client(
         builder.resolve_to_addrs(host, &pinned)
     };
     builder.build().expect("build pinned web client")
-}
-
-pub(super) async fn fetch_text(client: &reqwest::Client, url: reqwest::Url, accept: &str) -> Value {
-    let response = match client
-        .get(url.clone())
-        .header(reqwest::header::USER_AGENT, user_agent())
-        .header(reqwest::header::ACCEPT, accept)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            return json!({
-                "ok": false,
-                "error": "request_failed",
-                "url": url.as_str(),
-                "message": request_error_message(&error)
-            });
-        }
-    };
-    let status = response.status().as_u16();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
-    let (bytes, byte_truncated) = read_limited_response_bytes(response).await;
-    if bytes_have_binary_markers(&bytes) {
-        return json!({
-            "ok": false,
-            "error": "binary_response",
-            "url": url.as_str(),
-            "status": status,
-            "content_type": content_type,
-            "bytes": bytes.len()
-        });
-    }
-    let (text, encoding, had_decode_errors) = decode_text_bytes(&bytes, &content_type);
-    json!({
-        "ok": (200..400).contains(&status),
-        "url": url.as_str(),
-        "status": status,
-        "content_type": content_type,
-        "encoding": encoding,
-        "decode_errors": had_decode_errors,
-        "text": text,
-        "bytes": bytes.len(),
-        "truncated": byte_truncated
-    })
 }
 
 pub(super) fn request_error_message(error: &reqwest::Error) -> String {

@@ -56,6 +56,7 @@ use crate::upstream::payload::{
 };
 mod access;
 mod native_runtime;
+mod native_search_presentation;
 mod request_diagnostics;
 mod response_helpers;
 mod response_lifecycle;

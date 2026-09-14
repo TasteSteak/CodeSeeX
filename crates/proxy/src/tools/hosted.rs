@@ -129,14 +129,10 @@ pub(crate) fn tool_result_event_detail_for(
             object.insert(
                 "web_search".to_owned(),
                 json!({
-                    "source_plan": result.get("source_plan").cloned().unwrap_or(Value::Null),
-                    "source_order": result.get("source_order").cloned().unwrap_or(Value::Null),
                     "sources_attempted": result.get("sources_attempted").cloned().unwrap_or(Value::Null),
-                    "sources_deprioritized": result.get("sources_deprioritized").cloned().unwrap_or(Value::Null),
-                    "source_health": compact_web_source_health_array(result.get("source_health")),
-                    "source_diagnostics": compact_web_source_diagnostic_array(result.get("source_diagnostics")),
-                    "fallback_errors": compact_web_source_diagnostic_array(result.get("fallback_errors")),
-                    "browser_fallback": compact_browser_fallback(result.get("browser_fallback"))
+                    "sources_skipped": result.get("sources_skipped").cloned().unwrap_or(Value::Null),
+                    "sources": compact_web_source_diagnostic_array(result.get("sources")),
+                    "quality": result.get("quality").cloned().unwrap_or(Value::Null)
                 }),
             );
         }
@@ -191,58 +187,26 @@ fn compact_web_search_result_for_model(result: &Value) -> Value {
         "ok": result.get("ok").cloned().unwrap_or(Value::Null),
         "stage": result.get("stage").cloned().unwrap_or(Value::Null),
         "mode": result.get("mode").cloned().unwrap_or(Value::Null),
+        "queries": result.get("queries").cloned().unwrap_or(Value::Null),
         "candidate_count": result.get("candidate_count").cloned().unwrap_or(Value::Null),
-        "opened_count": result.get("opened_count").cloned().unwrap_or(Value::Null),
-        "failure_count": result.get("failure_count").cloned().unwrap_or(Value::Null),
-        "low_confidence": result.get("low_confidence").cloned().unwrap_or(Value::Null),
-        "low_confidence_fallback": result.get("low_confidence_fallback").cloned().unwrap_or(Value::Null),
+        "candidates": compact_web_candidate_array(result.get("candidates")),
         "evidence": compact_web_evidence_array(result.get("evidence")),
         "evidence_count": result.get("evidence_count").cloned().unwrap_or(Value::Null),
-        "results": compact_web_result_array(result.get("results")),
-        "candidates": compact_web_result_array(result.get("candidates")),
-        "opened_results": compact_web_result_array(result.get("opened_results")),
-        "auto_opened": result.get("auto_opened").cloned().unwrap_or(Value::Null),
-        "auto_open_targets": result.get("auto_open_targets").cloned().unwrap_or(Value::Null),
-        "auto_opened_count": result.get("auto_opened_count").cloned().unwrap_or(Value::Null),
-        "auto_open_failed_count": result.get("auto_open_failed_count").cloned().unwrap_or(Value::Null),
-        "failed_results": compact_web_diagnostic_array(result.get("failed_results")),
-        "auto_open_failed_results": compact_web_diagnostic_array(result.get("auto_open_failed_results")),
-        "source_plan": result.get("source_plan").cloned().unwrap_or(Value::Null),
-        "source_order": result.get("source_order").cloned().unwrap_or(Value::Null),
+        "opened": compact_web_opened_array(result.get("opened")),
+        "opened_count": result.get("opened_count").cloned().unwrap_or(Value::Null),
+        "quality": result.get("quality").cloned().unwrap_or(Value::Null),
+        "sources": compact_web_source_diagnostic_array(result.get("sources")),
         "sources_attempted": result.get("sources_attempted").cloned().unwrap_or(Value::Null),
-        "sources_deprioritized": result.get("sources_deprioritized").cloned().unwrap_or(Value::Null),
-        "source_health": compact_web_source_health_array(result.get("source_health")),
-        "source_diagnostics": compact_web_source_diagnostic_array(result.get("source_diagnostics")),
-        "fallback_errors": compact_web_source_diagnostic_array(result.get("fallback_errors")),
+        "sources_skipped": result.get("sources_skipped").cloned().unwrap_or(Value::Null),
+        "errors": compact_web_diagnostic_array(result.get("errors")),
+        "unresolved_ids": result.get("unresolved_ids").cloned().unwrap_or(Value::Null),
+        "per_query": result.get("per_query").cloned().unwrap_or(Value::Null),
+        "next_action": result.get("next_action").cloned().unwrap_or(Value::Null),
         "error": result.get("error").cloned().unwrap_or(Value::Null),
         "message": result.get("message").cloned().unwrap_or(Value::Null),
-        "open_ids": result.get("open_ids").cloned().unwrap_or(Value::Null),
-        "unresolved_ids": result.get("unresolved_ids").cloned().unwrap_or(Value::Null),
         "truncated": result.get("truncated").cloned().unwrap_or(Value::Null),
         "codeseex_compacted_for_model": true
     })
-}
-
-fn compact_web_source_health_array(value: Option<&Value>) -> Value {
-    let Some(items) = value.and_then(Value::as_array) else {
-        return Value::Array(Vec::new());
-    };
-    Value::Array(
-        items
-            .iter()
-            .take(8)
-            .map(|item| {
-                json!({
-                    "source": item.get("source").cloned().unwrap_or(Value::Null),
-                    "reachable": item.get("reachable").cloned().unwrap_or(Value::Null),
-                    "latency_ms": item.get("latency_ms").cloned().unwrap_or(Value::Null),
-                    "status": item.get("status").cloned().unwrap_or(Value::Null),
-                    "error": item.get("error").cloned().unwrap_or(Value::Null),
-                    "age_ms": item.get("age_ms").cloned().unwrap_or(Value::Null)
-                })
-            })
-            .collect(),
-    )
 }
 
 fn compact_web_source_diagnostic_array(value: Option<&Value>) -> Value {
@@ -260,19 +224,58 @@ fn compact_web_source_diagnostic_array(value: Option<&Value>) -> Value {
                     "status": item.get("status").cloned().unwrap_or(Value::Null),
                     "error": item.get("error").cloned().unwrap_or(Value::Null),
                     "result_count": item.get("result_count").cloned().unwrap_or(Value::Null),
-                    "usable_result_count": item.get("usable_result_count").cloned().unwrap_or(Value::Null),
-                    "max_score": item.get("max_score").cloned().unwrap_or(Value::Null)
+                    "latency_ms": item.get("latency_ms").cloned().unwrap_or(Value::Null)
                 })
             })
             .collect(),
     )
 }
 
-fn compact_web_result_array(value: Option<&Value>) -> Value {
+fn compact_web_candidate_array(value: Option<&Value>) -> Value {
     let Some(items) = value.and_then(Value::as_array) else {
         return Value::Array(Vec::new());
     };
-    Value::Array(items.iter().take(8).map(compact_web_result_item).collect())
+    Value::Array(
+        items
+            .iter()
+            .take(8)
+            .map(|item| {
+                json!({
+                    "id": item.get("id").cloned().unwrap_or(Value::Null),
+                    "title": item.get("title").cloned().unwrap_or(Value::Null),
+                    "url": item.get("url").cloned().unwrap_or(Value::Null),
+                    "snippet": item.get("snippet").cloned().unwrap_or(Value::Null),
+                    "source": item.get("source").cloned().unwrap_or(Value::Null),
+                    "rank": item.get("rank").cloned().unwrap_or(Value::Null),
+                    "score": item.get("score").cloned().unwrap_or(Value::Null),
+                    "relevance": item.get("relevance").cloned().unwrap_or(Value::Null),
+                    "matched_sources": item.get("matched_sources").cloned().unwrap_or(Value::Null)
+                })
+            })
+            .collect(),
+    )
+}
+
+fn compact_web_opened_array(value: Option<&Value>) -> Value {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        items
+            .iter()
+            .take(8)
+            .map(|item| {
+                json!({
+                    "id": item.get("id").cloned().unwrap_or(Value::Null),
+                    "title": item.get("title").cloned().unwrap_or(Value::Null),
+                    "url": item.get("url").cloned().unwrap_or(Value::Null),
+                    "status": item.get("status").cloned().unwrap_or(Value::Null),
+                    "chars": item.get("chars").cloned().unwrap_or(Value::Null),
+                    "truncated": item.get("truncated").cloned().unwrap_or(Value::Null)
+                })
+            })
+            .collect(),
+    )
 }
 
 fn compact_web_evidence_array(value: Option<&Value>) -> Value {
@@ -282,23 +285,42 @@ fn compact_web_evidence_array(value: Option<&Value>) -> Value {
     Value::Array(
         items
             .iter()
-            .take(4)
+            .take(3)
             .map(|item| {
                 json!({
                     "id": item.get("id").cloned().unwrap_or(Value::Null),
                     "title": item.get("title").cloned().unwrap_or(Value::Null),
                     "url": item.get("url").cloned().unwrap_or(Value::Null),
                     "status": item.get("status").cloned().unwrap_or(Value::Null),
-                    "snippet": item.get("snippet").cloned().unwrap_or(Value::Null),
-                    "content_excerpt": item.get("content_excerpt").cloned().unwrap_or(Value::Null),
-                    "content_chars": item.get("content_chars").cloned().unwrap_or(Value::Null),
-                    "source": item.get("source").cloned().unwrap_or(Value::Null),
-                    "opened": item.get("opened").cloned().unwrap_or(Value::Null),
+                    "origin": item.get("origin").cloned().unwrap_or(Value::Null),
+                    "excerpt": item
+                        .get("excerpt")
+                        .and_then(Value::as_str)
+                        .map(|text| Value::String(bounded_text(text, MAX_MODEL_EVIDENCE_CHARS)))
+                        .unwrap_or(Value::Null),
+                    "chars": item.get("chars").cloned().unwrap_or(Value::Null),
+                    "omitted_chars": item.get("omitted_chars").cloned().unwrap_or(Value::Null),
+                    "omitted_blocks": item.get("omitted_blocks").cloned().unwrap_or(Value::Null),
+                    "confidence": item.get("confidence").cloned().unwrap_or(Value::Null),
                     "truncated": item.get("truncated").cloned().unwrap_or(Value::Null)
                 })
             })
             .collect(),
     )
+}
+
+/// Upper bound on one evidence excerpt in the model-facing replay. The pipeline
+/// already budgets the page text; this is defence in depth so a future producer
+/// cannot blow up the model prompt.
+const MAX_MODEL_EVIDENCE_CHARS: usize = 2_000;
+
+fn bounded_text(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_owned();
+    }
+    let prefix = text.chars().take(max_chars).collect::<String>();
+    format!("{prefix}...[truncated chars={count}]")
 }
 
 fn compact_web_diagnostic_array(value: Option<&Value>) -> Value {
@@ -311,6 +333,8 @@ fn compact_web_diagnostic_array(value: Option<&Value>) -> Value {
             .take(8)
             .map(|item| {
                 json!({
+                    "stage": item.get("stage").cloned().unwrap_or(Value::Null),
+                    "code": item.get("code").cloned().unwrap_or(Value::Null),
                     "url": item.get("url").cloned().unwrap_or(Value::Null),
                     "status": item.get("status").cloned().unwrap_or(Value::Null),
                     "error": item.get("error").cloned().unwrap_or(Value::Null),
@@ -319,56 +343,6 @@ fn compact_web_diagnostic_array(value: Option<&Value>) -> Value {
             })
             .collect(),
     )
-}
-
-fn compact_browser_fallback(value: Option<&Value>) -> Value {
-    let Some(item) = value else {
-        return Value::Null;
-    };
-    json!({
-        "ok": item.get("ok").cloned().unwrap_or(Value::Null),
-        "renderer": item.get("renderer").cloned().unwrap_or(Value::Null),
-        "error": item.get("error").cloned().unwrap_or(Value::Null),
-        "message": item.get("message").cloned().unwrap_or(Value::Null),
-        "browser": item.get("browser").cloned().unwrap_or(Value::Null),
-        "diagnostics": item.get("_diagnostics").map(compact_browser_diagnostics).unwrap_or(Value::Null)
-    })
-}
-
-fn compact_browser_diagnostics(item: &Value) -> Value {
-    json!({
-        "renderer": item.get("renderer").cloned().unwrap_or(Value::Null),
-        "browser": item.get("browser").cloned().unwrap_or(Value::Null),
-        "profile_isolated": item.get("profile_isolated").cloned().unwrap_or(Value::Null),
-        "shared_cookies": item.get("shared_cookies").cloned().unwrap_or(Value::Null),
-        "extensions_disabled": item.get("extensions_disabled").cloned().unwrap_or(Value::Null),
-        "headless": item.get("headless").cloned().unwrap_or(Value::Null),
-        "exit_status": item.get("exit_status").cloned().unwrap_or(Value::Null),
-        "stdout_bytes": item.get("stdout_bytes").cloned().unwrap_or(Value::Null),
-        "stdout_truncated": item.get("stdout_truncated").cloned().unwrap_or(Value::Null),
-        "stderr_bytes": item.get("stderr_bytes").cloned().unwrap_or(Value::Null),
-        "stderr_truncated": item.get("stderr_truncated").cloned().unwrap_or(Value::Null),
-        "readable_text": item.get("readable_text").cloned().unwrap_or(Value::Null)
-    })
-}
-
-fn compact_web_result_item(item: &Value) -> Value {
-    let content_chars = item
-        .get("content")
-        .or_else(|| item.get("text"))
-        .and_then(Value::as_str)
-        .map(|text| text.chars().count())
-        .unwrap_or(0);
-    json!({
-        "id": item.get("id").cloned().unwrap_or(Value::Null),
-        "title": item.get("title").cloned().unwrap_or(Value::Null),
-        "url": item.get("url").cloned().unwrap_or(Value::Null),
-        "snippet": item.get("snippet").cloned().unwrap_or(Value::Null),
-        "source": item.get("source").cloned().unwrap_or(Value::Null),
-        "status": item.get("status").cloned().unwrap_or(Value::Null),
-        "opened": item.get("opened").cloned().unwrap_or(Value::Null),
-        "content_chars": content_chars
-    })
 }
 
 pub(crate) fn summarize_tool_result_for_log(result: &Value) -> String {
@@ -492,19 +466,17 @@ fn web_search_result_summary(result: &Value) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let sources = joined_string_array(result.get("sources_attempted"));
-    let deprioritized = joined_string_array(result.get("sources_deprioritized"));
-    let fallback_errors = result
-        .get("fallback_errors")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    let source_diagnostics = result
-        .get("source_diagnostics")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
+    let skipped = joined_string_array(result.get("sources_skipped"));
+    let degraded = result
+        .pointer("/quality/degraded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let low_confidence = result
+        .pointer("/quality/low_confidence")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     format!(
-        "web_search {stage} ok={ok} candidates={count} evidence={evidence_count} sources=[{sources}] deprioritized=[{deprioritized}] fallback_errors={fallback_errors} source_diagnostics={source_diagnostics}"
+        "web_search {stage} ok={ok} candidates={count} evidence={evidence_count} sources=[{sources}] skipped=[{skipped}] degraded={degraded} low_confidence={low_confidence}"
     )
 }
 
@@ -568,20 +540,30 @@ mod tests {
                 "ok": true,
                 "stage": "open",
                 "mode": "open",
-                "results": [{
+                "opened": [{
                     "id": "cand_weather",
                     "title": "Weather",
                     "url": "https://example.com/weather",
-                    "snippet": "Rain later",
-                    "content": huge
+                    "status": 200,
+                    "chars": huge.len(),
+                    "truncated": false
+                }],
+                "evidence": [{
+                    "id": "cand_weather",
+                    "title": "Weather",
+                    "url": "https://example.com/weather",
+                    "status": 200,
+                    "origin": "open",
+                    "excerpt": huge,
+                    "chars": huge.len()
                 }]
             }),
         );
 
         assert!(replay.contains("cand_weather"));
         assert!(replay.contains("https://example.com/weather"));
-        assert!(replay.chars().count() <= 2_500);
-        assert!(!replay.contains("WEB_SEARCH_BODY_WEB_SEARCH_BODY"));
+        assert!(replay.chars().count() <= 3_000);
+        assert!(replay.contains("truncated chars="));
     }
 
     #[test]
@@ -594,18 +576,12 @@ mod tests {
                 "mode": "search",
                 "candidate_count": 0,
                 "sources_attempted": ["bing_html", "duckduckgo_lite"],
-                "source_diagnostics": [{
+                "sources": [{
                     "source": "bing_html",
                     "ok": true,
                     "error": "filtered_low_confidence",
                     "result_count": 2,
-                    "usable_result_count": 0,
-                    "max_score": 0.08
-                }],
-                "fallback_errors": [{
-                    "source": "duckduckgo_lite",
-                    "error": "request_failed",
-                    "message": "timeout"
+                    "latency_ms": 120
                 }]
             }),
         );
@@ -613,12 +589,8 @@ mod tests {
 
         assert_eq!(replay_json["sources_attempted"][0], "bing_html");
         assert_eq!(
-            replay_json["source_diagnostics"][0]["error"],
+            replay_json["sources"][0]["error"],
             "filtered_low_confidence"
-        );
-        assert_eq!(
-            replay_json["fallback_errors"][0]["source"],
-            "duckduckgo_lite"
         );
         assert!(replay.chars().count() <= 2_500);
     }
@@ -714,13 +686,13 @@ mod tests {
             "mode": "search",
             "candidate_count": 0,
             "sources_attempted": ["bing_html"],
-            "sources_deprioritized": ["duckduckgo_lite"],
-            "fallback_errors": [{ "source": "bing_html", "error": "empty_results" }]
+            "sources_skipped": ["duckduckgo_lite"],
+            "quality": { "degraded": true, "low_confidence": true }
         }));
 
         assert_eq!(
             summary,
-            "web_search search ok=false candidates=0 evidence=0 sources=[bing_html] deprioritized=[duckduckgo_lite] fallback_errors=1 source_diagnostics=0"
+            "web_search search ok=false candidates=0 evidence=0 sources=[bing_html] skipped=[duckduckgo_lite] degraded=true low_confidence=true"
         );
     }
 

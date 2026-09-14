@@ -528,6 +528,9 @@ async fn native_hosted_tool_loop(
     // Local search is free to the client but not to the account: bound how many
     // searches one Codex turn may run, matching the Chat loop's budget.
     let mut search_calls = 0_u32;
+    // Every hosted search CodeSeeX runs for this turn, in execution order, so
+    // the terminal turn can show the client what was searched.
+    let mut executed_searches: Vec<super::native_search_presentation::ExecutedSearch> = Vec::new();
     let mut tool_messages: Vec<Value> = input
         .get("input")
         .and_then(Value::as_array)
@@ -807,6 +810,15 @@ async fn native_hosted_tool_loop(
                 .store
                 .finish_request(&id, status_to_store, None, Some(&detail))
                 .await;
+            // The searches ran inside CodeSeeX, so the client never saw them.
+            // Fold them into this terminal turn as completed search items.
+            let body = super::native_search_presentation::present(
+                &frames,
+                is_sse,
+                body,
+                &id,
+                &executed_searches,
+            );
             return native_provider_turn_response(
                 state,
                 body,
@@ -871,6 +883,7 @@ async fn native_hosted_tool_loop(
                     iteration,
                     call,
                     &mut search_calls,
+                    &mut executed_searches,
                 )
                 .await;
                 replacements.insert(
@@ -960,6 +973,7 @@ async fn native_hosted_tool_loop(
                 iteration,
                 call,
                 &mut search_calls,
+                &mut executed_searches,
             )
             .await;
             outputs.push(native_tool_output_item(call, replay));
@@ -1010,6 +1024,7 @@ async fn execute_native_hosted_call(
     iteration: u32,
     call: &NativeToolCall,
     search_calls: &mut u32,
+    executed_searches: &mut Vec<super::native_search_presentation::ExecutedSearch>,
 ) -> String {
     if crate::tools::ownership::is_web_search_tool(&call.name) {
         let budget = crate::tools::diagnostics::MAX_WEB_SEARCH_LOOP_CALLS;
@@ -1040,6 +1055,10 @@ async fn execute_native_hosted_call(
             .to_string();
         }
         *search_calls += 1;
+        executed_searches.push(super::native_search_presentation::ExecutedSearch {
+            call_id: call.call_id.clone(),
+            input: call.input.clone(),
+        });
     }
     let _ = state
         .store
