@@ -58,6 +58,16 @@ pub fn is_known_code_tool(name: &str) -> bool {
         || CODESEEX_CONFIGURABLE_HOSTED_TOOL_IDS.contains(&name)
 }
 
+/// The CodeSeeX-owned local web search declaration.
+///
+/// Codex advertises web search as the provider-native hosted type. The local
+/// backend cannot hand that type to any upstream, so the native hosted loop
+/// gives the model this callable function instead.
+pub(crate) fn local_web_search_tool_definition() -> Value {
+    codeseex_system_hosted_tool_definition("web_search")
+        .expect("the CodeSeeX web search declaration is static")
+}
+
 pub fn default_enabled_tool_ids() -> Vec<String> {
     DEFAULT_CONFIGURABLE_HOSTED_TOOL_IDS
         .iter()

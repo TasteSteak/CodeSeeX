@@ -18,6 +18,7 @@ pub(crate) mod response_items;
 pub(crate) mod vision;
 pub(crate) mod web;
 
+pub(crate) use definitions::local_web_search_tool_definition;
 pub use definitions::{
     default_enabled_tool_ids, is_executable_tool_enabled, is_known_code_tool,
     upstream_tool_definitions_with_local_web_search,

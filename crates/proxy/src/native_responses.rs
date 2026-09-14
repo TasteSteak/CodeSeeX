@@ -308,10 +308,9 @@ pub(crate) fn plan_native_tools(
                 continue;
             }
             // Codex can advertise its provider-native web-search declaration
-            // even when the user selected CodeSeeX local search. It is safe to
-            // consume that declaration only if the local function definition
-            // is also present in this request. The later validation refuses a
-            // missing local function instead of silently switching backend.
+            // even when the user selected CodeSeeX local search. The hosted
+            // loop below replaces it with the CodeSeeX function, which is what
+            // the provider can actually call.
             continue;
         }
         let Some(name) = tool_name(definition).or_else(|| provider_native_identity(definition))
@@ -355,6 +354,14 @@ pub(crate) fn plan_native_tools(
         // the CodeSeeX-hosted function instead of silently switching to
         // provider search. The native hosted tool loop executes that call.
         requires_local_execution = true;
+        if !saw_local_web_search && names.insert("web_search".to_owned()) {
+            // A provider-native declaration carries no callable name, so without
+            // this the model has nothing to invoke and the hosted loop never
+            // runs. The client's own function declaration stays authoritative
+            // when it sent one.
+            let local = crate::tools::local_web_search_tool_definition();
+            tools.push(native_definition_from_chat(&local, "web_search"));
+        }
     }
 
     NativeToolPlan {
@@ -2010,12 +2017,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_native_web_search_without_the_local_function_asks_for_the_hosted_executor() {
+    fn provider_native_web_search_without_the_local_function_gets_the_codeseex_function() {
         let plan = plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local);
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
-        assert!(plan.tools.is_empty());
+        assert_eq!(plan.tools.len(), 1);
+        assert_eq!(plan.tools[0]["type"], "function");
+        assert_eq!(plan.tools[0]["name"], "web_search");
+        assert!(plan.tools[0]["parameters"]["properties"]["query"].is_object());
     }
 
     #[test]
