@@ -80,6 +80,12 @@ impl WebRequest {
     }
 
     /// The `action` payload Codex renders inside a `web_search_call` item.
+    ///
+    /// The field set matches what Responses providers accept on replay:
+    /// measured against the live API, a `search` action is rejected with
+    /// `missing field queries` unless it carries the plural list, while an
+    /// `open_page` action is accepted without it. Emitting the shape the
+    /// provider itself produces keeps a replayed history valid.
     pub(super) fn client_action(&self) -> Value {
         let queries = self.queries.clone();
         if self.mode == WebMode::Open {
@@ -100,11 +106,11 @@ impl WebRequest {
             }
             return action;
         }
-        let mut action = json!({ "type": "search", "query": queries.join("\n") });
-        if queries.len() > 1 {
-            action["queries"] = Value::Array(queries.into_iter().map(Value::String).collect());
-        }
-        action
+        json!({
+            "type": "search",
+            "query": queries.join("\n"),
+            "queries": queries
+        })
     }
 }
 
@@ -239,15 +245,27 @@ mod tests {
     #[test]
     fn client_action_matches_the_declared_mode() {
         let search = WebRequest::parse(&json!({ "query": "rust 1.0 release" }));
+        let action = search.client_action();
+        assert_eq!(action["type"], Value::String("search".to_owned()));
         assert_eq!(
-            search.client_action()["type"],
-            Value::String("search".to_owned())
+            action["query"],
+            Value::String("rust 1.0 release".to_owned())
         );
+        // Providers reject a replayed search action that lacks the plural list.
+        assert_eq!(action["queries"], json!(["rust 1.0 release"]));
 
         let open = WebRequest::parse(&json!({ "open_urls": ["https://example.com/a"] }));
-        assert_eq!(
-            open.client_action()["type"],
-            Value::String("open_page".to_owned())
-        );
+        let action = open.client_action();
+        assert_eq!(action["type"], Value::String("open_page".to_owned()));
+        assert!(action.get("queries").is_none());
+    }
+
+    #[test]
+    fn multi_query_search_action_lists_every_query() {
+        let request = WebRequest::parse(&json!({ "queries": ["alpha", "beta"] }));
+        let action = request.client_action();
+
+        assert_eq!(action["query"], Value::String("alpha\nbeta".to_owned()));
+        assert_eq!(action["queries"], json!(["alpha", "beta"]));
     }
 }
