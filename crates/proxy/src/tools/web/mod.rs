@@ -28,7 +28,6 @@ pub(crate) async fn warm_search_sources(proxy_mode: NetworkProxyMode) -> Value {
 }
 
 pub(crate) async fn execute(
-    _client: &reqwest::Client,
     proxy_mode: NetworkProxyMode,
     arguments: &Value,
     messages: &[Value],

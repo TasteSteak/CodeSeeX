@@ -22,14 +22,28 @@ pub(super) fn web_client(proxy_mode: NetworkProxyMode) -> reqwest::Client {
         .expect("build web client")
 }
 
-pub(super) fn no_redirect_client(proxy_mode: NetworkProxyMode) -> reqwest::Client {
-    crate::network::apply_proxy_mode(reqwest::Client::builder(), proxy_mode)
+/// A no-redirect client that may only reach the addresses already validated for
+/// `host`, so the address that was checked is the address that is used.
+pub(super) fn pinned_no_redirect_client(
+    proxy_mode: NetworkProxyMode,
+    host: &str,
+    addrs: &[IpAddr],
+) -> reqwest::Client {
+    let builder = crate::network::apply_proxy_mode(reqwest::Client::builder(), proxy_mode)
         .http1_only()
         .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(WEB_REQUEST_TIMEOUT_SECS))
-        .build()
-        .expect("build no-redirect web client")
+        .timeout(std::time::Duration::from_secs(WEB_REQUEST_TIMEOUT_SECS));
+    let pinned = addrs
+        .iter()
+        .map(|ip| std::net::SocketAddr::new(*ip, 0))
+        .collect::<Vec<_>>();
+    let builder = if host.is_empty() || pinned.is_empty() {
+        builder
+    } else {
+        builder.resolve_to_addrs(host, &pinned)
+    };
+    builder.build().expect("build pinned web client")
 }
 
 pub(super) async fn fetch_text(client: &reqwest::Client, url: reqwest::Url, accept: &str) -> Value {

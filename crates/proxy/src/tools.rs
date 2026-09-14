@@ -85,7 +85,7 @@ pub async fn execute_tool_with_client(
             Ok(value) => value,
             Err(error) => return error,
         };
-        return web::execute(client, config.network_proxy, &args, messages).await;
+        return web::execute(config.network_proxy, &args, messages).await;
     }
     if name == vision::ANALYZE_TOOL_NAME {
         let args = match parse_arguments(arguments) {

@@ -75,6 +75,32 @@ pub(super) fn open_summary_item(value: &Value) -> Value {
     })
 }
 
+/// The evidence entry for one explicitly opened page.
+///
+/// The search path opens its top candidates for evidence; open mode has to
+/// publish the same shape, otherwise the page text it just fetched is dropped by
+/// the model-facing compaction and the model answers from a 500-character
+/// snippet alone.
+pub(super) fn open_evidence_item(value: &Value) -> Value {
+    let content = value
+        .get("content")
+        .or_else(|| value.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    json!({
+        "id": value.get("id").cloned().unwrap_or(Value::Null),
+        "title": value.get("title").cloned().unwrap_or(Value::Null),
+        "url": value.get("url").cloned().unwrap_or(Value::Null),
+        "status": value.get("status").cloned().unwrap_or(Value::Null),
+        "snippet": value.get("snippet").cloned().unwrap_or(Value::Null),
+        "content_excerpt": super::extract::truncate_chars(content, super::MAX_EVIDENCE_EXCERPT_CHARS),
+        "content_chars": content.chars().count(),
+        "source": "opened",
+        "opened": true,
+        "truncated": value.get("truncated").cloned().unwrap_or(Value::Null)
+    })
+}
+
 pub(super) fn open_diagnostic_item(value: &Value) -> Value {
     let mut item = value.clone();
     let content_chars = text_value_chars(value);
@@ -591,5 +617,33 @@ mod tests {
         assert!(diagnostic.get("content").is_none());
         assert!(diagnostic.get("text").is_none());
         assert_eq!(diagnostic["content_chars"], 15);
+    }
+
+    #[test]
+    fn open_evidence_item_publishes_bounded_page_text() {
+        let limit = super::super::MAX_EVIDENCE_EXCERPT_CHARS;
+        let text = "x".repeat(limit + 500);
+        let item = json!({
+            "id": "cand_open",
+            "title": "Page",
+            "url": "https://example.com/",
+            "status": 200,
+            "snippet": "snippet",
+            "content": text,
+            "truncated": false
+        });
+
+        let evidence = open_evidence_item(&item);
+        let excerpt = evidence["content_excerpt"].as_str().expect("excerpt");
+
+        assert!(
+            excerpt.starts_with(&"x".repeat(limit)),
+            "the opened page text must reach the model-facing evidence"
+        );
+        assert!(excerpt.contains("truncated chars="));
+        assert_eq!(evidence["content_chars"], (limit + 500) as u64);
+        assert_eq!(evidence["source"], "opened");
+        assert_eq!(evidence["opened"], true);
+        assert_eq!(evidence["status"], 200);
     }
 }

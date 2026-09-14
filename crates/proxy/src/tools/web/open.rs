@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::browser;
 use super::candidates::{
-    candidate_id_for, open_diagnostic_item, open_result_item, open_summary_item,
+    candidate_id_for, open_diagnostic_item, open_evidence_item, open_result_item, open_summary_item,
 };
 use super::extract::{
     bytes_have_binary_markers, clean_visible_text, decode_text_bytes, extract_html_title,
@@ -13,11 +13,11 @@ use super::extract::{
     response_looks_like_html, response_looks_like_markdown, truncate_chars,
 };
 use super::net::{
-    no_redirect_client, read_limited_response_bytes, request_error_message, user_agent,
+    pinned_no_redirect_client, read_limited_response_bytes, request_error_message, user_agent,
 };
 use super::safety::{
-    normalize_candidate_url, url_path_looks_blocked_resource, validate_public_web_url,
-    validate_web_url_network,
+    normalize_candidate_url, resolve_public_web_host, url_path_looks_blocked_resource,
+    validate_public_web_url,
 };
 use super::{MAX_OPEN_TARGETS, MAX_TEXT_CHARS};
 
@@ -39,11 +39,10 @@ pub(super) async fn many(
         });
     }
 
-    let web_client = no_redirect_client(proxy_mode);
     let opened = join_all(
         urls.iter()
             .take(MAX_OPEN_TARGETS)
-            .map(|url| one(proxy_mode, &web_client, url)),
+            .map(|url| one(proxy_mode, url)),
     )
     .await;
     let mut opened_results = Vec::new();
@@ -60,6 +59,14 @@ pub(super) async fn many(
         .map(open_diagnostic_item)
         .collect::<Vec<_>>();
     let opened_diagnostics = opened.iter().map(open_diagnostic_item).collect::<Vec<_>>();
+    // Opening pages is only useful if the text reaches the model, so publish the
+    // same evidence shape the search path opens its top candidates with.
+    let evidence = opened
+        .iter()
+        .filter(|item| item.get("ok").and_then(Value::as_bool) == Some(true))
+        .map(open_evidence_item)
+        .collect::<Vec<_>>();
+    let evidence_count = evidence.len();
     json!({
         "_diagnostics": {
             "opened_count": opened_results.len(),
@@ -74,6 +81,8 @@ pub(super) async fn many(
         "unresolved_ids": unresolved_ids,
         "results": opened_results.clone(),
         "opened_results": opened_summaries,
+        "evidence": evidence,
+        "evidence_count": evidence_count,
         "opened_count": opened_results.len(),
         "failed_results": failed_results.clone(),
         "failure_count": failed_results.len(),
@@ -83,7 +92,7 @@ pub(super) async fn many(
     })
 }
 
-async fn one(proxy_mode: NetworkProxyMode, web_client: &reqwest::Client, raw_url: &str) -> Value {
+async fn one(proxy_mode: NetworkProxyMode, raw_url: &str) -> Value {
     let normalized_url =
         normalize_candidate_url(raw_url).unwrap_or_else(|| raw_url.trim().to_owned());
     let Ok(url) = reqwest::Url::parse(&normalized_url) else {
@@ -105,9 +114,17 @@ async fn one(proxy_mode: NetworkProxyMode, web_client: &reqwest::Client, raw_url
         if let Err(message) = validate_public_web_url(&current_url) {
             return json!({ "ok": false, "error": "blocked_url", "url": current_url.as_str(), "message": message, "redirects": redirects });
         }
-        if let Err(message) = validate_web_url_network(&current_url).await {
-            return json!({ "ok": false, "error": "blocked_url", "url": current_url.as_str(), "message": message, "redirects": redirects });
-        }
+        let pinned = match resolve_public_web_host(&current_url).await {
+            Ok(addresses) => addresses,
+            Err(message) => {
+                return json!({ "ok": false, "error": "blocked_url", "url": current_url.as_str(), "message": message, "redirects": redirects });
+            }
+        };
+        let web_client = pinned_no_redirect_client(
+            proxy_mode,
+            current_url.host_str().unwrap_or_default(),
+            &pinned,
+        );
 
         let response = match web_client
             .get(current_url.clone())

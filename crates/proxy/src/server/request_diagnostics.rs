@@ -128,7 +128,6 @@ pub(super) async fn record_cost_risk_diagnostic(
     request: &Value,
     upstream_payload: Option<&Value>,
 ) {
-    const HIGH_TEXT_CHARS: u64 = 200_000;
     const HIGH_INPUT_ITEMS: u64 = 80;
     const HIGH_MESSAGE_TOKENS: u64 = 120_000;
 
@@ -145,17 +144,21 @@ pub(super) async fn record_cost_risk_diagnostic(
         .map(|payload| estimate_tokens_from_text(&payload.to_string()))
         .unwrap_or(0);
     let full_context = request_looks_like_codex_full_context(request);
+    // `codex_full_context` classifies the request shape: it is true for every
+    // ordinary Codex turn, so it must never decide whether this diagnostic is
+    // emitted. Only the size thresholds below are risk signals. The
+    // classification stays in the detail because CodeSeeX also uses it to avoid
+    // storing a second copy of Codex's own transcript.
+    //
+    // The shape's `estimated_text_chars` is capped while scanning, so it can
+    // never reach a "very large text" threshold; the token estimate is taken
+    // from the whole outgoing payload and is the real size signal.
     let warnings = [
-        (
-            "high_estimated_text_chars",
-            estimated_text_chars > HIGH_TEXT_CHARS,
-        ),
         ("high_input_items", input_items > HIGH_INPUT_ITEMS),
         (
             "high_upstream_message_tokens",
             message_tokens > HIGH_MESSAGE_TOKENS,
         ),
-        ("codex_full_context", full_context),
     ]
     .into_iter()
     .filter_map(|(name, active)| active.then_some(name))
@@ -386,5 +389,101 @@ pub(super) fn codex_tool_search_bridge_decision(
         markers,
         upstream_had_tool_search,
         codex_native_tool_surface,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An ordinary Codex turn: it carries `instructions`, `tools` and a
+    /// `prompt_cache_key`, so the shape classifier matches even though the
+    /// request is small.
+    fn codex_turn(text_chars: usize) -> Value {
+        json!({
+            "id": "resp_cost_risk",
+            "instructions": "You are Codex.",
+            "prompt_cache_key": "thread-cost-risk",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "x".repeat(text_chars) }]
+            }],
+            "tools": [{ "type": "web_search" }]
+        })
+    }
+
+    async fn store_in_temp_dir(label: &str) -> (Store, std::path::PathBuf) {
+        let data_dir = std::env::temp_dir().join(format!(
+            "codeseex-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = Store::open(&data_dir).await.unwrap();
+        (store, data_dir)
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_codex_turn_is_not_reported_as_a_cost_risk() {
+        let (store, data_dir) = store_in_temp_dir("cost-risk-small").await;
+        let request = codex_turn(2_000);
+        assert!(
+            request_looks_like_codex_full_context(&request),
+            "the fixture must match the Codex full-context classifier"
+        );
+
+        record_cost_risk_diagnostic(&store, "resp_small", "/v1/responses", &request, None).await;
+
+        let (events, _) = store.recent_events(20, None).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "cost_risk_diagnostic"),
+            "the Codex shape alone must not raise a cost risk warning"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_large_request_still_reports_its_thresholds() {
+        let (store, data_dir) = store_in_temp_dir("cost-risk-large").await;
+
+        let mut request = codex_turn(500);
+        let items = request["input"].as_array_mut().expect("input array");
+        items.clear();
+        for index in 0..90 {
+            items.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": format!("turn {index}") }]
+            }));
+        }
+
+        record_cost_risk_diagnostic(&store, "resp_large", "/v1/responses", &request, None).await;
+
+        let (events, _) = store.recent_events(20, None).await.unwrap();
+        let event = events
+            .iter()
+            .find(|event| event.event_type == "cost_risk_diagnostic")
+            .expect("cost risk diagnostic");
+        let detail = event.detail.as_ref().expect("diagnostic detail");
+        assert_eq!(
+            detail.pointer("/warnings/0").and_then(Value::as_str),
+            Some("high_input_items")
+        );
+        assert_eq!(
+            detail
+                .pointer("/warnings")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            detail
+                .pointer("/codex_full_context")
+                .and_then(Value::as_bool),
+            Some(true),
+            "the classification stays in the detail"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

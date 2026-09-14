@@ -200,7 +200,6 @@ fn compact_web_search_result_for_model(result: &Value) -> Value {
         "evidence_count": result.get("evidence_count").cloned().unwrap_or(Value::Null),
         "results": compact_web_result_array(result.get("results")),
         "candidates": compact_web_result_array(result.get("candidates")),
-        "low_confidence_candidates": compact_web_result_array(result.get("low_confidence_candidates")),
         "opened_results": compact_web_result_array(result.get("opened_results")),
         "auto_opened": result.get("auto_opened").cloned().unwrap_or(Value::Null),
         "auto_open_targets": result.get("auto_open_targets").cloned().unwrap_or(Value::Null),

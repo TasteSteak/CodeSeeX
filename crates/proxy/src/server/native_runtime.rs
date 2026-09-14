@@ -525,6 +525,9 @@ async fn native_hosted_tool_loop(
     let passthrough = crate::upstream::UpstreamPassthrough::from_headers(headers);
     crate::upstream::remember_passthrough(&passthrough);
     let tool_context = crate::tools::ToolExecutionContext::from_request(input);
+    // Local search is free to the client but not to the account: bound how many
+    // searches one Codex turn may run, matching the Chat loop's budget.
+    let mut search_calls = 0_u32;
     let mut tool_messages: Vec<Value> = input
         .get("input")
         .and_then(Value::as_array)
@@ -867,6 +870,7 @@ async fn native_hosted_tool_loop(
                     &id,
                     iteration,
                     call,
+                    &mut search_calls,
                 )
                 .await;
                 replacements.insert(
@@ -955,6 +959,7 @@ async fn native_hosted_tool_loop(
                 &id,
                 iteration,
                 call,
+                &mut search_calls,
             )
             .await;
             outputs.push(native_tool_output_item(call, replay));
@@ -1004,7 +1009,38 @@ async fn execute_native_hosted_call(
     id: &str,
     iteration: u32,
     call: &NativeToolCall,
+    search_calls: &mut u32,
 ) -> String {
+    if crate::tools::ownership::is_web_search_tool(&call.name) {
+        let budget = crate::tools::diagnostics::MAX_WEB_SEARCH_LOOP_CALLS;
+        if *search_calls >= budget {
+            let _ = state
+                .store
+                .record_event(
+                    "warn",
+                    "native_web_search_budget_stopped",
+                    "CodeSeeX stopped repeated web_search calls in the native hosted tool loop.",
+                    Some(&json!({
+                        "id": id,
+                        "call_id": call.call_id,
+                        "iteration": iteration,
+                        "budget": budget,
+                        "transport": "native_responses"
+                    })),
+                )
+                .await;
+            return json!({
+                "ok": false,
+                "tool": "web_search",
+                "error": "web_search_budget_exhausted",
+                "message": format!(
+                    "CodeSeeX stopped the loop: web_search reached its per-turn budget of {budget} calls. Answer with the evidence already returned instead of searching again."
+                )
+            })
+            .to_string();
+        }
+        *search_calls += 1;
+    }
     let _ = state
         .store
         .record_event(
@@ -2554,6 +2590,47 @@ mod tests {
             .into_response()
     }
 
+    /// A provider turn that keeps asking for another search, so the hosted
+    /// loop's per-turn search budget is exercised.
+    async fn fake_native_repeating_search_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        let call_count = {
+            let mut requests = capture.requests.lock().expect("capture lock");
+            requests.push(payload);
+            requests.len()
+        };
+        if call_count <= 5 {
+            return Json(json!({
+                "id": format!("provider_repeat_{call_count}"),
+                "object": "response",
+                "model": "deepseek-v4-flash",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": format!("fc_repeat_{call_count}"),
+                    "call_id": format!("call_repeat_{call_count}"),
+                    "name": "web_search",
+                    "arguments": "not-json",
+                    "status": "completed"
+                }]
+            }));
+        }
+        Json(json!({
+            "id": format!("provider_repeat_{call_count}"),
+            "object": "response",
+            "model": "deepseek-v4-flash",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "id": "msg_repeat_final",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "answered from the evidence already returned" }]
+            }]
+        }))
+    }
+
     fn request(id: &str, stream: bool, tools: Value) -> Value {
         json!({
             "id": id,
@@ -3592,6 +3669,59 @@ mod tests {
             "the executed hosted round must be retained for the continuation"
         );
         assert_eq!(capture.requests.lock().expect("capture lock").len(), 1);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_hosted_loop_bounds_web_search_calls_to_the_budget() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_repeating_search_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-search-budget");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let input = request(
+            "resp_native_search_budget",
+            false,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
+            ]),
+        );
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the native transport owns the response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let (events, _) = state.store.recent_events(200, None).await.unwrap();
+        let executed = events
+            .iter()
+            .filter(|event| event.event_type == "tool_call")
+            .count();
+        assert_eq!(
+            executed,
+            crate::tools::diagnostics::MAX_WEB_SEARCH_LOOP_CALLS as usize,
+            "only the budgeted number of searches may actually run"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "native_web_search_budget_stopped"),
+            "the budget stop must be reported"
+        );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

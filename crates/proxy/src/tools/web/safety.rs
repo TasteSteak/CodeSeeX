@@ -76,16 +76,23 @@ pub(super) fn validate_public_web_url(url: &reqwest::Url) -> Result<(), String> 
     Ok(())
 }
 
-pub(super) async fn validate_web_url_network(url: &reqwest::Url) -> Result<(), String> {
+/// Resolves one URL's host and returns only the addresses that pass the public
+/// target check.
+///
+/// Callers must pin these addresses on the client they actually connect with:
+/// validating a name and then letting the transport resolve it again leaves a
+/// window where the second lookup returns a private address.
+pub(super) async fn resolve_public_web_host(url: &reqwest::Url) -> Result<Vec<IpAddr>, String> {
     validate_public_web_url(url)?;
     if allow_private_web_targets() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let Some(host) = url.host_str() else {
         return Err("URL must include a host.".to_owned());
     };
-    if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
+    let host = host.trim_matches(['[', ']']).to_owned();
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![ip]);
     }
     let port = url.port_or_known_default().unwrap_or(80);
     let addresses = tokio::net::lookup_host((host, port))
@@ -98,7 +105,13 @@ pub(super) async fn validate_web_url_network(url: &reqwest::Url) -> Result<(), S
     if addresses.iter().any(|address| ip_is_blocked(address.ip())) {
         return Err("DNS resolved to a private or local network target.".to_owned());
     }
-    Ok(())
+    let mut resolved = Vec::new();
+    for address in addresses {
+        if !resolved.contains(&address.ip()) {
+            resolved.push(address.ip());
+        }
+    }
+    Ok(resolved)
 }
 
 fn allow_private_web_targets() -> bool {
@@ -120,6 +133,28 @@ fn ip_is_blocked(ip: IpAddr) -> bool {
         || is_private_ip(ip)
         || is_link_local_ip(ip)
         || is_documentation_ip(ip)
+        || is_reserved_special_ip(ip)
+}
+
+/// Ranges that are not RFC1918 private space but are never a public web target:
+/// carrier-grade NAT, IETF protocol assignments, benchmarking space, reserved
+/// space, and the IPv6 transition prefixes that tunnel to an embedded IPv4
+/// address.
+fn is_reserved_special_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+                || octets[0] >= 240
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            segments[0] == 0x2002 || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+        }
+    }
 }
 
 fn normalize_mapped_ip(ip: IpAddr) -> IpAddr {
@@ -191,6 +226,29 @@ mod tests {
         assert!(validate_public_web_url(&local).is_err());
         assert!(validate_public_web_url(&private).is_err());
         assert!(validate_public_web_url(&mapped).is_err());
+        assert!(validate_public_web_url(&public).is_ok());
+    }
+
+    #[test]
+    fn blocks_transition_and_reserved_ranges() {
+        std::env::remove_var("CODESEEX_WEB_SEARCH_ALLOW_PRIVATE");
+        for host in [
+            "100.64.1.5",        // carrier-grade NAT
+            "0.10.1.5",          // "this network"
+            "192.0.0.10",        // IETF protocol assignments
+            "198.19.20.30",      // benchmarking
+            "240.1.2.3",         // reserved
+            "169.254.169.254",   // link-local metadata service
+            "[2002:7f00:1::1]",  // 6to4 wrapping a loopback address
+            "[64:ff9b::7f00:1]", // NAT64 wrapping a loopback address
+        ] {
+            let url = reqwest::Url::parse(&format!("http://{host}/")).expect("parse url");
+            assert!(
+                validate_public_web_url(&url).is_err(),
+                "{host} must not be treated as a public web target"
+            );
+        }
+        let public = reqwest::Url::parse("https://1.1.1.1/").expect("parse url");
         assert!(validate_public_web_url(&public).is_ok());
     }
 

@@ -12,7 +12,7 @@ use super::candidates::candidate_id_for;
 use super::extract::{
     clean_visible_text, decode_text_bytes, extract_html_title, html_to_text, truncate_chars,
 };
-use super::safety::{validate_public_web_url, validate_web_url_network};
+use super::safety::{resolve_public_web_host, validate_public_web_url};
 use super::{MAX_BYTES, MAX_TEXT_CHARS};
 
 const BROWSER_RENDER_TIMEOUT_SECS: u64 = 10;
@@ -50,7 +50,9 @@ pub(super) async fn render_public_page(
             "message": message
         });
     }
-    if let Err(message) = validate_web_url_network(url).await {
+    // The renderer hands the URL to an external browser process, so it cannot
+    // pin the resolved address; it still refuses a host that resolves private.
+    if let Err(message) = resolve_public_web_host(url).await.map(|_| ()) {
         return json!({
             "ok": false,
             "stage": "open",
