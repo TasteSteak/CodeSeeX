@@ -207,13 +207,35 @@ fn proxy_tool_call_response_item_from_chat_call(call: &ChatToolCall) -> Value {
 }
 
 fn web_search_call_response_item_from_chat_call(call: &ChatToolCall) -> Value {
+    native_web_search_call_item(&call.id, &call.arguments)
+}
+
+/// The client-facing `web_search_call` item CodeSeeX presents for a search it
+/// executed itself. It matches the provider-hosted item Codex already renders
+/// for official search, so the client shows the step instead of a function call
+/// it has no executor for.
+pub(crate) fn native_web_search_call_item(call_id: &str, arguments: &str) -> Value {
     json!({
         "id": format!("ws_{}", Uuid::new_v4().simple()),
         "type": "web_search_call",
         "status": "completed",
-        "call_id": call.id,
-        "action": web_search_action_from_arguments(&call.arguments)
+        "call_id": call_id,
+        "action": web_search_action_from_arguments(arguments)
     })
+}
+
+/// `true` for the search items CodeSeeX presents on the client's behalf. They
+/// carry the provider call id CodeSeeX replaced, so the provider must never see
+/// them again: the retained hosted round is its only record of the search.
+pub(crate) fn is_codeseex_presented_web_search_item(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("web_search_call_output") => true,
+        Some("web_search_call") => item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+        _ => false,
+    }
 }
 
 fn web_search_action_from_arguments(arguments: &str) -> Value {
@@ -654,5 +676,32 @@ mod tests {
         let arguments = items[0]["arguments"].as_str().unwrap();
         assert!(arguments.contains("inline-data-url omitted"));
         assert!(!arguments.contains("AAAASECRETBBBB"));
+    }
+
+    #[test]
+    fn presented_search_items_are_recognized_but_provider_ones_are_not() {
+        let presented = native_web_search_call_item("call_hosted_1", r#"{"mode":"search"}"#);
+        assert!(is_codeseex_presented_web_search_item(&presented));
+        assert!(
+            is_codeseex_presented_web_search_item(&json!({
+                "type": "web_search_call_output",
+                "call_id": "call_hosted_1",
+                "output": "evidence"
+            })),
+            "the CodeSeeX-only output item must never be replayed upstream"
+        );
+        assert!(
+            !is_codeseex_presented_web_search_item(&json!({
+                "id": "ws_provider",
+                "type": "web_search_call",
+                "status": "completed"
+            })),
+            "a provider-hosted search item must keep passing through"
+        );
+        assert!(!is_codeseex_presented_web_search_item(&json!({
+            "type": "function_call",
+            "call_id": "call_hosted_1",
+            "name": "web_search"
+        })));
     }
 }

@@ -1755,7 +1755,7 @@ fn sse_frame(event: &str, payload: &Value) -> Vec<u8> {
 /// comments, extensions and original line endings). The response-id boundary
 /// only requires changing JSON carried by `data:`; rebuilding an entire event
 /// would accidentally change SSE resume and reconnect behaviour.
-fn rewrite_sse_data_lines(frame: &str, serialized_data: &str) -> Vec<u8> {
+pub(crate) fn rewrite_sse_data_lines(frame: &str, serialized_data: &str) -> Vec<u8> {
     let mut rendered = String::with_capacity(frame.len());
     let mut replaced = false;
     for raw_line in frame.split_inclusive('\n') {

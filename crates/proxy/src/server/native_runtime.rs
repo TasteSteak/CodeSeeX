@@ -16,12 +16,13 @@ use crate::native_responses::{
     append_complete_native_tool_group, native_stream_finalization,
     native_tool_call_group_from_response, native_tool_output_item, plan_native_tools,
     present_reasoning_summary_in_response, reconcile_grouped_tool_namespaces,
-    repair_provider_tool_schemas, rewrite_provider_response_identity, NativeResponseSseRelay,
-    NativeResponseStreamInspection, NativeResponseTerminal, NativeStreamFinalization,
-    NativeToolCall, NativeToolCallGroup, NativeToolPlan,
+    repair_provider_tool_schemas, rewrite_provider_response_identity, rewrite_sse_data_lines,
+    NativeResponseSseRelay, NativeResponseStreamInspection, NativeResponseTerminal,
+    NativeStreamFinalization, NativeToolCall, NativeToolCallGroup, NativeToolPlan,
 };
 use crate::upstream::SelectedUpstreamTransport;
 use codeseex_core::config::{ReasoningSummaryMode, WebSearchBackend};
+use std::collections::{BTreeMap, BTreeSet};
 
 // The provider's own `reasoning_text` is forwarded verbatim and is not
 // configurable: DeepSeek rejects a replay that drops it, so it is what keeps a
@@ -415,7 +416,7 @@ async fn buffer_native_sse(
     config: &AppConfig,
 ) -> Result<
     (
-        Vec<u8>,
+        Vec<Vec<u8>>,
         NativeResponseStreamInspection,
         crate::tools::response_items::ApplyPatchRepairTally,
     ),
@@ -426,19 +427,19 @@ async fn buffer_native_sse(
     let mut upstream = response.bytes_stream();
     let mut relay = NativeResponseSseRelay::new(response_id.to_owned())
         .with_reasoning_summary(reasoning_summary_mode(config));
-    let mut buffered = Vec::new();
+    let mut frames = Vec::new();
     while let Some(next) = upstream.next().await {
         let chunk = next?;
         for frame in relay.relay_bytes(&chunk) {
-            buffered.extend_from_slice(&frame);
+            frames.push(frame);
         }
     }
     for frame in relay.finish() {
-        buffered.extend_from_slice(&frame);
+        frames.push(frame);
     }
     let inspection = relay.inspection().clone();
     let apply_patch_repairs = relay.apply_patch_repairs();
-    Ok((buffered, inspection, apply_patch_repairs))
+    Ok((frames, inspection, apply_patch_repairs))
 }
 
 struct NativeHostedToolLoopParams<'a> {
@@ -613,9 +614,9 @@ async fn native_hosted_tool_loop(
             .as_ref()
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/event-stream"));
-        let (body, output_items, completed, usage) = if is_sse {
+        let (frames, output_items, completed, usage) = if is_sse {
             match buffer_native_sse(response, &id, config).await {
-                Ok((bytes, inspection, apply_patch_repairs)) => {
+                Ok((frames, inspection, apply_patch_repairs)) => {
                     crate::server::response_helpers::record_apply_patch_input_micro_repairs(
                         &state.store,
                         &id,
@@ -644,12 +645,12 @@ async fn native_hosted_tool_loop(
                             .await;
                         let completed =
                             matches!(inspection.terminal, Some(NativeResponseTerminal::Completed));
-                        (bytes, Vec::new(), completed, inspection.final_usage)
+                        (frames, Vec::new(), completed, inspection.final_usage)
                     } else {
                         let completed =
                             matches!(inspection.terminal, Some(NativeResponseTerminal::Completed));
                         (
-                            bytes,
+                            frames,
                             inspection.output_items,
                             completed,
                             inspection.final_usage,
@@ -729,12 +730,13 @@ async fn native_hosted_tool_loop(
                 .cloned()
                 .unwrap_or_default();
             (
-                bytes.to_vec(),
+                vec![bytes.to_vec()],
                 output_items,
                 completed,
                 native.get("usage").cloned(),
             )
         };
+        let body: Vec<u8> = frames.concat();
 
         // The body is complete and well-formed, so the retained round this
         // request consumed has now been replayed successfully upstream. Settle
@@ -843,33 +845,80 @@ async fn native_hosted_tool_loop(
             })
             .await;
         }
-        // A group that mixes hosted and client-owned calls has no single owner.
-        // The native transport fails closed instead of handing either side to
-        // the other transport.
+        // A group that mixes hosted and client-owned calls is split the way the
+        // protocol expects: CodeSeeX executes its own calls, presents them to
+        // the client as completed search items, and hands the client-owned
+        // calls back. The hosted round is retained, so the client's
+        // continuation still reaches the provider as one complete group.
         if hosted_calls != group.calls.len() {
-            let hosted = group
+            let mut replacements = BTreeMap::new();
+            let mut executed = Vec::new();
+            for call in group
                 .calls
                 .iter()
                 .filter(|call| native_hosted_call_is_local(call, config))
-                .map(|call| call.name.as_str())
-                .collect::<Vec<_>>();
-            let client_owned = group
+            {
+                let replay = execute_native_hosted_call(
+                    state,
+                    &client,
+                    config,
+                    &tool_context,
+                    &mut tool_messages,
+                    &id,
+                    iteration,
+                    call,
+                )
+                .await;
+                replacements.insert(
+                    call.call_id.clone(),
+                    crate::tools::native_web_search_call_item(&call.call_id, &call.input),
+                );
+                executed.push(native_tool_output_item(call, replay));
+            }
+            let client_body = present_executed_hosted_calls(
+                is_sse,
+                &frames,
+                &group.provider_output,
+                &replacements,
+            );
+            let hosted_ids = group
                 .calls
                 .iter()
-                .filter(|call| !native_hosted_call_is_local(call, config))
-                .map(|call| call.name.as_str())
+                .filter(|call| native_hosted_call_is_local(call, config))
+                .map(|call| call.call_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut round = group
+                .provider_output
+                .iter()
+                .filter(|item| {
+                    item.get("call_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|call_id| hosted_ids.contains(call_id))
+                })
+                .cloned()
                 .collect::<Vec<_>>();
-            return native_incompatible(
+            round.extend(executed.iter().cloned());
+            let mut retained = injected_items.clone();
+            retained.push(NativeInjectedItems {
+                offset: client_input_len,
+                items: round,
+            });
+            return native_hosted_client_tool_group(NativeHostedClientToolGroupParams {
                 state,
                 config,
-                &id,
-                requested_model,
-                model,
-                "mixed_hosted_and_client_tool_group",
-                format!(
-                    "Native Responses returned a mixed tool group (hosted: {hosted:?}, client-owned: {client_owned:?}). CodeSeeX does not split tool ownership between transports."
-                ),
-            )
+                id: &id,
+                group: &group,
+                input,
+                payload: &payload,
+                body: client_body,
+                is_sse,
+                completed,
+                usage: usage.as_ref(),
+                iteration,
+                started,
+                injected_items: retained,
+                pending: pending.as_ref(),
+            })
             .await;
         }
 
@@ -897,61 +946,18 @@ async fn native_hosted_tool_loop(
 
         let mut outputs = Vec::with_capacity(group.calls.len());
         for call in &group.calls {
-            let _ = state
-                .store
-                .record_event(
-                    "info",
-                    "tool_call",
-                    "CodeSeeX tool requested in the native hosted tool loop.",
-                    Some(&json!({
-                        "id": id,
-                        "call_id": call.call_id,
-                        "name": call.name,
-                        "iteration": iteration,
-                        "transport": "native_responses"
-                    })),
-                )
-                .await;
-            let result = crate::tools::execute_tool_with_client(
+            let replay = execute_native_hosted_call(
+                state,
                 &client,
                 config,
                 &tool_context,
-                &tool_messages,
-                &[],
-                &call.name,
-                &call.input,
+                &mut tool_messages,
+                &id,
+                iteration,
+                call,
             )
             .await;
-            let replay = crate::tools::hosted::model_replay_tool_result_for(&call.name, &result);
-            outputs.push(native_tool_output_item(call, replay.clone()));
-            let _ = state
-                .store
-                .record_event(
-                    "info",
-                    "tool_result",
-                    "CodeSeeX tool result in the native hosted tool loop.",
-                    Some(&crate::tools::hosted::tool_result_event_detail_for(
-                        &id,
-                        &call.call_id,
-                        &call.name,
-                        iteration,
-                        &result,
-                    )),
-                )
-                .await;
-            tool_messages.push(json!({
-                "role": "assistant",
-                "tool_calls": [{
-                    "id": call.call_id,
-                    "type": "function",
-                    "function": { "name": call.name, "arguments": call.input }
-                }]
-            }));
-            tool_messages.push(json!({
-                "role": "tool",
-                "tool_call_id": call.call_id,
-                "content": replay
-            }));
+            outputs.push(native_tool_output_item(call, replay));
         }
         let next_input =
             match append_complete_native_tool_group(&authoritative_input, &group, &outputs) {
@@ -983,6 +989,220 @@ async fn native_hosted_tool_loop(
             items: executed_round,
         });
     }
+}
+
+/// Executes one CodeSeeX-hosted call and records the events the hosted loop has
+/// always recorded. Returns the replay text the provider receives as the call's
+/// output.
+#[allow(clippy::too_many_arguments)]
+async fn execute_native_hosted_call(
+    state: &ProxyState,
+    client: &reqwest::Client,
+    config: &AppConfig,
+    tool_context: &crate::tools::ToolExecutionContext,
+    tool_messages: &mut Vec<Value>,
+    id: &str,
+    iteration: u32,
+    call: &NativeToolCall,
+) -> String {
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "tool_call",
+            "CodeSeeX tool requested in the native hosted tool loop.",
+            Some(&json!({
+                "id": id,
+                "call_id": call.call_id,
+                "name": call.name,
+                "iteration": iteration,
+                "transport": "native_responses"
+            })),
+        )
+        .await;
+    let result = crate::tools::execute_tool_with_client(
+        client,
+        config,
+        tool_context,
+        tool_messages.as_slice(),
+        &[],
+        &call.name,
+        &call.input,
+    )
+    .await;
+    let replay = crate::tools::hosted::model_replay_tool_result_for(&call.name, &result);
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "tool_result",
+            "CodeSeeX tool result in the native hosted tool loop.",
+            Some(&crate::tools::hosted::tool_result_event_detail_for(
+                id,
+                &call.call_id,
+                &call.name,
+                iteration,
+                &result,
+            )),
+        )
+        .await;
+    tool_messages.push(json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": call.call_id,
+            "type": "function",
+            "function": { "name": call.name, "arguments": call.input }
+        }]
+    }));
+    tool_messages.push(json!({
+        "role": "tool",
+        "tool_call_id": call.call_id,
+        "content": replay
+    }));
+    replay
+}
+
+/// Rewrites one buffered provider turn so the client sees each CodeSeeX-hosted
+/// call as a completed search item instead of a function call it has no
+/// executor for. Frames that do not belong to a hosted call keep their original
+/// bytes.
+fn present_executed_hosted_calls(
+    is_sse: bool,
+    frames: &[Vec<u8>],
+    provider_output: &[Value],
+    replacements: &BTreeMap<String, Value>,
+) -> Vec<u8> {
+    if replacements.is_empty() {
+        return frames.concat();
+    }
+    if !is_sse {
+        let Some(frame) = frames.first() else {
+            return Vec::new();
+        };
+        let Ok(mut payload) = serde_json::from_slice::<Value>(frame) else {
+            return frames.concat();
+        };
+        if let Some(output) = payload.get_mut("output").and_then(Value::as_array_mut) {
+            for item in output.iter_mut() {
+                let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(replacement) = replacements.get(call_id) else {
+                    continue;
+                };
+                *item = replacement.clone();
+            }
+        }
+        return serde_json::to_vec(&payload).unwrap_or_else(|_| frames.concat());
+    }
+
+    let mut hosted_item_ids = BTreeSet::new();
+    for item in provider_output {
+        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !replacements.contains_key(call_id) {
+            continue;
+        }
+        if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+            hosted_item_ids.insert(item_id.to_owned());
+        }
+    }
+
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        if let Some(bytes) = rewrite_hosted_frame(frame, &hosted_item_ids, replacements) {
+            out.extend_from_slice(&bytes);
+        }
+    }
+    out
+}
+
+/// `None` drops the frame; `Some` keeps or replaces it.
+fn rewrite_hosted_frame(
+    frame: &[u8],
+    hosted_item_ids: &BTreeSet<String>,
+    replacements: &BTreeMap<String, Value>,
+) -> Option<Vec<u8>> {
+    let Ok(text) = std::str::from_utf8(frame) else {
+        return Some(frame.to_vec());
+    };
+    let Some(data) = sse_data_line(text) else {
+        return Some(frame.to_vec());
+    };
+    let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
+        return Some(frame.to_vec());
+    };
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    match event_type.as_str() {
+        "response.output_item.added" | "response.output_item.done" => {
+            let replacement = payload
+                .get("item")
+                .and_then(|item| item.get("call_id"))
+                .and_then(Value::as_str)
+                .and_then(|call_id| replacements.get(call_id));
+            let Some(replacement) = replacement else {
+                return Some(frame.to_vec());
+            };
+            payload["item"] = replacement.clone();
+            Some(rewrite_sse_data_lines(
+                text,
+                &serde_json::to_string(&payload).ok()?,
+            ))
+        }
+        "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
+            // The call is now a completed search item, so its argument stream no
+            // longer has an item on the client to append to.
+            let hosted = payload
+                .get("item_id")
+                .and_then(Value::as_str)
+                .is_some_and(|item_id| hosted_item_ids.contains(item_id));
+            if hosted {
+                None
+            } else {
+                Some(frame.to_vec())
+            }
+        }
+        "response.completed" => {
+            let mut changed = false;
+            if let Some(output) = payload
+                .pointer_mut("/response/output")
+                .and_then(Value::as_array_mut)
+            {
+                for item in output.iter_mut() {
+                    let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(replacement) = replacements.get(call_id) else {
+                        continue;
+                    };
+                    *item = replacement.clone();
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Some(frame.to_vec());
+            }
+            Some(rewrite_sse_data_lines(
+                text,
+                &serde_json::to_string(&payload).ok()?,
+            ))
+        }
+        _ => Some(frame.to_vec()),
+    }
+}
+
+fn sse_data_line(frame: &str) -> Option<String> {
+    frame.lines().find_map(|line| {
+        line.strip_prefix("data:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 struct NativeHostedClientToolGroupParams<'a> {
@@ -1268,6 +1488,10 @@ fn native_upstream_payload(payload: &Value) -> Value {
     let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
         return payload;
     };
+    // CodeSeeX presents a hosted search to the client as a completed
+    // `web_search_call` item. The provider never produced that item, so it must
+    // not reappear upstream: the retained hosted round is the provider's record.
+    items.retain(|item| !crate::tools::is_codeseex_presented_web_search_item(item));
     for item in items.iter_mut() {
         restore_reasoning_text_field(item);
     }
@@ -2302,6 +2526,34 @@ mod tests {
         }))
     }
 
+    /// One streamed provider turn whose only tool group mixes a CodeSeeX-hosted
+    /// call with a client-owned one.
+    async fn fake_native_sse_mixed_tool_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> axum::response::Response {
+        capture.requests.lock().expect("capture lock").push(payload);
+        let bytes = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"provider_sse_mixed\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"output_index\":0,\"response_id\":\"provider_sse_mixed\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_sse_mixed_hosted\",\"call_id\":\"call_sse_mixed_hosted\",\"name\":\"web_search\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":3,\"item_id\":\"fc_sse_mixed_hosted\",\"output_index\":0,\"delta\":\"not-json\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":0,\"response_id\":\"provider_sse_mixed\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_sse_mixed_hosted\",\"call_id\":\"call_sse_mixed_hosted\",\"name\":\"web_search\",\"arguments\":\"not-json\",\"status\":\"completed\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":5,\"output_index\":1,\"response_id\":\"provider_sse_mixed\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_sse_mixed_client\",\"call_id\":\"call_sse_mixed_client\",\"name\":\"shell_command\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"sequence_number\":6,\"response\":{\"id\":\"provider_sse_mixed\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_sse_mixed_hosted\",\"call_id\":\"call_sse_mixed_hosted\",\"name\":\"web_search\",\"arguments\":\"not-json\",\"status\":\"completed\"},{\"type\":\"function_call\",\"id\":\"fc_sse_mixed_client\",\"call_id\":\"call_sse_mixed_client\",\"name\":\"shell_command\",\"arguments\":\"{}\",\"status\":\"completed\"}]}}\n\n"
+        );
+        (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            bytes.to_owned(),
+        )
+            .into_response()
+    }
+
     fn request(id: &str, stream: bool, tools: Value) -> Value {
         json!({
             "id": id,
@@ -3206,7 +3458,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
     #[tokio::test]
-    async fn native_mixed_hosted_and_client_tool_group_fails_closed() {
+    async fn native_mixed_tool_group_splits_hosted_and_client_owned_calls() {
         let capture = Capture::default();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3238,12 +3490,108 @@ mod tests {
         )
         .await
         .expect("the native transport owns the response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let native: Value = serde_json::from_slice(&body).unwrap();
+        let output = native["output"].as_array().expect("output array");
+        assert!(
+            output
+                .iter()
+                .any(|item| item["type"] == "web_search_call"
+                    && item["call_id"] == "call_mixed_hosted"),
+            "the executed search must reach the client as a completed search item: {native}"
+        );
+        assert!(
+            output
+                .iter()
+                .any(|item| { item["type"] == "function_call" && item["name"] == "shell_command" }),
+            "the client-owned call must still reach Codex: {native}"
+        );
+        assert!(
+            !output
+                .iter()
+                .any(|item| { item["type"] == "function_call" && item["name"] == "web_search" }),
+            "the client must never be handed a hosted function it cannot run: {native}"
+        );
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            1,
+            "the executed hosted round must be retained for the continuation"
+        );
         assert_eq!(
             capture.requests.lock().expect("capture lock").len(),
             1,
             "a mixed tool group must never trigger a second upstream call or a transport switch"
         );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_streaming_mixed_tool_group_reaches_the_client_as_a_search_item() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_sse_mixed_tool_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-loop-mixed-stream");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        config.web_search_backend = WebSearchBackend::Local;
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        let input = request(
+            "resp_native_mixed_stream",
+            true,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
+            ]),
+        );
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the native transport owns the response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.contains("\"type\":\"web_search_call\""),
+            "the executed search must be presented as a completed search item: {text}"
+        );
+        assert!(
+            text.contains("call_sse_mixed_hosted"),
+            "the search item must keep the provider call id: {text}"
+        );
+        assert!(
+            text.contains("\"name\":\"shell_command\""),
+            "the client-owned call must still reach Codex: {text}"
+        );
+        assert!(
+            !text.contains("\"name\":\"web_search\""),
+            "the client must never be handed a hosted function it cannot run: {text}"
+        );
+        assert!(
+            !text.contains("response.function_call_arguments"),
+            "argument frames for a converted call must not reach the client: {text}"
+        );
+        assert_eq!(
+            state.native_pending_tool_groups.pending_count(),
+            1,
+            "the executed hosted round must be retained for the continuation"
+        );
+        assert_eq!(capture.requests.lock().expect("capture lock").len(), 1);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

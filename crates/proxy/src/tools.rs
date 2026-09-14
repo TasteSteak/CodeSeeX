@@ -25,6 +25,9 @@ pub use definitions::{
 };
 pub(crate) use permissions::ToolPermissionContext as ToolExecutionContext;
 use permissions::{ResolvedToolPath, ToolPermissionError};
+pub(crate) use response_items::{
+    is_codeseex_presented_web_search_item, native_web_search_call_item,
+};
 
 const MAX_DEPTH: usize = 4;
 const DEFAULT_DIRECTORY_PAGE_SIZE: usize = 60;
