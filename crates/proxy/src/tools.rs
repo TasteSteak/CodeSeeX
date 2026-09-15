@@ -23,6 +23,9 @@ pub use definitions::{
     default_enabled_tool_ids, is_executable_tool_enabled, is_known_code_tool,
     upstream_tool_definitions_with_local_web_search,
 };
+pub(crate) use definitions::{
+    is_native_hostable_hosted_tool, native_hostable_hosted_tool_definitions,
+};
 pub(crate) use permissions::ToolPermissionContext as ToolExecutionContext;
 use permissions::{ResolvedToolPath, ToolPermissionError};
 pub(crate) use response_items::{

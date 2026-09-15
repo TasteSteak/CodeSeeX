@@ -17,7 +17,7 @@
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -171,29 +171,145 @@ impl PendingNativeToolGroup {
         })
     }
 
-    /// The client's own items with CodeSeeX's rounds put back where they were
-    /// injected. The client's items are copied through untouched.
+    /// The client's own items with each replayed provider turn rebuilt in the
+    /// order the provider produced it.
+    ///
+    /// The client only ever saw CodeSeeX's presentation of a hosted round, so
+    /// its copy of that turn is not what the provider produced: the hosted call
+    /// may be absent or presented as a synthetic search item, and the reasoning
+    /// it carried is no longer attached to the call. Replaying that copy is what
+    /// made DeepSeek reject a thinking-mode continuation with "The
+    /// `reasoning_text` in the thinking mode must be passed back to the API.":
+    /// an assistant turn carried a tool call without its reasoning.
+    ///
+    /// The retained provider record is therefore authoritative for the turn. It
+    /// is replayed whole, every output is appended in provider call order, and
+    /// the client's own copy of that turn is dropped so nothing is duplicated.
     fn continuation(&self, input: &[Value]) -> NativePendingContinuation {
-        let injected_count = self
+        let tail_start = self
             .injected_items
             .iter()
-            .map(|segment| segment.items.len())
-            .sum::<usize>();
-        let mut merged_input = Vec::with_capacity(input.len() + injected_count);
-        let mut replayed = 0_usize;
-        for segment in &self.injected_items {
-            let offset = segment.offset.min(input.len()).max(replayed);
-            merged_input.extend(input[replayed..offset].iter().cloned());
-            merged_input.extend(segment.items.iter().cloned());
-            replayed = offset;
+            .map(|segment| segment.offset)
+            .min()
+            .unwrap_or(input.len())
+            .min(input.len());
+        // Only the calls the retained rounds actually carry are authoritative.
+        // A client call that travelled in the same provider turn is part of the
+        // rebuilt turn when the record holds it, and untouched when it does not.
+        let owned = self
+            .injected_items
+            .iter()
+            .flat_map(NativeInjectedItems::call_ids)
+            .collect::<BTreeSet<_>>();
+        let mut dropped = BTreeSet::new();
+        let first_owned = input
+            .iter()
+            .enumerate()
+            .skip(tail_start)
+            .find(|(_, item)| owned_here(item, &owned))
+            .map(|(index, _)| index);
+        if let Some(first) = first_owned {
+            // The reasoning that opened the replayed turn sits immediately
+            // before its first call in the client's copy. The provider record
+            // replaces it, so the copy must not survive next to it.
+            let mut index = first;
+            while index > tail_start {
+                if input[index - 1].get("type").and_then(Value::as_str) == Some("reasoning") {
+                    dropped.insert(index - 1);
+                    index -= 1;
+                } else {
+                    break;
+                }
+            }
         }
-        merged_input.extend(input[replayed..].iter().cloned());
+        for (index, item) in input.iter().enumerate().skip(tail_start) {
+            if owned_here(item, &owned) {
+                dropped.insert(index);
+            }
+        }
+
+        let mut merged_input = Vec::with_capacity(input.len());
+        let mut segments = self.injected_items.iter().peekable();
+        for (index, item) in input.iter().enumerate() {
+            while let Some(segment) = segments.peek() {
+                if segment.offset.min(input.len()) > index {
+                    break;
+                }
+                merged_input.extend(segment.replayed_turn(input));
+                segments.next();
+            }
+            if dropped.contains(&index) {
+                continue;
+            }
+            merged_input.push(item.clone());
+        }
+        for segment in segments {
+            merged_input.extend(segment.replayed_turn(input));
+        }
         NativePendingContinuation {
             pending_response_id: self.response_id.clone(),
             merged_input,
             injected_items: self.injected_items.clone(),
         }
     }
+}
+
+impl NativeInjectedItems {
+    /// Every tool-call id this replayed turn carries: the hosted calls CodeSeeX
+    /// executed and the client calls that travelled in the same provider turn.
+    fn call_ids(&self) -> BTreeSet<String> {
+        self.items
+            .iter()
+            .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The provider turn as the provider produced it, followed by one output per
+    /// call in provider order. A hosted output comes from this record; a client
+    /// output is taken from the continuation request.
+    fn replayed_turn(&self, tail: &[Value]) -> Vec<Value> {
+        let mut provider_items = Vec::new();
+        let mut hosted_outputs: BTreeMap<&str, &Value> = BTreeMap::new();
+        for item in &self.items {
+            if is_tool_output(item) {
+                if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
+                    hosted_outputs.insert(call_id, item);
+                }
+            } else {
+                provider_items.push(item.clone());
+            }
+        }
+        let mut outputs = Vec::new();
+        for item in &provider_items {
+            let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(output) = hosted_outputs.get(call_id) {
+                outputs.push((*output).clone());
+            } else if let Some(output) = tail.iter().find(|candidate| {
+                is_tool_output(candidate)
+                    && candidate.get("call_id").and_then(Value::as_str) == Some(call_id)
+            }) {
+                outputs.push(output.clone());
+            }
+        }
+        provider_items.extend(outputs);
+        provider_items
+    }
+}
+
+fn is_tool_output(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output" | "custom_tool_call_output")
+    )
+}
+
+fn owned_here(item: &Value, owned: &BTreeSet<String>) -> bool {
+    item.get("call_id")
+        .and_then(Value::as_str)
+        .is_some_and(|call_id| owned.contains(call_id))
 }
 
 /// The retained round that this request continues.
@@ -381,6 +497,102 @@ mod tests {
                 replay[2].clone(),
             ],
             "the injected round keeps its offset inside the client's own items"
+        );
+    }
+
+    #[test]
+    fn a_replayed_provider_turn_keeps_its_reasoning_next_to_the_tool_call() {
+        let groups = NativePendingToolGroups::default();
+        // One provider turn: the reasoning, a hosted call, and a client call,
+        // exactly as the provider produced them.
+        let segments = vec![NativeInjectedItems {
+            offset: 1,
+            items: vec![
+                json!({
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{ "type": "summary_text", "text": "the plan" }],
+                    "content": [{ "type": "reasoning_text", "text": "the plan" }]
+                }),
+                json!({
+                    "type": "function_call",
+                    "call_id": "call_hosted",
+                    "name": "web_search",
+                    "arguments": "{}"
+                }),
+                json!({
+                    "type": "function_call",
+                    "call_id": "call_client",
+                    "name": "exec_command",
+                    "arguments": "{}"
+                }),
+                json!({
+                    "type": "function_call_output",
+                    "call_id": "call_hosted",
+                    "output": "search result"
+                }),
+            ],
+        }];
+        groups.register(PendingNativeToolGroup::new(
+            "resp_mixed",
+            &request(Vec::new()),
+            segments,
+            vec!["call_client".to_owned()],
+        ));
+        // The client only ever saw CodeSeeX's presentation of that turn: its own
+        // copy of the reasoning, the synthetic search item, its call and answer.
+        let replay = vec![
+            json!({ "type": "message", "role": "user", "content": "start" }),
+            json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{ "type": "summary_text", "text": "the plan" }]
+            }),
+            json!({
+                "type": "web_search_call",
+                "id": "ws_x",
+                "call_id": "call_hosted",
+                "status": "completed"
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_client",
+                "name": "exec_command",
+                "arguments": "{}"
+            }),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_client",
+                "output": "ok"
+            }),
+        ];
+
+        let continuation = groups
+            .continuation_for(&request(replay))
+            .expect("the retained round belongs to this request");
+
+        let shape = continuation
+            .merged_input
+            .iter()
+            .map(|item| {
+                let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+                match item.get("call_id").and_then(Value::as_str) {
+                    Some(call_id) => format!("{kind}:{call_id}"),
+                    None => kind.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                "message",
+                "reasoning",
+                "function_call:call_hosted",
+                "function_call:call_client",
+                "function_call_output:call_hosted",
+                "function_call_output:call_client",
+            ],
+            "the replayed turn must keep the provider order so thinking mode can validate it"
         );
     }
 

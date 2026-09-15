@@ -144,19 +144,27 @@ async fn try_native_responses(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let enabled_tools = crate::tools::registry::enabled_tool_ids(config);
     // Declarations CodeSeeX cannot translate are forwarded verbatim; the
     // provider decides what it accepts, so a new Codex tool never fails a turn.
-    let plan = plan_native_tools(&requested_tools, config.web_search_backend);
+    let plan = plan_native_tools(
+        &requested_tools,
+        config.web_search_backend,
+        &crate::tools::native_hostable_hosted_tool_definitions(&enabled_tools),
+    );
 
     // CodeSeeX-hosted tools (for example local web search) are executed inside
     // the native transport itself. The native route never hands a request to
     // the Chat compatibility path, so the two APIs stay independent and tool
     // ownership never changes silently. A request that mixes provider-owned
-    // official search with a hosted tool has no single owner and stays
-    // fail-closed. Base workspace tools stay native because the Codex client
-    // executes them itself.
+    // official search with a CodeSeeX local search function has no single owner
+    // and stays fail-closed; a hosted tool that is not search (image
+    // generation) coexists with official search because the two never claim the
+    // same capability.
     if plan.requires_local_execution {
-        if config.web_search_backend == WebSearchBackend::Official && plan.uses_official_web_search
+        if config.web_search_backend == WebSearchBackend::Official
+            && plan.uses_official_web_search
+            && plan.requires_local_web_search
         {
             return Some(
                 native_incompatible(
@@ -295,6 +303,8 @@ async fn try_native_responses(
     let passthrough = crate::upstream::UpstreamPassthrough::from_headers(headers);
     crate::upstream::remember_passthrough(&passthrough);
     let started = std::time::Instant::now();
+    let (upstream_payload, omitted_media) = native_upstream_payload(&payload);
+    record_inline_media_omission(state, &id, omitted_media).await;
     let upstream = crate::upstream::post_responses(
         &client,
         &config.upstream,
@@ -305,7 +315,7 @@ async fn try_native_responses(
             passthrough,
         },
         Some(input),
-        native_upstream_payload(&payload),
+        upstream_payload,
     )
     .await;
     let response = match upstream {
@@ -401,9 +411,20 @@ async fn try_native_responses(
 }
 
 /// One CodeSeeX-hosted call the native transport can execute itself.
-fn native_hosted_call_is_local(call: &NativeToolCall, config: &AppConfig) -> bool {
-    crate::tools::ownership::is_web_search_tool(&call.name)
-        && config.web_search_backend != WebSearchBackend::Official
+///
+/// Local web search follows the selected backend, and every other hostable tool
+/// must be enabled in the user's tool selection: a disabled tool stays the
+/// client's own declaration and is never executed here.
+fn native_hosted_call_is_local(
+    call: &NativeToolCall,
+    config: &AppConfig,
+    enabled_tools: &[String],
+) -> bool {
+    if crate::tools::ownership::is_web_search_tool(&call.name) {
+        return config.web_search_backend != WebSearchBackend::Official;
+    }
+    crate::tools::is_native_hostable_hosted_tool(&call.name)
+        && crate::tools::is_executable_tool_enabled(&call.name, enabled_tools)
 }
 
 /// Drains a native SSE body into memory while rewriting the narrow provider
@@ -525,6 +546,9 @@ async fn native_hosted_tool_loop(
     let passthrough = crate::upstream::UpstreamPassthrough::from_headers(headers);
     crate::upstream::remember_passthrough(&passthrough);
     let tool_context = crate::tools::ToolExecutionContext::from_request(input);
+    // Read once per request: tool ownership must not change between the rounds
+    // of one hosted turn.
+    let enabled_tools = crate::tools::registry::enabled_tool_ids(config);
     // Local search is free to the client but not to the account: bound how many
     // searches one Codex turn may run, matching the Chat loop's budget.
     let mut search_calls = 0_u32;
@@ -559,6 +583,8 @@ async fn native_hosted_tool_loop(
     loop {
         iteration += 1;
         let started = std::time::Instant::now();
+        let (upstream_payload, omitted_media) = native_upstream_payload(&payload);
+        record_inline_media_omission(state, &id, omitted_media).await;
         let upstream = crate::upstream::post_responses(
             &client,
             &config.upstream,
@@ -569,7 +595,7 @@ async fn native_hosted_tool_loop(
                 passthrough: passthrough.clone(),
             },
             Some(input),
-            native_upstream_payload(&payload),
+            upstream_payload,
         )
         .await;
         let response = match upstream {
@@ -839,7 +865,7 @@ async fn native_hosted_tool_loop(
         let hosted_calls = group
             .calls
             .iter()
-            .filter(|call| native_hosted_call_is_local(call, config))
+            .filter(|call| native_hosted_call_is_local(call, config, &enabled_tools))
             .count();
         if hosted_calls == 0 {
             return native_hosted_client_tool_group(NativeHostedClientToolGroupParams {
@@ -861,17 +887,17 @@ async fn native_hosted_tool_loop(
             .await;
         }
         // A group that mixes hosted and client-owned calls is split the way the
-        // protocol expects: CodeSeeX executes its own calls, presents them to
-        // the client as completed search items, and hands the client-owned
-        // calls back. The hosted round is retained, so the client's
-        // continuation still reaches the provider as one complete group.
+        // protocol expects: CodeSeeX executes its own calls, presents the ones
+        // the client can render, and hands the client-owned calls back. The
+        // hosted round is retained, so the client's continuation still reaches
+        // the provider as one complete group.
         if hosted_calls != group.calls.len() {
             let mut replacements = BTreeMap::new();
             let mut executed = Vec::new();
             for call in group
                 .calls
                 .iter()
-                .filter(|call| native_hosted_call_is_local(call, config))
+                .filter(|call| native_hosted_call_is_local(call, config, &enabled_tools))
             {
                 let replay = execute_native_hosted_call(
                     state,
@@ -886,10 +912,12 @@ async fn native_hosted_tool_loop(
                     &mut executed_searches,
                 )
                 .await;
-                replacements.insert(
-                    call.call_id.clone(),
-                    crate::tools::native_web_search_call_item(&call.call_id, &call.input),
-                );
+                // A search has a client-native item shape; any other hosted call
+                // is executed for the model only, so the client sees no call it
+                // has no executor for.
+                let presentation = crate::tools::ownership::is_web_search_tool(&call.name)
+                    .then(|| crate::tools::native_web_search_call_item(&call.call_id, &call.input));
+                replacements.insert(call.call_id.clone(), presentation);
                 executed.push(native_tool_output_item(call, replay));
             }
             let client_body = present_executed_hosted_calls(
@@ -898,22 +926,12 @@ async fn native_hosted_tool_loop(
                 &group.provider_output,
                 &replacements,
             );
-            let hosted_ids = group
-                .calls
-                .iter()
-                .filter(|call| native_hosted_call_is_local(call, config))
-                .map(|call| call.call_id.as_str())
-                .collect::<BTreeSet<_>>();
-            let mut round = group
-                .provider_output
-                .iter()
-                .filter(|item| {
-                    item.get("call_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|call_id| hosted_ids.contains(call_id))
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            // The provider turn is retained whole, in provider order, because a
+            // thinking-mode replay must carry the assistant's own
+            // `reasoning_text` next to the tool call it belongs to. Keeping only
+            // the hosted call dropped that reasoning and made the provider
+            // reject the continuation.
+            let mut round = group.provider_output.clone();
             round.extend(executed.iter().cloned());
             let mut retained = injected_items.clone();
             retained.push(NativeInjectedItems {
@@ -1125,7 +1143,7 @@ fn present_executed_hosted_calls(
     is_sse: bool,
     frames: &[Vec<u8>],
     provider_output: &[Value],
-    replacements: &BTreeMap<String, Value>,
+    replacements: &BTreeMap<String, Option<Value>>,
 ) -> Vec<u8> {
     if replacements.is_empty() {
         return frames.concat();
@@ -1138,15 +1156,7 @@ fn present_executed_hosted_calls(
             return frames.concat();
         };
         if let Some(output) = payload.get_mut("output").and_then(Value::as_array_mut) {
-            for item in output.iter_mut() {
-                let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(replacement) = replacements.get(call_id) else {
-                    continue;
-                };
-                *item = replacement.clone();
-            }
+            *output = rewrite_hosted_items(output.iter(), replacements).0;
         }
         return serde_json::to_vec(&payload).unwrap_or_else(|_| frames.concat());
     }
@@ -1177,7 +1187,7 @@ fn present_executed_hosted_calls(
 fn rewrite_hosted_frame(
     frame: &[u8],
     hosted_item_ids: &BTreeSet<String>,
-    replacements: &BTreeMap<String, Value>,
+    replacements: &BTreeMap<String, Option<Value>>,
 ) -> Option<Vec<u8>> {
     let Ok(text) = std::str::from_utf8(frame) else {
         return Some(frame.to_vec());
@@ -1195,19 +1205,26 @@ fn rewrite_hosted_frame(
         .to_owned();
     match event_type.as_str() {
         "response.output_item.added" | "response.output_item.done" => {
-            let replacement = payload
+            let call_id = payload
                 .get("item")
                 .and_then(|item| item.get("call_id"))
-                .and_then(Value::as_str)
-                .and_then(|call_id| replacements.get(call_id));
-            let Some(replacement) = replacement else {
+                .and_then(Value::as_str);
+            let Some(call_id) = call_id else {
                 return Some(frame.to_vec());
             };
-            payload["item"] = replacement.clone();
-            Some(rewrite_sse_data_lines(
-                text,
-                &serde_json::to_string(&payload).ok()?,
-            ))
+            match replacements.get(call_id) {
+                Some(Some(replacement)) => {
+                    payload["item"] = replacement.clone();
+                    Some(rewrite_sse_data_lines(
+                        text,
+                        &serde_json::to_string(&payload).ok()?,
+                    ))
+                }
+                // The hosted call has no client-visible shape, so the item and
+                // its argument stream are withheld from the client.
+                Some(None) => None,
+                None => Some(frame.to_vec()),
+            }
         }
         "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
             // The call is now a completed search item, so its argument stream no
@@ -1223,22 +1240,16 @@ fn rewrite_hosted_frame(
             }
         }
         "response.completed" => {
-            let mut changed = false;
-            if let Some(output) = payload
+            let changed = if let Some(output) = payload
                 .pointer_mut("/response/output")
                 .and_then(Value::as_array_mut)
             {
-                for item in output.iter_mut() {
-                    let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(replacement) = replacements.get(call_id) else {
-                        continue;
-                    };
-                    *item = replacement.clone();
-                    changed = true;
-                }
-            }
+                let (items, changed) = rewrite_hosted_items(output.iter(), replacements);
+                *output = items;
+                changed
+            } else {
+                false
+            };
             if !changed {
                 return Some(frame.to_vec());
             }
@@ -1249,6 +1260,32 @@ fn rewrite_hosted_frame(
         }
         _ => Some(frame.to_vec()),
     }
+}
+
+/// Applies the client-facing presentation for every hosted call in an output
+/// list: replace a search with its client item, drop a hosted call the client
+/// has no executor for, and keep everything else as it arrived.
+fn rewrite_hosted_items<'a>(
+    items: impl Iterator<Item = &'a Value>,
+    replacements: &BTreeMap<String, Option<Value>>,
+) -> (Vec<Value>, bool) {
+    let mut rewritten = Vec::new();
+    let mut changed = false;
+    for item in items {
+        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+            rewritten.push(item.clone());
+            continue;
+        };
+        match replacements.get(call_id) {
+            Some(Some(replacement)) => {
+                rewritten.push(replacement.clone());
+                changed = true;
+            }
+            Some(None) => changed = true,
+            None => rewritten.push(item.clone()),
+        }
+    }
+    (rewritten, changed)
 }
 
 fn sse_data_line(frame: &str) -> Option<String> {
@@ -1538,10 +1575,10 @@ fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, 
 /// upstream. The mapping is read from the item itself, so it holds for every
 /// replayed item, including the ones Codex re-serializes without the provider
 /// item id.
-fn native_upstream_payload(payload: &Value) -> Value {
+fn native_upstream_payload(payload: &Value) -> (Value, InlineMediaOmission) {
     let mut payload = payload.clone();
     let Some(items) = payload.get_mut("input").and_then(Value::as_array_mut) else {
-        return payload;
+        return (payload, InlineMediaOmission::default());
     };
     // CodeSeeX presents a hosted search to the client as a completed
     // `web_search_call` item. The provider never produced that item, so it must
@@ -1550,7 +1587,246 @@ fn native_upstream_payload(payload: &Value) -> Value {
     for item in items.iter_mut() {
         restore_reasoning_text_field(item);
     }
-    payload
+    group_tool_outputs_with_their_calls(items);
+    let omitted = bound_inline_media(items);
+    (payload, omitted)
+}
+
+/// Records that this replay had to give up inline image data, so a trimmed
+/// upstream copy is never silent.
+async fn record_inline_media_omission(state: &ProxyState, id: &str, omitted: InlineMediaOmission) {
+    if omitted.is_empty() {
+        return;
+    }
+    let _ = state
+        .store
+        .record_event(
+            "info",
+            "native_inline_media_omitted",
+            "CodeSeeX trimmed inline image data from the upstream replay to stay within the upstream body limit.",
+            Some(&json!({
+                "id": id,
+                "transport": "native_responses",
+                "images": omitted.images,
+                "chars": omitted.chars,
+                "media_budget_chars": MAX_INLINE_MEDIA_CHARS
+            })),
+        )
+        .await;
+}
+
+/// DeepSeek associates a tool output with its call only while the outputs follow
+/// the calling turn without an interleaved item. Codex inserts its own developer
+/// notices between outputs (the image-resize notice that follows a downscaled
+/// `view_image` is the common one), and the provider then answers
+/// "No tool output found for tool call ...". Pull each calling turn's outputs
+/// together, in call order, and keep every other item in its relative place.
+fn group_tool_outputs_with_their_calls(items: &mut Vec<Value>) {
+    let mut index = 0;
+    while index < items.len() {
+        if !is_native_tool_call_item(&items[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut call_ids = Vec::new();
+        while index < items.len() && is_native_tool_call_item(&items[index]) {
+            if let Some(call_id) = items[index].get("call_id").and_then(Value::as_str) {
+                call_ids.push(call_id.to_owned());
+            }
+            index += 1;
+        }
+        if call_ids.is_empty() {
+            continue;
+        }
+        let mut outputs: Vec<Option<Value>> = vec![None; call_ids.len()];
+        let mut notices = Vec::new();
+        let mut end = index;
+        while end < items.len() && !is_native_tool_call_item(&items[end]) {
+            let item = &items[end];
+            match tool_output_slot(item, &call_ids) {
+                Some(slot) => outputs[slot] = Some(item.clone()),
+                None => {
+                    // Only a trailing notice is moved; anything else ends the
+                    // window so a later turn is never pulled forward.
+                    if item.get("type").and_then(Value::as_str) == Some("message") {
+                        notices.push(item.clone());
+                    } else {
+                        break;
+                    }
+                }
+            }
+            end += 1;
+        }
+        if notices.is_empty() || outputs.iter().any(Option::is_none) {
+            index = end.max(index);
+            continue;
+        }
+        let mut replacement = items[start..index].to_vec();
+        replacement.extend(outputs.into_iter().flatten());
+        replacement.extend(notices);
+        let replacement_len = replacement.len();
+        items.splice(start..end, replacement);
+        index = start + replacement_len;
+    }
+}
+
+fn is_native_tool_call_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call" | "custom_tool_call")
+    )
+}
+
+fn tool_output_slot(item: &Value, call_ids: &[String]) -> Option<usize> {
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output" | "custom_tool_call_output")
+    ) {
+        return None;
+    }
+    let call_id = item.get("call_id").and_then(Value::as_str)?;
+    call_ids.iter().position(|id| id == call_id)
+}
+
+/// Cap on the inline image payload one upstream replay may carry.
+///
+/// Codex keeps every tool image in its history, so a long session replays the
+/// same megabytes of base64 on every turn. One real session reached roughly
+/// 22 MB of history, of which 21.9 MB was inline base64, and the front proxy of
+/// the upstream answered `413 Request Entity Too Large` (measured: a 16 MiB body
+/// passes, a 20 MiB body is rejected). The proxy therefore trims the oldest
+/// images out of the upstream copy only: the newest ones stay visible, the
+/// client keeps its own full history, and the trimmed item stays in place as a
+/// bounded text marker so no call loses its position in the conversation.
+const MAX_INLINE_MEDIA_CHARS: usize = 6 * 1024 * 1024;
+
+/// What one upstream replay had to drop to stay within the body limit.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InlineMediaOmission {
+    pub(crate) images: usize,
+    pub(crate) chars: usize,
+}
+
+impl InlineMediaOmission {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.images == 0
+    }
+}
+
+/// Whether one replayed item holds inline image data, and how much.
+fn inline_image_chars(value: &Value) -> Option<usize> {
+    let map = value.as_object()?;
+    match map.get("image_url") {
+        Some(Value::String(url)) if url.starts_with("data:image/") => Some(url.len()),
+        _ => None,
+    }
+}
+
+fn omitted_image_marker(chars: usize) -> String {
+    format!(
+        "[inline image omitted by the local proxy: {chars} characters of base64 image data were removed from this replay to stay within the upstream body limit]"
+    )
+}
+
+fn collect_inline_image_sizes(items: &[Value], sizes: &mut Vec<usize>) {
+    for item in items {
+        visit_inline_image_sizes(item, sizes);
+    }
+}
+
+fn visit_inline_image_sizes(value: &Value, sizes: &mut Vec<usize>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                visit_inline_image_sizes(value, sizes);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(Value::String(url)) = map.get("image_url") {
+                if url.starts_with("data:image/") {
+                    sizes.push(url.len());
+                }
+            }
+            if let Some(Value::String(text)) = map.get("output") {
+                if text.starts_with("data:image/") {
+                    sizes.push(text.len());
+                }
+            }
+            for value in map.values() {
+                visit_inline_image_sizes(value, sizes);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drops the oldest inline images until the replay fits the media budget.
+fn bound_inline_media(items: &mut Vec<Value>) -> InlineMediaOmission {
+    let mut sizes = Vec::new();
+    collect_inline_image_sizes(items, &mut sizes);
+    let total: usize = sizes.iter().sum();
+    if total <= MAX_INLINE_MEDIA_CHARS {
+        return InlineMediaOmission::default();
+    }
+    let mut remaining = 0_usize;
+    let mut kept = total;
+    for size in &sizes {
+        if kept <= MAX_INLINE_MEDIA_CHARS {
+            break;
+        }
+        kept -= size;
+        remaining += 1;
+    }
+    let mut tally = InlineMediaOmission::default();
+    let mut budget = remaining;
+    for item in items.iter_mut() {
+        omit_inline_images(item, &mut budget, &mut tally);
+    }
+    tally
+}
+
+fn omit_inline_images(value: &mut Value, budget: &mut usize, tally: &mut InlineMediaOmission) {
+    match value {
+        Value::Array(values) => {
+            for item in values.iter_mut() {
+                if *budget > 0 {
+                    if let Some(chars) = inline_image_chars(item) {
+                        *item = json!({
+                            "type": "input_text",
+                            "text": omitted_image_marker(chars)
+                        });
+                        *budget -= 1;
+                        tally.images += 1;
+                        tally.chars += chars;
+                        continue;
+                    }
+                }
+                omit_inline_images(item, budget, tally);
+            }
+        }
+        Value::Object(map) => {
+            if *budget > 0 {
+                if let Some(Value::String(text)) = map.get("output") {
+                    if text.starts_with("data:image/") {
+                        let chars = text.len();
+                        map.insert(
+                            "output".to_owned(),
+                            Value::String(omitted_image_marker(chars)),
+                        );
+                        *budget -= 1;
+                        tally.images += 1;
+                        tally.chars += chars;
+                        return;
+                    }
+                }
+            }
+            for value in map.values_mut() {
+                omit_inline_images(value, budget, tally);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Puts a presented summary back into the provider's own `reasoning_text`
@@ -2462,6 +2738,56 @@ mod tests {
         }))
     }
 
+    async fn fake_native_hosted_image_turn(
+        State(capture): State<Capture>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        let call_count = {
+            let mut requests = capture.requests.lock().expect("capture lock");
+            requests.push(payload);
+            requests.len()
+        };
+        if call_count == 1 {
+            return Json(json!({
+                "id": "provider_image_turn_1",
+                "object": "response",
+                "model": "deepseek-v4-flash",
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_image_1",
+                    "call_id": "call_image_1",
+                    "name": "image_gen",
+                    "arguments": "{\"prompt\":\"a tiny red dot\",\"size\":\"64x64\",\"n\":1}",
+                    "status": "completed"
+                }],
+                "usage": { "input_tokens": 3, "output_tokens": 1, "total_tokens": 4 }
+            }));
+        }
+        Json(json!({
+            "id": "provider_image_turn_2",
+            "object": "response",
+            "model": "deepseek-v4-flash",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "id": "msg_image_1",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "image ready" }]
+            }],
+            "usage": { "input_tokens": 5, "output_tokens": 2, "total_tokens": 7 }
+        }))
+    }
+
+    async fn fake_image_generations() -> Json<Value> {
+        Json(json!({
+            "created": 1,
+            "data": [{
+                "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }]
+        }))
+    }
+
     async fn fake_native_hosted_then_client_tool_turn(
         State(capture): State<Capture>,
         Json(payload): Json<Value>,
@@ -3192,6 +3518,115 @@ mod tests {
             }),
             "the second native request must carry the executed hosted tool output"
         );
+        drop(requests);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn native_hosted_loop_executes_image_generation_without_chat_compat() {
+        let image_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let image_address = image_listener.local_addr().unwrap();
+        let image_app = Router::new().route("/v1/images/generations", post(fake_image_generations));
+        tokio::spawn(async move {
+            axum::serve(image_listener, image_app)
+                .await
+                .expect("fake image endpoint");
+        });
+
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_hosted_image_turn))
+            .with_state(capture.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let data_dir = temp_data_dir("hosted-image-gen");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let mut config = config_for_fake(data_dir.clone(), address);
+        // Official search keeps the local web-search executor out of the loop;
+        // image generation still has to run natively.
+        config.web_search_backend = WebSearchBackend::Official;
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "VISION_GENERATE_URL".to_owned(),
+            format!("http://{image_address}/v1/images/generations"),
+        );
+        settings.insert(
+            "VISION_GENERATE_MODEL".to_owned(),
+            "test-image-model".to_owned(),
+        );
+        settings.insert(
+            "VISION_GENERATE_API_KEY".to_owned(),
+            "test-image-key".to_owned(),
+        );
+        codeseex_core::UserConfig {
+            tools: Some(codeseex_core::UserToolsConfig {
+                enabled: Some(vec!["image_gen".to_owned()]),
+                settings: Some(settings),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .write_atomic(&config.config_path())
+        .expect("write tool config");
+
+        let store = Store::open(&data_dir).await.unwrap();
+        let state = ProxyState::for_test(config.clone(), store);
+        // The client never declares image_gen: CodeSeeX must publish it itself.
+        let input = request(
+            "resp_native_hosted_image",
+            false,
+            json!([
+                { "type": "function", "function": { "name": "web_search", "parameters": { "type": "object" } } }
+            ]),
+        );
+
+        let response = try_native_responses(
+            &state,
+            &HeaderMap::new(),
+            &input,
+            &config,
+            "deepseek-v4-flash",
+            Some("deepseek-v4-flash"),
+        )
+        .await
+        .expect("the hosted tool loop owns the native response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let native: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(native["status"], "completed");
+
+        let requests = capture.requests.lock().expect("capture lock");
+        assert_eq!(
+            requests.len(),
+            2,
+            "CodeSeeX must execute image_gen and continue upstream instead of handing it to the client"
+        );
+        assert!(
+            requests[0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "image_gen"),
+            "the provider must receive the CodeSeeX image generation declaration"
+        );
+        let continuation = requests[1]["input"]
+            .as_array()
+            .expect("continuation input array");
+        let output = continuation
+            .iter()
+            .find(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item.get("call_id").and_then(Value::as_str) == Some("call_image_1")
+            })
+            .and_then(|item| item.get("output").and_then(Value::as_str))
+            .expect("the image result must be replayed upstream");
+        assert!(output.contains("generated-images"), "{output}");
+        assert!(!output.contains("iVBOR"), "{output}");
+        assert!(!output.contains("base64"), "{output}");
         drop(requests);
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -4030,7 +4465,7 @@ mod tests {
             ]
         });
 
-        let upstream = native_upstream_payload(&payload);
+        let (upstream, _) = native_upstream_payload(&payload);
         let items = upstream["input"].as_array().expect("input array");
 
         assert_eq!(items.len(), 2, "the echoed search item must be dropped");
@@ -4049,6 +4484,93 @@ mod tests {
     }
 
     #[test]
+    fn inline_image_payloads_are_trimmed_to_the_media_budget_keeping_the_newest() {
+        let blob = "A".repeat(4 * 1024 * 1024);
+        let image = |call_id: &str| {
+            json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": [{
+                    "type": "input_image",
+                    "image_url": format!("data:image/png;base64,{blob}")
+                }]
+            })
+        };
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [image("call_old"), image("call_mid"), image("call_new")]
+        });
+
+        let (upstream, omitted) = native_upstream_payload(&payload);
+
+        assert_eq!(
+            omitted.images, 2,
+            "only the oldest images may be dropped to reach the budget"
+        );
+        assert!(omitted.chars > 0);
+        let items = upstream["input"].as_array().expect("input array");
+        assert_eq!(items[0]["output"][0]["type"], json!("input_text"));
+        assert_eq!(items[1]["output"][0]["type"], json!("input_text"));
+        assert_eq!(
+            items[2]["output"][0]["type"],
+            json!("input_image"),
+            "the newest image must stay visible to the model"
+        );
+        assert!(
+            items[0]["output"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("omitted")),
+            "the trimmed item must stay in place as a bounded marker"
+        );
+    }
+
+    #[test]
+    fn interleaved_notices_are_moved_after_the_tool_outputs_they_split() {
+        // Codex interleaves its own developer notices between two tool outputs;
+        // DeepSeek then reports the later call as unanswered.
+        let payload = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "go" }] },
+                { "type": "reasoning", "id": "rs_1", "summary": [], "content": [{ "type": "reasoning_text", "text": "plan" }] },
+                { "type": "function_call", "call_id": "call_a", "name": "alpha", "arguments": "{}" },
+                { "type": "function_call", "call_id": "call_b", "name": "beta", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_a", "output": "first" },
+                { "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": "notice" }] },
+                { "type": "function_call_output", "call_id": "call_b", "output": "second" }
+            ]
+        });
+
+        let (upstream, _) = native_upstream_payload(&payload);
+        let shape = upstream["input"]
+            .as_array()
+            .expect("input array")
+            .iter()
+            .map(|item| {
+                let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+                match item.get("call_id").and_then(Value::as_str) {
+                    Some(call_id) => format!("{kind}:{call_id}"),
+                    None => kind.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            shape,
+            vec![
+                "message",
+                "reasoning",
+                "function_call:call_a",
+                "function_call:call_b",
+                "function_call_output:call_a",
+                "function_call_output:call_b",
+                "message",
+            ],
+            "the notice moves after the outputs so the provider sees one contiguous group"
+        );
+    }
+
+    #[test]
     fn a_dual_shaped_reasoning_item_reaches_upstream_as_the_providers_own_shape() {
         // The client copy carries both shapes: the provider's `reasoning_text`
         // and the summary Codex renders. Upstream must see only the provider's.
@@ -4063,7 +4585,7 @@ mod tests {
             }]
         });
 
-        let upstream = native_upstream_payload(&payload);
+        let (upstream, _) = native_upstream_payload(&payload);
 
         assert_eq!(
             upstream["input"][0]["content"][0]["type"],
@@ -4100,7 +4622,7 @@ mod tests {
             }]
         });
 
-        let upstream = native_upstream_payload(&payload);
+        let (upstream, _) = native_upstream_payload(&payload);
 
         assert_eq!(upstream["input"][0]["summary"], json!([]));
         assert_eq!(
@@ -4124,7 +4646,7 @@ mod tests {
             }]
         });
 
-        let upstream = native_upstream_payload(&payload);
+        let (upstream, _) = native_upstream_payload(&payload);
 
         assert_eq!(
             upstream["input"][0]["summary"][0]["text"],
@@ -4151,7 +4673,7 @@ mod tests {
             }]
         });
 
-        let upstream = native_upstream_payload(&payload);
+        let (upstream, _) = native_upstream_payload(&payload);
 
         assert_eq!(
             upstream["input"][0]["content"][0]["type"],

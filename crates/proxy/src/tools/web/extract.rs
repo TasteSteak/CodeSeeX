@@ -829,6 +829,11 @@ pub(super) fn select_blocks(
     // any non-trivial block so the budget buys new information instead of the
     // same sentence again.
     let mut seen: HashSet<String> = HashSet::new();
+    // A block is offered to the code pass and then to the general pass. Blocks
+    // long enough to carry a repeat signature are protected by `seen`, but a
+    // short code block has no signature and would be admitted a second time.
+    // Track admitted indices so each block can be chosen at most once.
+    let mut admitted: HashSet<usize> = HashSet::new();
     // Code is the reason a reader opens a technical page, so it gets a share of
     // the budget before the remaining blocks compete for what is left. The
     // share is a floor, not a ceiling: unused code budget flows back.
@@ -837,6 +842,7 @@ pub(super) fn select_blocks(
     let mut admits = |index: usize,
                       used: &mut usize,
                       seen: &mut HashSet<String>,
+                      admitted: &mut HashSet<usize>,
                       chosen: &mut Vec<(usize, usize)>,
                       is_code_pass: bool|
      -> bool {
@@ -855,6 +861,9 @@ pub(super) fn select_blocks(
                 return false;
             }
         }
+        if !admitted.insert(index) {
+            return false;
+        }
         let length = char_count(&block.text);
         let remaining = budget - *used;
         if length > remaining {
@@ -871,13 +880,27 @@ pub(super) fn select_blocks(
         true
     };
     for index in order.iter().copied() {
-        admits(index, &mut used, &mut seen, &mut chosen, true);
+        admits(
+            index,
+            &mut used,
+            &mut seen,
+            &mut admitted,
+            &mut chosen,
+            true,
+        );
     }
     for index in order {
         if used >= budget {
             break;
         }
-        admits(index, &mut used, &mut seen, &mut chosen, false);
+        admits(
+            index,
+            &mut used,
+            &mut seen,
+            &mut admitted,
+            &mut chosen,
+            false,
+        );
     }
     chosen.sort_by_key(|(index, _)| *index);
 
@@ -1266,6 +1289,29 @@ mod tests {
         assert_eq!(encoding, "gb18030");
         assert!(!had_errors);
         assert!(text.contains("Shanghai weather"));
+    }
+
+    #[test]
+    fn a_short_code_block_is_selected_at_most_once() {
+        // A code block shorter than the repeat-signature floor carries no dedup
+        // key, so the code pass and the general pass both admitted it. The block
+        // was emitted twice, and reporting the gap between two equal indices
+        // panicked with an invalid slice range.
+        let html = r#"<html><body>
+            <pre><code>cargo run</code></pre>
+            <p>Paragraph one carries enough words to clear the weight bar.</p>
+            <p>Paragraph two carries enough words to clear the weight bar.</p>
+            <p>Paragraph three carries enough words to clear the weight bar.</p>
+        </body></html>"#;
+        let document = html_to_document(html, None);
+        let selection = select_blocks(&document, &[], 400);
+
+        let code_blocks = selection
+            .blocks
+            .iter()
+            .filter(|block| block.kind == BlockKind::Code)
+            .count();
+        assert_eq!(code_blocks, 1, "{:?}", selection.blocks);
     }
 
     #[test]

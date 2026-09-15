@@ -27,8 +27,10 @@ const MAX_RETAINED_NATIVE_OUTPUT_BYTES: usize = 1_048_576;
 pub(crate) struct NativeToolPlan {
     pub(crate) tools: Vec<Value>,
     /// True means the request needs the native hosted tool loop, which executes
-    /// CodeSeeX-hosted tools (local web search) inside the native transport.
+    /// CodeSeeX-hosted tools inside the native transport.
     pub(crate) requires_local_execution: bool,
+    /// True when CodeSeeX-hosted local web search is one of those tools.
+    pub(crate) requires_local_web_search: bool,
     pub(crate) uses_official_web_search: bool,
 }
 
@@ -288,13 +290,28 @@ fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCa
 /// client sent it. It never rejects a turn because it does not recognise a
 /// declaration: the provider is the one that decides what it accepts, and a
 /// newer Codex must not be able to break the transport by adding a tool.
+/// Plans the tool list for one native request, publishing the CodeSeeX-hosted
+/// tools the native hosted loop executes itself.
+///
+/// The native payload otherwise carries only what the client declared, so
+/// without this a tool the user enabled would be invisible to the model. A
+/// client declaration with the same name is replaced by the CodeSeeX
+/// declaration: the call must reach the executor the user enabled instead of
+/// being handed back to a client that has no implementation for it.
 pub(crate) fn plan_native_tools(
     chat_tool_definitions: &[Value],
     web_search_backend: WebSearchBackend,
+    native_hosted_definitions: &[Value],
 ) -> NativeToolPlan {
+    let native_hosted_names = native_hosted_definitions
+        .iter()
+        .filter_map(tool_name)
+        .map(str::to_owned)
+        .collect::<BTreeSet<String>>();
     let mut tools = Vec::new();
     let mut names = BTreeSet::new();
     let mut requires_local_execution = false;
+    let mut requires_local_web_search = false;
     let mut saw_local_web_search = false;
     let mut saw_provider_web_search = false;
 
@@ -320,6 +337,12 @@ pub(crate) fn plan_native_tools(
             tools.push(definition.clone());
             continue;
         };
+        if native_hosted_names.contains(name) {
+            // CodeSeeX owns this call now; the declaration pushed below is the
+            // one the model must see.
+            requires_local_execution = true;
+            continue;
+        }
         if matches!(name, "web_search" | "web_search_preview") {
             saw_local_web_search = true;
             if web_search_backend == WebSearchBackend::Official {
@@ -328,12 +351,24 @@ pub(crate) fn plan_native_tools(
             // CodeSeeX-hosted local search is executed by the native hosted
             // tool loop; ownership never changes silently.
             requires_local_execution = true;
+            requires_local_web_search = true;
         } else if crate::tools::is_known_code_tool(name) {
             // Workspace tools (list_directory, read_file_range,
             // workspace_search, vision_analyze) are callable by the Codex
             // client itself, so a native request keeps them in the provider
             // tool list instead of falling back to Chat compatibility.
         }
+        let native = native_definition_from_chat(definition, name);
+        if names.insert(tool_identity(&native).to_owned()) {
+            tools.push(native);
+        }
+    }
+
+    for definition in native_hosted_definitions {
+        let Some(name) = tool_name(definition) else {
+            continue;
+        };
+        requires_local_execution = true;
         let native = native_definition_from_chat(definition, name);
         if names.insert(tool_identity(&native).to_owned()) {
             tools.push(native);
@@ -354,6 +389,7 @@ pub(crate) fn plan_native_tools(
         // the CodeSeeX-hosted function instead of silently switching to
         // provider search. The native hosted tool loop executes that call.
         requires_local_execution = true;
+        requires_local_web_search = true;
         if !saw_local_web_search && names.insert("web_search".to_owned()) {
             // A provider-native declaration carries no callable name, so without
             // this the model has nothing to invoke and the hosted loop never
@@ -367,6 +403,7 @@ pub(crate) fn plan_native_tools(
     NativeToolPlan {
         tools,
         requires_local_execution,
+        requires_local_web_search,
         uses_official_web_search,
     }
 }
@@ -1933,6 +1970,7 @@ mod tests {
                 chat_function("workspace_search"),
             ],
             WebSearchBackend::Local,
+            &[],
         );
 
         assert!(plan.requires_local_execution);
@@ -1940,6 +1978,56 @@ mod tests {
         assert_eq!(plan.tools.len(), 2);
         assert_eq!(plan.tools[0]["name"], "web_search");
         assert!(plan.tools.iter().all(|tool| tool["type"] != "web_search"));
+    }
+
+    #[test]
+    fn native_hosted_image_generation_is_published_and_owned_by_codeseex() {
+        let hosted =
+            crate::tools::native_hostable_hosted_tool_definitions(&["image_gen".to_owned()]);
+        assert_eq!(hosted.len(), 1);
+
+        // The client declaration of the same name must not stay authoritative:
+        // CodeSeeX owns the call, so its declaration is the one the model sees.
+        let plan = plan_native_tools(
+            &[chat_function("image_gen")],
+            WebSearchBackend::Official,
+            &hosted,
+        );
+
+        assert!(plan.requires_local_execution);
+        assert!(!plan.requires_local_web_search);
+        assert_eq!(
+            plan.tools
+                .iter()
+                .filter(|tool| tool["name"] == "image_gen")
+                .count(),
+            1
+        );
+        let tool = plan
+            .tools
+            .iter()
+            .find(|tool| tool["name"] == "image_gen")
+            .expect("CodeSeeX image generation declaration");
+        assert_eq!(tool["type"], "function");
+        assert!(tool["parameters"]["properties"]["prompt"].is_object());
+    }
+
+    #[test]
+    fn disabled_native_hosted_tool_stays_with_the_client() {
+        let plan = plan_native_tools(
+            &[chat_function("image_gen")],
+            WebSearchBackend::Official,
+            &[],
+        );
+
+        assert!(!plan.requires_local_execution);
+        assert_eq!(
+            plan.tools
+                .iter()
+                .filter(|tool| tool["name"] == "image_gen")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1951,6 +2039,7 @@ mod tests {
                 chat_function("external_lookup"),
             ],
             WebSearchBackend::Official,
+            &[],
         );
 
         assert!(!plan.requires_local_execution);
@@ -1978,6 +2067,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("web_search_preview")],
             WebSearchBackend::Official,
+            &[],
         );
 
         assert!(!plan.requires_local_execution);
@@ -1990,6 +2080,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("workspace_search")],
             WebSearchBackend::Official,
+            &[],
         );
 
         assert!(!plan.requires_local_execution);
@@ -2002,6 +2093,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("web_search"), json!({ "type": "web_search" })],
             WebSearchBackend::Local,
+            &[],
         );
 
         assert!(plan.requires_local_execution);
@@ -2018,7 +2110,11 @@ mod tests {
 
     #[test]
     fn provider_native_web_search_without_the_local_function_gets_the_codeseex_function() {
-        let plan = plan_native_tools(&[json!({ "type": "web_search" })], WebSearchBackend::Local);
+        let plan = plan_native_tools(
+            &[json!({ "type": "web_search" })],
+            WebSearchBackend::Local,
+            &[],
+        );
 
         assert!(plan.requires_local_execution);
         assert!(!plan.uses_official_web_search);
@@ -2030,7 +2126,11 @@ mod tests {
 
     #[test]
     fn apply_patch_is_converted_to_provider_custom_schema_without_parameter_wrapper() {
-        let plan = plan_native_tools(&[chat_function("apply_patch")], WebSearchBackend::Local);
+        let plan = plan_native_tools(
+            &[chat_function("apply_patch")],
+            WebSearchBackend::Local,
+            &[],
+        );
 
         assert!(!plan.requires_local_execution);
         assert_eq!(
@@ -2193,7 +2293,7 @@ mod tests {
     #[test]
     fn unknown_tool_shapes_are_forwarded_instead_of_rejected() {
         let declaration = json!({ "type": "computer_use", "name": "computer" });
-        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local, &[]);
 
         assert_eq!(
             plan.tools,
@@ -2241,6 +2341,7 @@ mod tests {
         let plan = plan_native_tools(
             &[chat_function("exec_command"), namespace.clone()],
             WebSearchBackend::Local,
+            &[],
         );
 
         assert!(!plan.requires_local_execution);
@@ -2467,7 +2568,7 @@ mod tests {
             }
         });
 
-        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local, &[]);
 
         assert!(!plan.requires_local_execution);
         assert_eq!(plan.tools, vec![declaration]);
@@ -2486,7 +2587,7 @@ mod tests {
             }
         });
 
-        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
+        let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local, &[]);
 
         assert!(!plan.requires_local_execution);
         assert_eq!(plan.tools, vec![declaration]);
@@ -2534,7 +2635,7 @@ mod tests {
         ];
 
         for (declaration, what) in cases {
-            let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local);
+            let plan = plan_native_tools(&[declaration.clone()], WebSearchBackend::Local, &[]);
             assert_eq!(
                 plan.tools,
                 vec![declaration.clone()],

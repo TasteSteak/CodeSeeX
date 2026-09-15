@@ -18,6 +18,15 @@ const DEFAULT_CONFIGURABLE_HOSTED_TOOL_IDS: &[&str] = &[
     "vision_analyze",
 ];
 
+/// CodeSeeX-hosted tools the native Responses transport runs itself.
+///
+/// These have no client-side executor: the Chat compatibility loop owns the
+/// implementation, and the native hosted loop reuses the same
+/// `execute_tool_with_client` entry point. A tool is listed here only once its
+/// native continuation is verified, so the native transport never declares a
+/// capability it cannot finish.
+const NATIVE_HOSTABLE_HOSTED_TOOL_IDS: &[&str] = &["image_gen"];
+
 /// Builds CodeSeeX-owned tool declarations while keeping local Web Search an
 /// explicit capability. `official` search cannot run on Chat compatibility,
 /// so that route must omit this declaration instead of exposing a local tool
@@ -56,6 +65,24 @@ pub fn is_known_code_tool(name: &str) -> bool {
     let name = canonical_tool_id(name);
     CODESEEX_SYSTEM_HOSTED_TOOL_IDS.contains(&name)
         || CODESEEX_CONFIGURABLE_HOSTED_TOOL_IDS.contains(&name)
+}
+
+/// True when the native transport is allowed to execute this call itself.
+pub(crate) fn is_native_hostable_hosted_tool(name: &str) -> bool {
+    NATIVE_HOSTABLE_HOSTED_TOOL_IDS.contains(&canonical_tool_id(name))
+}
+
+/// The enabled CodeSeeX-hosted declarations the native loop must publish.
+///
+/// The native payload only carries what the client declared, so without this a
+/// tool the user enabled would be invisible to the model and its setting inert.
+pub(crate) fn native_hostable_hosted_tool_definitions(enabled_ids: &[String]) -> Vec<Value> {
+    let enabled = enabled_set(enabled_ids);
+    NATIVE_HOSTABLE_HOSTED_TOOL_IDS
+        .iter()
+        .filter(|id| configurable_tool_enabled(id, &enabled))
+        .filter_map(|id| codeseex_configurable_hosted_tool_definition(id))
+        .collect()
 }
 
 /// The CodeSeeX-owned local web search declaration.
