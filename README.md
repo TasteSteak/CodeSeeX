@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.8.1" src="https://img.shields.io/badge/version-0.8.1-1f6feb">
+  <img alt="Version 0.8.2" src="https://img.shields.io/badge/version-0.8.2-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.8.1`
+Current version: `0.8.2`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -80,6 +80,8 @@ The result is a tool for people who want DeepSeek inside Codex without giving up
 - Model list, aliases, capabilities, and pricing come from one versioned catalog document, resolved in layers: user overrides, the remote manifest `catalog/model-catalog.json`, a local cache, then the built-in document.
 - Catalog entries are typed `chat` or `billing_only` with a semantic `role`, so a pricing-only vision model is accounted for without being offered as a Codex model, and any model card can be locked to a fixed upstream.
 - Reasoning summary mirroring is configurable (`none`, `smart`, `fixed`, `full`) and only changes what Codex displays, never what CodeSeeX sends upstream.
+- The native Responses transport adapts to the provider contract at the boundary: a thinking-mode turn must replay its own `reasoning_text` next to the tool call it belongs to, and one turn's tool outputs must stay contiguous. Codex interleaves its own notices between outputs, which the provider rejects; CodeSeeX settles those shapes before forwarding, while the client-visible conversation stays unchanged.
+- The upstream replay bounds inline image volume: historical base64 images are trimmed oldest-first into a bounded marker, so a long session is never rejected for an oversized request body, and the client keeps its own history and display untouched.
 - Logs have a user/debug level, and the dashboard reports rolling 60-second RPM, TPM, and average latency.
 - Generated Codex TOML with machine-specific `model_catalog_json` and local `base_url`.
 - Embedded model catalog for first-run machines without a native Codex catalog.

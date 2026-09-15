@@ -2,6 +2,56 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.8.2",
+      "released_at": "2026-09-15",
+      "notes": {
+        "en_us": {
+          "summary": "Improves the native Responses transport in two directions: an enabled image generation tool now really runs inside it, and CodeSeeX adapts the official DeepSeek contract at the provider boundary for three shapes that could make the provider reject a whole turn. The client contract and display stay unchanged.",
+          "sections": [
+            {
+              "title": "Highlights",
+              "items": [
+                "An enabled CodeSeeX-hosted tool, image generation today, is now declared and executed inside the native Responses transport instead of being handed to a client that has no implementation for it. A disabled tool stays the client's own declaration, so ownership never changes silently.",
+                "A thinking-mode replay keeps each turn's own reasoning_text next to the tool call it belongs to. The retained hosted round used to keep only the call, so the provider rejected the whole turn with \"The `reasoning_text` in the thinking mode must be passed back to the API.\"",
+                "One turn's tool outputs are gathered into a contiguous group before forwarding. Codex interleaves its own notices between outputs, for example the image-resize notice after a downscaled image, which made the provider answer \"No tool output found for tool call ...\".",
+                "Inline image payloads are bounded on replay. Historical base64 images are trimmed oldest-first into a bounded text marker, so a long session is never rejected with 413 Request Entity Too Large; the newest images stay visible to the model.",
+                "A page-extraction panic is fixed: a short code block could be admitted twice by the selection step and crash it on an out-of-range slice, which aborted the whole search. Each content block is now selected at most once."
+              ]
+            },
+            {
+              "title": "Boundaries",
+              "items": [
+                "Every adaptation stays on the upstream copy: the client contract, the Codex conversation, and what Codex displays are unchanged.",
+                "A trimmed item keeps its position as a bounded marker, every trim is recorded in the log, and CodeSeeX never invents tool output or rewrites the client's own items."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "提升原生 Responses 链路的可用性与稳定性：让已启用的图像生成在原生链路中真正执行，并在 provider 边界适配官方 DeepSeek 契约，修复三类会让上游拒绝整轮的形状。客户端契约与显示保持不变。",
+          "sections": [
+            {
+              "title": "主要更新",
+              "items": [
+                "已启用的 CodeSeeX 托管工具（当前为图像生成）现在会在原生 Responses 链路里声明并由 CodeSeeX 直接执行，不再交回给没有对应实现的客户端；未启用时仍按客户端的声明原样透传，工具归属不静默改变。",
+                "思考模式回放时保留该回合自己的 reasoning_text，并与它所属的工具调用相邻。此前托管工具留档只保留调用本身，上游会以「The `reasoning_text` in the thinking mode must be passed back to the API.」拒绝整轮。",
+                "转发前把同一回合的工具输出收拢成连续一组。Codex 会在并行工具输出之间插入自己的通知（例如图片缩放提示），上游因此返回「No tool output found for tool call ...」。",
+                "回放时限制内联图片体积：历史里的 base64 图片按「保留最新、裁剪最旧」替换为有界文本标记，长会话不会再因请求体过大被上游以 413 Request Entity Too Large 拒绝，最新图片仍对模型可见。",
+                "修复网页正文提取的越界崩溃：短代码块可能被选取阶段重复入选并以越界切片崩溃，从而中断整次搜索，现在每个正文块最多入选一次。"
+              ]
+            },
+            {
+              "title": "边界",
+              "items": [
+                "所有适配只作用于上游那份副本：客户端契约、Codex 会话以及 Codex 的显示都保持不变。",
+                "被裁剪的条目位置不变，只替换为有界标记；每次裁剪都会写入日志，CodeSeeX 不会伪造工具输出，也不会改写客户端自己的条目。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "version": "0.8.1",
       "released_at": "2026-09-14",
       "notes": {

@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.8.1" src="https://img.shields.io/badge/version-0.8.1-1f6feb">
+  <img alt="Version 0.8.2" src="https://img.shields.io/badge/version-0.8.2-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.8.1`
+当前版本：`0.8.2`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -80,6 +80,8 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 - 模型清单、别名、能力与定价来自同一份带版本的目录文档，按「用户覆盖 → 远程清单 → 本地缓存 → 内置文档」分层解析。
 - 目录条目区分 `chat` 与 `billing_only`，并带有语义化 `role`：只计费的识图模型会照常计价，但不会作为 Codex 模型提供；任意模型卡片都可以上锁，固定为指定上游。
 - 思考链镜像支持 `none` / `smart` / `fixed` / `full`，只改变 Codex 的显示，不改变发给上游的内容。
+- 原生 Responses 链路在 provider 边界适配官方契约：思考模式下带工具调用的回合必须回传它自己的 `reasoning_text`，同一轮的工具输出必须连续成组。Codex 会在并行工具输出之间插入自己的通知，官方接口会据此拒绝整轮；CodeSeeX 把这类形状在转发前收敛成上游接受的形式，客户端契约与显示不变。
+- 上游回放会限制内联图片体积：历史里的 base64 图片按「保留最新、裁剪最旧」收敛为有界标记，长会话不会因为请求体过大被上游拒绝，客户端自己的历史与显示不受影响。
 - 日志区分用户与调试两档，仪表盘提供滚动 60 秒的 RPM、TPM 和平均延迟。
 - 自动生成 Codex TOML，包含机器相关的 `model_catalog_json` 和本地 `base_url`。
 - 内置模型目录，用于首次运行或缺少原生 Codex catalog 的环境。

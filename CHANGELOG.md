@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.2 - 2026-09-15
+
+This release improves both availability and stability of the native Responses transport: an enabled image generation tool now really runs inside it, and the provider boundary adapts to the official DeepSeek contract for thinking-mode replay, tool-output ordering, and inline image volume, three shapes that could make the provider reject a whole turn. The client contract and display stay unchanged.
+
+### Native tools
+
+- An enabled CodeSeeX-hosted tool, image generation today, is now declared and executed inside the native Responses transport instead of being handed to a client that has no implementation for it. A disabled tool stays the client's own declaration, so ownership never changes silently.
+
+### Native transport
+
+- A thinking-mode replay of a turn that carries tool calls now keeps that turn's own `reasoning_text`. The retained hosted round used to keep only the call, so the reasoning was dropped and the provider rejected the whole turn with `The reasoning_text in the thinking mode must be passed back to the API.`
+- Tool outputs are gathered into one contiguous group before forwarding, ordered by call. Codex interleaves its own notices between outputs (the image-resize notice is the common one), which makes the provider report the later call as unanswered with `No tool output found for tool call ...`; only the position of those notices changes, never their content.
+- Inline image payloads are bounded on replay. Codex keeps every tool image in its history as base64, so a long session re-uploads the same data on every turn until the upstream front proxy rejects the whole request with `413 Request Entity Too Large`. CodeSeeX replaces the oldest images with a bounded text marker in the upstream copy only, keeps the newest visible, leaves the client's own history and display untouched, and records the trim in the log.
+
+### Local search
+
+- Fixes a page-extraction defect where a short code block could be admitted twice, making the selection step panic on an out-of-range slice and abort the whole search. Each content block is now selected at most once.
+
 ## 0.8.1 - 2026-09-14
 
 This release rebuilds CodeSeeX local Web Search from the request down to the evidence: the pipeline becomes one contract shared by the model view and the client view, and the problems that made search invisible, unusable on CJK queries, wasteful with page text, or able to break a continuation are fixed.
