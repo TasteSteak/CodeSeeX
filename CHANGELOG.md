@@ -2,21 +2,16 @@
 
 ## 0.9.0 - 2026-10-21
 
-This release aggregates the user-visible changes since 0.8.2. Internal 0.8.3
-builds are not a separate release.
+This release aggregates the user-visible changes since 0.8.2. Official Web Search now uses DeepSeek's billed Search and Fetch APIs, a dedicated billing entry reports request-level cost, catalog updates reject stale revisions, and the release prompts can request clarification through `request_user_input`. Native Responses and Chat compatibility remain supported.
 
-### Web search
-
-- The `official` backend now uses DeepSeek's Search and Fetch APIs instead of forwarding a provider-native `web_search` declaration. Search calls `/v1/tools/search`; opening a result calls `/v1/tools/fetch`.
-- Official search remains a CodeSeeX-hosted tool, so it works with both Native Responses and Chat compatibility. The old native-only compatibility rejection and the separate provider-owned search path were removed.
-- Official search uses the existing upstream credential resolution, preserves provider ranking, returns bounded summaries as model evidence, retries transient 408/429/5xx failures once, and fails explicitly instead of falling back to local scraping.
-- The desktop backend hint and billing catalog now identify the official option as the DeepSeek Search API. Search and Fetch are shown at CNY 5 per 1,000 successful requests, free until 2026-11-01 00:00 Asia/Shanghai.
-
-### Catalog and agent behavior
-
-- The catalog now carries a billing-only `deepseek-web-search` entry. It appears in billing settings without being offered as a chat model or entering the Codex model list.
+- The `official` backend now calls `/v1/tools/search` to search and `/v1/tools/fetch` to open a result, instead of forwarding a provider-native `web_search` declaration. Search remains a CodeSeeX-hosted tool, so both Native Responses and Chat compatibility use the same path.
+- Official search keeps provider ranking and returns bounded summaries as model evidence. It reuses the configured upstream credential, retries transient 408/429/5xx failures once, and returns an explicit error instead of silently falling back to local scraping.
+- The billing catalog now includes a billing-only `deepseek-web-search` entry, which is visible in pricing settings but never offered as a chat model or added to the Codex model list. Search and Fetch are shown at CNY 5 per 1,000 successful requests, free until 2026-11-01 00:00 Asia/Shanghai; failed, empty, or timed-out requests are not charged.
 - Catalog revision `0.8.3.1` adds a downgrade guard: an older numeric remote manifest or startup cache can no longer replace a newer built-in catalog.
-- The release build includes the reviewed prompt seed for proactive `request_user_input` clarification while retaining a plain-text fallback when the client component is unavailable.
+- The reviewed release prompt can use `request_user_input` for proactive clarification while retaining a plain-text fallback when the client component is unavailable. Existing threads keep the prompt and tool state they started with.
+- Windows NSIS, Linux AppImage, and macOS arm64 packages are built by GitHub Actions, with signed updater artifacts and `latest.json` published as one release.
+
+Existing configurations continue to load. The official search path no longer falls back to local scraping, so an upstream search failure now surfaces explicitly rather than changing the selected backend.
 
 ## 0.8.2 - 2026-09-15
 

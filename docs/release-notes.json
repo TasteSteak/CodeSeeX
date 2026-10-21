@@ -6,7 +6,7 @@
       "released_at": "2026-10-21",
       "notes": {
         "en_us": {
-          "summary": "CodeSeeX 0.9.0 aggregates all user-facing changes since 0.8.2. It moves official Web Search to DeepSeek's billed Search and Fetch APIs, adds a dedicated billing catalog entry, hardens catalog updates against stale revisions, and prepares proactive Codex input guidance. Internal 0.8.3 builds are not a separate release.",
+          "summary": "CodeSeeX 0.9.0 aggregates the user-visible changes since 0.8.2. Official Web Search now uses DeepSeek's billed Search and Fetch APIs, a dedicated billing entry reports request-level cost, catalog updates reject stale revisions, and the release prompts can request clarification through request_user_input. Native Responses and Chat compatibility remain supported.",
           "sections": [
             {
               "title": "Web Search",
@@ -22,7 +22,8 @@
               "items": [
                 "The catalog now carries a billing-only deepseek-web-search entry, visible in billing settings but never offered as a chat model.",
                 "Catalog revision 0.8.3.1 ignores older numeric remote manifests and startup caches so they cannot remove newer built-in prices or capabilities.",
-                "The release prompt seed adds proactive request_user_input clarification guidance, with a plain-text fallback when the client component is unavailable."
+                "The release prompt seed adds proactive request_user_input clarification guidance, with a plain-text fallback when the client component is unavailable. Existing threads keep the prompt and tool state they started with.",
+                "Windows NSIS, Linux AppImage, and macOS arm64 packages are built by GitHub Actions, with signed updater artifacts and latest.json published as one release."
               ]
             }
           ]
