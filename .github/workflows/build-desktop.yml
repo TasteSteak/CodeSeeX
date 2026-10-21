@@ -148,7 +148,7 @@ jobs:
           rustup default stable
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version "=2.11.2" --locked
 
       - name: Verify updater signing key
         shell: pwsh
