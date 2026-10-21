@@ -4064,13 +4064,16 @@ mod tests {
 
     #[tokio::test]
     async fn official_backend_without_a_search_tool_stays_on_native() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_response))
+            .with_state(capture);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
         let data_dir = temp_data_dir("official-no-search-local-tool-fallback");
-        let mut config = AppConfig {
-            data_dir: data_dir.clone(),
-            ..Default::default()
-        };
-        config.upstream.transport = UpstreamTransport::NativeResponses;
-        config.web_search_backend = WebSearchBackend::Official;
+        let config = config_for_fake(data_dir.clone(), address);
         let store = Store::open(&data_dir).await.unwrap();
         let state = ProxyState::for_test(config.clone(), store);
         let input = request(
@@ -4089,19 +4092,22 @@ mod tests {
         )
         .await
         .expect("native transport must stay selected for workspace tools");
-        assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
     async fn official_search_with_workspace_tools_uses_the_hosted_loop() {
+        let capture = Capture::default();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/responses", post(fake_native_response))
+            .with_state(capture);
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
         let data_dir = temp_data_dir("official-search-mixed-tools");
-        let mut config = AppConfig {
-            data_dir: data_dir.clone(),
-            ..Default::default()
-        };
-        config.upstream.transport = UpstreamTransport::NativeResponses;
-        config.web_search_backend = WebSearchBackend::Official;
+        let config = config_for_fake(data_dir.clone(), address);
         let store = Store::open(&data_dir).await.unwrap();
         let state = ProxyState::for_test(config.clone(), store);
         let input = request(
