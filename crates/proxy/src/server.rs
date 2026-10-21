@@ -79,7 +79,6 @@ use axum::routing::post;
 use axum::Json;
 #[cfg(test)]
 use axum::Router;
-use codeseex_core::config::WebSearchBackend;
 use codeseex_core::context::request_looks_like_codex_full_context;
 use codeseex_core::models::available_models_from_document;
 use codeseex_core::protocol::ChatMessage;
@@ -894,11 +893,9 @@ async fn responses(
         suppress_tools_for_service,
         &external_tool_context,
     );
-    // `dispatch_if_selected` only falls through here for Chat compatibility.
-    // Do not inject the local implementation when the user explicitly chose
-    // the provider-owned backend: a request without an incoming tools array
-    // would otherwise silently regain and execute local web_search.
-    let inject_local_web_search = config.web_search_backend != WebSearchBackend::Official;
+    // Both backends are CodeSeeX-hosted tools. `official` selects the DeepSeek
+    // Search/Fetch API inside the executor; it does not change tool ownership.
+    let inject_local_web_search = true;
     let enabled_tools = if inject_codeseex_proxy_tools {
         enabled_tool_ids(&config)
     } else {
@@ -2256,7 +2253,6 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         &call.name,
                         &enabled_tools,
                         &community_tools,
-                        config.web_search_backend != WebSearchBackend::Official,
                     )
                 }) {
                         let message = format!(
@@ -2529,6 +2525,10 @@ fn response_stream_from_chat(params: StreamingResponseParams) -> axum::response:
                         &message_snapshot,
                         &current_image_refs,
                         &community_tools,
+                        crate::tools::WebAuthContext {
+                            inbound: auth.as_deref(),
+                            local_access_token: Some(&state.v1_access_token),
+                        },
                         &proxy_executed_calls,
                     ) => Some(result),
                     _ = cancelled.cancelled() => None,

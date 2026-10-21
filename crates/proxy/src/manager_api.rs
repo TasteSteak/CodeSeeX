@@ -532,8 +532,8 @@ async fn search_sources_health(State(state): State<ProxyState>) -> impl IntoResp
     Json(diagnostic)
 }
 
-/// Runs one CodeSeeX web search locally, so the pipeline can be exercised
-/// without a model in the loop. Local-only, like the rest of the manager API.
+/// Runs one CodeSeeX web search through the selected backend, so the pipeline
+/// can be exercised without a model in the loop.
 async fn web_search_probe(
     State(state): State<ProxyState>,
     Query(query): Query<WebSearchProbeQuery>,
@@ -552,8 +552,20 @@ async fn web_search_probe(
         )
             .into_response();
     }
-    let proxy_mode = state.runtime_config.snapshot().config.network_proxy;
-    Json(crate::tools::web::execute(proxy_mode, &arguments.unwrap(), &[]).await).into_response()
+    let snapshot = state.runtime_config.snapshot();
+    let config = &snapshot.config;
+    Json(
+        crate::tools::web::execute(
+            config.network_proxy,
+            config.web_search_backend,
+            config,
+            crate::tools::WebAuthContext::default(),
+            &arguments.unwrap(),
+            &[],
+        )
+        .await,
+    )
+    .into_response()
 }
 
 fn web_search_probe_arguments(query: &WebSearchProbeQuery, body: Option<&Value>) -> Option<Value> {

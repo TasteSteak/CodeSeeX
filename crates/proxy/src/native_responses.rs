@@ -29,9 +29,8 @@ pub(crate) struct NativeToolPlan {
     /// True means the request needs the native hosted tool loop, which executes
     /// CodeSeeX-hosted tools inside the native transport.
     pub(crate) requires_local_execution: bool,
-    /// True when CodeSeeX-hosted local web search is one of those tools.
-    pub(crate) requires_local_web_search: bool,
-    pub(crate) uses_official_web_search: bool,
+    /// True when CodeSeeX-hosted web search is one of those tools.
+    pub(crate) requires_hosted_web_search: bool,
 }
 
 /// A provider output group is immutable protocol data. The coordinator may
@@ -275,8 +274,8 @@ fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCa
 }
 
 /// Converts the existing, Chat-shaped tool definitions into native Responses
-/// definitions without deciding how calls are executed. In particular, this
-/// keeps CodeSeeX local search and DeepSeek official search mutually exclusive.
+/// definitions without deciding how calls are executed. Both web-search
+/// backends remain CodeSeeX-hosted; only the executor implementation differs.
 ///
 /// Declarations the endpoint already owns natively (`namespace`, `tool_search`)
 /// are validated and forwarded verbatim. The verified endpoint accepts the
@@ -300,7 +299,7 @@ fn native_tool_call_from_output_item(item: &Value) -> Result<Option<NativeToolCa
 /// being handed back to a client that has no implementation for it.
 pub(crate) fn plan_native_tools(
     chat_tool_definitions: &[Value],
-    web_search_backend: WebSearchBackend,
+    _web_search_backend: WebSearchBackend,
     native_hosted_definitions: &[Value],
 ) -> NativeToolPlan {
     let native_hosted_names = native_hosted_definitions
@@ -311,23 +310,16 @@ pub(crate) fn plan_native_tools(
     let mut tools = Vec::new();
     let mut names = BTreeSet::new();
     let mut requires_local_execution = false;
-    let mut requires_local_web_search = false;
+    let mut requires_hosted_web_search = false;
     let mut saw_local_web_search = false;
     let mut saw_provider_web_search = false;
 
     for definition in chat_tool_definitions {
         if is_provider_web_search_definition(definition) {
             saw_provider_web_search = true;
-            if web_search_backend == WebSearchBackend::Official {
-                // Normalize to the one provider-owned definition appended
-                // below. This keeps a client-provided native declaration from
-                // creating a duplicate official search capability.
-                continue;
-            }
             // Codex can advertise its provider-native web-search declaration
-            // even when the user selected CodeSeeX local search. The hosted
-            // loop below replaces it with the CodeSeeX function, which is what
-            // the provider can actually call.
+            // even when CodeSeeX owns web search. The hosted loop below replaces
+            // it with the callable CodeSeeX function.
             continue;
         }
         let Some(name) = tool_name(definition).or_else(|| provider_native_identity(definition))
@@ -345,13 +337,10 @@ pub(crate) fn plan_native_tools(
         }
         if matches!(name, "web_search" | "web_search_preview") {
             saw_local_web_search = true;
-            if web_search_backend == WebSearchBackend::Official {
-                continue;
-            }
-            // CodeSeeX-hosted local search is executed by the native hosted
+            // CodeSeeX-hosted search is executed by the native hosted
             // tool loop; ownership never changes silently.
             requires_local_execution = true;
-            requires_local_web_search = true;
+            requires_hosted_web_search = true;
         } else if crate::tools::is_known_code_tool(name) {
             // Workspace tools (list_directory, read_file_range,
             // workspace_search, vision_analyze) are callable by the Codex
@@ -375,21 +364,12 @@ pub(crate) fn plan_native_tools(
         }
     }
 
-    let uses_official_web_search = web_search_backend == WebSearchBackend::Official
-        && (saw_provider_web_search || saw_local_web_search);
-    if uses_official_web_search {
-        // `web_search` is provider-owned in this mode. It replaces the
-        // CodeSeeX function with the schema verified against DeepSeek's
-        // Responses endpoint; it never coexists with the local function.
-        if names.insert("web_search".to_owned()) {
-            tools.push(json!({ "type": "web_search" }));
-        }
-    } else if saw_provider_web_search || saw_local_web_search {
-        // CodeSeeX owns local web search in this mode: the declaration asks for
+    if saw_provider_web_search || saw_local_web_search {
+        // CodeSeeX owns web search in this mode: the declaration asks for
         // the CodeSeeX-hosted function instead of silently switching to
         // provider search. The native hosted tool loop executes that call.
         requires_local_execution = true;
-        requires_local_web_search = true;
+        requires_hosted_web_search = true;
         if !saw_local_web_search && names.insert("web_search".to_owned()) {
             // A provider-native declaration carries no callable name, so without
             // this the model has nothing to invoke and the hosted loop never
@@ -403,8 +383,7 @@ pub(crate) fn plan_native_tools(
     NativeToolPlan {
         tools,
         requires_local_execution,
-        requires_local_web_search,
-        uses_official_web_search,
+        requires_hosted_web_search,
     }
 }
 
@@ -1974,7 +1953,6 @@ mod tests {
         );
 
         assert!(plan.requires_local_execution);
-        assert!(!plan.uses_official_web_search);
         assert_eq!(plan.tools.len(), 2);
         assert_eq!(plan.tools[0]["name"], "web_search");
         assert!(plan.tools.iter().all(|tool| tool["type"] != "web_search"));
@@ -1995,7 +1973,7 @@ mod tests {
         );
 
         assert!(plan.requires_local_execution);
-        assert!(!plan.requires_local_web_search);
+        assert!(!plan.requires_hosted_web_search);
         assert_eq!(
             plan.tools
                 .iter()
@@ -2031,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn official_web_search_replaces_only_the_local_web_function_without_double_dispatch() {
+    fn official_web_search_uses_the_codeseex_function_without_double_dispatch() {
         let plan = plan_native_tools(
             &[
                 chat_function("web_search"),
@@ -2042,16 +2020,16 @@ mod tests {
             &[],
         );
 
-        assert!(!plan.requires_local_execution);
-        assert!(plan.uses_official_web_search);
+        assert!(plan.requires_local_execution);
+        assert!(plan.requires_hosted_web_search);
         assert_eq!(
             plan.tools
                 .iter()
-                .filter(|tool| tool["type"] == "web_search")
+                .filter(|tool| tool["name"] == "web_search")
                 .count(),
             1
         );
-        assert!(!plan.tools.iter().any(|tool| tool["name"] == "web_search"));
+        assert!(plan.tools.iter().all(|tool| tool["type"] != "web_search"));
         assert!(plan
             .tools
             .iter()
@@ -2063,16 +2041,18 @@ mod tests {
     }
 
     #[test]
-    fn official_web_search_also_replaces_the_preview_alias() {
+    fn official_web_search_also_hosts_the_preview_alias() {
         let plan = plan_native_tools(
             &[chat_function("web_search_preview")],
             WebSearchBackend::Official,
             &[],
         );
 
-        assert!(!plan.requires_local_execution);
-        assert!(plan.uses_official_web_search);
-        assert_eq!(plan.tools, vec![json!({ "type": "web_search" })]);
+        assert!(plan.requires_local_execution);
+        assert!(plan.requires_hosted_web_search);
+        assert_eq!(plan.tools.len(), 1);
+        assert_eq!(plan.tools[0]["type"], "function");
+        assert_eq!(plan.tools[0]["name"], "web_search_preview");
     }
 
     #[test]
@@ -2084,7 +2064,6 @@ mod tests {
         );
 
         assert!(!plan.requires_local_execution);
-        assert!(!plan.uses_official_web_search);
         assert_eq!(plan.tools[0]["name"], "workspace_search");
     }
 
@@ -2097,7 +2076,6 @@ mod tests {
         );
 
         assert!(plan.requires_local_execution);
-        assert!(!plan.uses_official_web_search);
         assert_eq!(
             plan.tools
                 .iter()
@@ -2117,7 +2095,6 @@ mod tests {
         );
 
         assert!(plan.requires_local_execution);
-        assert!(!plan.uses_official_web_search);
         assert_eq!(plan.tools.len(), 1);
         assert_eq!(plan.tools[0]["type"], "function");
         assert_eq!(plan.tools[0]["name"], "web_search");
@@ -2345,7 +2322,6 @@ mod tests {
         );
 
         assert!(!plan.requires_local_execution);
-        assert!(!plan.uses_official_web_search);
         assert_eq!(plan.tools.len(), 2);
         assert_eq!(plan.tools[0]["name"], "exec_command");
         assert_eq!(plan.tools[1], namespace);

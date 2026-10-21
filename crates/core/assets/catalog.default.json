@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "0.8.0.1",
+  "revision": "0.8.3.1",
   "provider_name": "DeepSeek",
   "default_model": "deepseek-flash",
   "models": [
@@ -157,10 +157,34 @@
       "upstream_slug": "deepseek-v4-flash",
       "pricing_group": null,
       "is_default": false
+    },
+    {
+      "slug": "deepseek-web-search",
+      "kind": "billing_only",
+      "role": "web_search",
+      "display_name": "DeepSeek Web Search",
+      "short_display_name": "Search",
+      "description": "Official Search and Fetch APIs, billed per successful request.",
+      "context_window": 1,
+      "effective_context_window_percent": 100,
+      "priority": 950,
+      "supported_in_api": true,
+      "input_modalities": [
+        "text"
+      ],
+      "aliases": [],
+      "alias_patterns": [],
+      "upstream_slug": "deepseek-web-search",
+      "pricing_group": null,
+      "is_default": false,
+      "billing_unit": "per_1k_requests",
+      "search_request_price": 5,
+      "fetch_request_price": 5,
+      "free_until": "2026-11-01T00:00:00+08:00"
     }
   ],
   "pricing": {
-    "revision": "0.8.0.1",
+    "revision": "0.8.3.1",
     "currency": "CNY",
     "unit": "per_1m_tokens",
     "peak_valley": {

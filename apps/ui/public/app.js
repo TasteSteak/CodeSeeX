@@ -2495,7 +2495,7 @@ function renderWebSearchBackendField() {
   const control = document.createElement("div");
   control.className = "segmented-control compact-segmented-control";
   control.append(
-    webSearchBackendOption("official", "webSearchBackend_official", "DeepSeek official"),
+    webSearchBackendOption("official", "webSearchBackend_official", "DeepSeek Search API"),
     webSearchBackendOption("local", "webSearchBackend_local", "CodeSeeX local"),
   );
   item.append(labelWrap, control);
@@ -4865,7 +4865,17 @@ function renderBillingCatalog() {
     selectedCatalogModel = preferred ? preferred.slug : "";
   }
   const signature = stableStringify({
-    models: models.map((model) => [model.slug, model.display_name, model.short_display_name, model.description]),
+    models: models.map((model) => [
+      model.slug,
+      model.display_name,
+      model.short_display_name,
+      model.description,
+      model.role,
+      model.billing_unit,
+      model.search_request_price,
+      model.fetch_request_price,
+      model.free_until,
+    ]),
     selected: selectedCatalogModel,
     upstream: latestUpstreamModelOverride,
     revision: catalogState.revision,
@@ -5006,6 +5016,7 @@ function renderBillingCard(model) {
   panel.textContent = "";
   if (!model) return;
   const rate = catalogRateFor(model.slug);
+  const requestBilling = catalogRequestBilling(model);
   const card = document.createElement("div");
   card.className = "billing-rate-card";
   card.dataset.model = model.slug;
@@ -5016,11 +5027,11 @@ function renderBillingCard(model) {
   const title = document.createElement("strong");
   title.textContent = model.display_name || model.slug;
   meta.append(title);
-  const unit = String(t("billingUnit") || "").trim();
+  const unit = String(t(requestBilling ? "billingRequestUnit" : "billingUnit") || "").trim();
   if (unit) {
     const hint = document.createElement("small");
     hint.className = "muted";
-    hint.setAttribute("data-i18n", "billingUnit");
+    hint.setAttribute("data-i18n", requestBilling ? "billingRequestUnit" : "billingUnit");
     hint.textContent = unit;
     meta.append(hint);
   }
@@ -5034,7 +5045,9 @@ function renderBillingCard(model) {
     badgeEl.textContent = modelBadge;
     badges.append(badgeEl);
   }
-  const pricingBadge = catalogPricingBadge(rate);
+  const pricingBadge = requestBilling
+    ? { text: t("billingOfficialPriced"), warn: false }
+    : catalogPricingBadge(rate);
   if (pricingBadge) {
     const badgeEl = document.createElement("span");
     badgeEl.className = pricingBadge.warn ? "billing-model-badge is-warn" : "billing-model-badge";
@@ -5043,35 +5056,88 @@ function renderBillingCard(model) {
   }
   if (badges.childElementCount > 0) header.append(badges);
   card.append(header);
-  const row = document.createElement("div");
-  row.className = "billing-row";
-  for (const [key, labelKey] of [["cached_input", "billingCachedInput"], ["cache_miss_input", "billingCacheMissInput"], ["output", "billingOutput"]]) {
-    const field = document.createElement("div");
-    field.className = "billing-field";
-    const label = document.createElement("span");
-    label.className = "billing-prefix";
-    label.setAttribute("data-i18n", labelKey);
-    label.textContent = t(labelKey);
-    const input = document.createElement("input");
-    input.type = "number";
-    input.step = "0.001";
-    input.min = "0";
-    input.dataset.model = model.slug;
-    input.dataset.rate = key;
-    input.value = rate ? String(rate[key]) : "";
-    input.setAttribute("data-i18n-placeholder", "billingUnpriced");
-    input.placeholder = t("billingUnpriced");
-    input.addEventListener("input", handleConfigInput);
-    input.addEventListener("change", handleConfigInput);
-    input.addEventListener("focusout", handleConfigInput);
-    const suffix = document.createElement("span");
-    suffix.className = "billing-suffix";
-    suffix.textContent = catalogState.currency || "CNY";
-    field.append(label, input, suffix);
-    row.append(field);
+  if (requestBilling) {
+    card.append(
+      renderRequestPriceRow("billingSearchApi", requestBilling.searchPrice),
+      renderRequestPriceRow("billingFetchApi", requestBilling.fetchPrice),
+    );
+    const note = document.createElement("p");
+    note.className = "billing-request-note";
+    note.textContent = t("billingRequestChargeNote");
+    card.append(note);
+    const freeUntil = activeFreeUntil(requestBilling.freeUntil);
+    if (freeUntil) {
+      const free = document.createElement("p");
+      free.className = "billing-request-free";
+      free.textContent = t("billingFreeUntil").replace("{date}", freeUntil);
+      card.append(free);
+    }
+  } else {
+    const row = document.createElement("div");
+    row.className = "billing-row";
+    for (const [key, labelKey] of [["cached_input", "billingCachedInput"], ["cache_miss_input", "billingCacheMissInput"], ["output", "billingOutput"]]) {
+      const field = document.createElement("div");
+      field.className = "billing-field";
+      const label = document.createElement("span");
+      label.className = "billing-prefix";
+      label.setAttribute("data-i18n", labelKey);
+      label.textContent = t(labelKey);
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "0.001";
+      input.min = "0";
+      input.dataset.model = model.slug;
+      input.dataset.rate = key;
+      input.value = rate ? String(rate[key]) : "";
+      input.setAttribute("data-i18n-placeholder", "billingUnpriced");
+      input.placeholder = t("billingUnpriced");
+      input.addEventListener("input", handleConfigInput);
+      input.addEventListener("change", handleConfigInput);
+      input.addEventListener("focusout", handleConfigInput);
+      const suffix = document.createElement("span");
+      suffix.className = "billing-suffix";
+      suffix.textContent = catalogState.currency || "CNY";
+      field.append(label, input, suffix);
+      row.append(field);
+    }
+    card.append(row);
   }
-  card.append(row);
   panel.append(card);
+}
+
+function catalogRequestBilling(model) {
+  const unit = String((model && model.billing_unit) || "").trim();
+  if (unit !== "per_1k_requests") return null;
+  return {
+    searchPrice: normalizeRateInput(model.search_request_price, 0),
+    fetchPrice: normalizeRateInput(model.fetch_request_price, 0),
+    freeUntil: String((model && model.free_until) || "").trim(),
+  };
+}
+
+function renderRequestPriceRow(labelKey, price) {
+  const field = document.createElement("div");
+  field.className = "billing-field is-readonly";
+  const label = document.createElement("span");
+  label.className = "billing-prefix";
+  label.setAttribute("data-i18n", labelKey);
+  label.textContent = t(labelKey);
+  const value = document.createElement("strong");
+  value.className = "billing-static-value";
+  value.textContent = String(price);
+  const suffix = document.createElement("span");
+  suffix.className = "billing-suffix";
+  suffix.textContent = (catalogState.currency || "CNY") + " / " + t("billingPerThousandRequests");
+  field.append(label, value, suffix);
+  return field;
+}
+
+function activeFreeUntil(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp) || timestamp <= Date.now()) return "";
+  return raw.replace("T", " ").slice(0, 16);
 }
 
 function catalogModelBadge(model) {

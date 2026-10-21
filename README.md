@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.8.2" src="https://img.shields.io/badge/version-0.8.2-1f6feb">
+  <img alt="Version 0.9.0" src="https://img.shields.io/badge/version-0.9.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ The project targets a specific gap in the current AI tooling market:
 - Simple proxy scripts are good at making one model answer through another endpoint.
 - CodeSeeX is designed for Codex-style agent sessions, where tool lifecycle, context hygiene, request classification, and cost visibility decide whether the agent is actually usable.
 
-Current version: `0.8.2`
+Current version: `0.9.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX local agent runtime  ->  DeepSeek-compatible upstream
@@ -75,8 +75,8 @@ The result is a tool for people who want DeepSeek inside Codex without giving up
 - DeepSeek V4 models exposed to Codex as `deepseek-v4-pro` and `deepseek-flash`.
 - Official DeepSeek endpoints use the native Responses API by default; Chat API compatibility is an explicit experimental fallback.
 - Image understanding and image generation are separate optional tools; DeepSeek Vision does not enter the main Codex model catalog.
-- Web Search can use the default CodeSeeX local backend or the separately selected DeepSeek official backend.
-- CodeSeeX-hosted local tools such as local Web Search run inside the native Responses transport, so tool ownership never changes silently. A request that mixes provider-owned official search with a hosted tool fails closed and points you at Chat compatibility instead of choosing an owner for you.
+- Web Search can use the default CodeSeeX scraping backend or the separately selected DeepSeek official backend.
+- The [official backend](docs/deepseek-search-api.md) calls DeepSeek Search (`/v1/tools/search`) and Fetch (`/v1/tools/fetch`) as a CodeSeeX-hosted tool. It works with both Native Responses and Chat compatibility, is billed at CNY 5 per 1,000 successful Search or Fetch requests (free until 2026-11-01 00:00 Asia/Shanghai), and never falls back silently to scraping.
 - Model list, aliases, capabilities, and pricing come from one versioned catalog document, resolved in layers: user overrides, the remote manifest `catalog/model-catalog.json`, a local cache, then the built-in document.
 - Catalog entries are typed `chat` or `billing_only` with a semantic `role`, so a pricing-only vision model is accounted for without being offered as a Codex model, and any model card can be locked to a fixed upstream.
 - Reasoning summary mirroring is configurable (`none`, `smart`, `fixed`, `full`) and only changes what Codex displays, never what CodeSeeX sends upstream.
@@ -272,7 +272,7 @@ Tool-specific credentials, such as custom image understanding and image generati
 
 ## Privacy Notes
 
-CodeSeeX is a local bridge, but model requests are forwarded to the configured upstream service. Image understanding and image generation send image data to their separately selected providers. Web Search may request search-result pages or regular web pages from third-party websites. Those services may apply their own terms, retention policies, rate limits, and anti-abuse rules.
+CodeSeeX is a local bridge, but model requests are forwarded to the configured upstream service. Image understanding and image generation send image data to their separately selected providers. Local Web Search requests search-result pages or regular web pages from third-party websites; official Web Search sends the query and requested URL to DeepSeek Search and Fetch. Those services may apply their own terms, retention policies, rate limits, and anti-abuse rules.
 
 Default logs are compact and redacted. Development diagnostics can expose more request-shape information and should only be enabled when needed for debugging.
 

@@ -196,8 +196,10 @@ pub enum UpstreamTransport {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchBackend {
+    /// CodeSeeX scrapes public search-result pages and runs its own extraction.
     #[default]
     Local,
+    /// CodeSeeX calls DeepSeek's `/v1/tools/search` and `/v1/tools/fetch` APIs.
     Official,
 }
 
@@ -590,6 +592,10 @@ impl AppConfig {
         if let Some(document) =
             crate::catalog::read_cached_catalog_document(&self.catalog_cache_path())
         {
+            let builtin = crate::catalog::embedded_catalog_document();
+            if crate::catalog::revision_is_older(&builtin.revision, &document.revision) {
+                return;
+            }
             let document = Arc::new(document);
             self.catalog_remote = Some(Arc::clone(&document));
             self.catalog_cache = Some(document);
@@ -1186,6 +1192,13 @@ mod tests {
         config.catalog_remote_enabled = true;
         assert_eq!(config.catalog_layer(), CatalogLayer::Builtin);
         assert_eq!(config.catalog_source_label(), "builtin");
+
+        let mut stale = crate::catalog::embedded_catalog_document();
+        stale.revision = "0.0.1".to_owned();
+        crate::catalog::write_cached_catalog_document(&config.catalog_cache_path(), &stale)
+            .expect("write stale catalog cache");
+        config.load_cached_catalog();
+        assert_eq!(config.catalog_layer(), CatalogLayer::Builtin);
 
         let cached = crate::catalog::embedded_catalog_document();
         crate::catalog::write_cached_catalog_document(&config.catalog_cache_path(), &cached)

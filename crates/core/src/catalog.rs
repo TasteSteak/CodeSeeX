@@ -1259,6 +1259,20 @@ pub fn version_at_least(current: &str, required: &str) -> bool {
     true
 }
 
+/// True when `candidate` is a numeric catalog revision older than `current`.
+/// Non-numeric revisions are accepted because they cannot be ordered safely.
+pub fn revision_is_older(current: &str, candidate: &str) -> bool {
+    let normalized_current = current.trim().trim_start_matches('v');
+    let normalized_candidate = candidate.trim().trim_start_matches('v');
+    let candidate_is_numeric = normalized_candidate
+        .split(['.', '-', '+'])
+        .next()
+        .is_some_and(|segment| segment.parse::<u64>().is_ok());
+    candidate_is_numeric
+        && normalized_current != normalized_candidate
+        && version_at_least(normalized_current, normalized_candidate)
+}
+
 pub fn read_cached_catalog_document(path: &Path) -> Option<CatalogDocument> {
     let text = fs::read_to_string(path).ok()?;
     CatalogDocument::from_json(&text).ok()
@@ -1495,6 +1509,43 @@ mod tests {
             .any(|model| model.id == "deepseek-v4-flash-vision-exp"));
     }
 
+    #[test]
+    fn web_search_billing_entry_is_displayed_without_reaching_codex() {
+        let document = embedded_catalog_document();
+        let search = document
+            .model("deepseek-web-search")
+            .expect("web-search billing entry");
+        assert!(search.is_billing_only());
+        assert_eq!(search.role(), Some("web_search"));
+        assert_eq!(
+            search.extra.get("billing_unit").and_then(Value::as_str),
+            Some("per_1k_requests")
+        );
+        assert_eq!(
+            search
+                .extra
+                .get("search_request_price")
+                .and_then(Value::as_f64),
+            Some(5.0)
+        );
+        assert_eq!(
+            search
+                .extra
+                .get("fetch_request_price")
+                .and_then(Value::as_f64),
+            Some(5.0)
+        );
+
+        let catalog = build_codeseex_catalog_from_document(&document);
+        assert!(
+            !catalog
+                .models
+                .iter()
+                .any(|model| model.slug == "deepseek-web-search"),
+            "a billing-only tool price must not reach Codex's model list"
+        );
+    }
+
     /// The names DeepSeek retired stay usable: the plain Flash name is an alias
     /// of the current model, the retired vision name is its own pricing-only
     /// entry, and both reach the same upstream model.
@@ -1649,6 +1700,14 @@ mod tests {
             Some("2026-09-01T00:00:00Z")
         );
         assert!(embedded_catalog_document().issued_at.is_none());
+    }
+
+    #[test]
+    fn older_numeric_catalog_revision_is_detected() {
+        assert!(revision_is_older("0.8.3.1", "0.8.0.1"));
+        assert!(!revision_is_older("0.8.3.1", "0.8.3.2"));
+        assert!(!revision_is_older("0.8.3.1", "0.8.3.1"));
+        assert!(!revision_is_older("0.8.3.1", "test-refresh"));
     }
 
     #[test]

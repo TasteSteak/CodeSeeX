@@ -2,6 +2,56 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "0.9.0",
+      "released_at": "2026-10-21",
+      "notes": {
+        "en_us": {
+          "summary": "CodeSeeX 0.9.0 aggregates all user-facing changes since 0.8.2. It moves official Web Search to DeepSeek's billed Search and Fetch APIs, adds a dedicated billing catalog entry, hardens catalog updates against stale revisions, and prepares proactive Codex input guidance. Internal 0.8.3 builds are not a separate release.",
+          "sections": [
+            {
+              "title": "Web Search",
+              "items": [
+                "The official backend now calls DeepSeek Search (/v1/tools/search) and Fetch (/v1/tools/fetch) instead of forwarding a provider-native web_search declaration.",
+                "Official search works in both native Responses and Chat compatibility, preserves provider ranking, and uses bounded result summaries as model evidence.",
+                "Search and Fetch reuse the configured upstream credential, retry transient 408/429/5xx responses once, and fail explicitly instead of falling back to local scraping.",
+                "The desktop backend selector and billing catalog now identify the official option as DeepSeek Search API. Search and Fetch are shown at CNY 5 per 1,000 successful requests, free until 2026-11-01 00:00 Asia/Shanghai."
+              ]
+            },
+            {
+              "title": "Catalog and agent behavior",
+              "items": [
+                "The catalog now carries a billing-only deepseek-web-search entry, visible in billing settings but never offered as a chat model.",
+                "Catalog revision 0.8.3.1 ignores older numeric remote manifests and startup caches so they cannot remove newer built-in prices or capabilities.",
+                "The release prompt seed adds proactive request_user_input clarification guidance, with a plain-text fallback when the client component is unavailable."
+              ]
+            }
+          ]
+        },
+        "zh_cn": {
+          "summary": "CodeSeeX 0.9.0 汇总 0.8.2 之后至 0.9.0 的用户可见变更：官方网页搜索迁移到 DeepSeek 按请求计费的 Search 与 Fetch API，新增独立计费目录，加固 catalog 防降级，并准备主动提问提示词；内部 0.8.3 构建不单独发布。",
+          "sections": [
+            {
+              "title": "网页搜索",
+              "items": [
+                "官方后端改为调用 DeepSeek Search（/v1/tools/search）与 Fetch（/v1/tools/fetch），不再向模型服务端转发 provider-native web_search 声明。",
+                "官方搜索在原生 Responses 与 Chat 兼容模式下都可用，保留服务端排序，并以有界摘要作为模型证据。",
+                "Search 与 Fetch 复用已配置的上游凭据，对 408/429/5xx 做一次有限重试，失败时明确返回错误，不静默回退到网页抓取。",
+                "桌面后端点与计费目录将官方选项标记为 DeepSeek Search API；Search 与 Fetch 各按每 1,000 次成功请求 5 元展示，北京时间 2026-11-01 00:00 前免费。"
+              ]
+            },
+            {
+              "title": "目录与 Agent 行为",
+              "items": [
+                "目录新增 deepseek-web-search billing-only 条目，只在计费设置中显示，不会作为聊天模型提供。",
+                "Catalog revision 0.8.3.1 会忽略旧的数字 revision 远端清单与启动缓存，避免覆盖新内置价格和能力。",
+                "发布提示词 seed 增加 request_user_input 主动澄清规则；客户端组件不可用时回退为纯文本提问。"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "version": "0.8.2",
       "released_at": "2026-09-15",
       "notes": {

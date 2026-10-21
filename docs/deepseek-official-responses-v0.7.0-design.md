@@ -1,5 +1,7 @@
 # CodeSeeX 0.7.0：DeepSeek 官方 Responses API 工程书
 
+> 历史说明：本文件中的 `official` Web Search 指旧的 provider-native `web_search` 所有权模式。该模式已在后续版本被 DeepSeek Search/Fetch API 取代；当前实现说明见 `docs/deepseek-search-api.md`。
+>
 > 状态：实现完成，进入发布验证。原生 production route、RAM-only client-tool coordinator、配置持久化、UI 选项与 Issue #17 修复已接入，并通过 fake upstream、Codex CLI fake-responses 和官方 Flash/Pro 小额验证。发布策略以官方全模型 Responses 为默认路径；Chat API 仅作为实验性、用户主动选择的回退。
 >
 > 范围：CodeSeeX 的官方 DeepSeek 上游路径。Codex CLI 是兼容目标；Codex App 只是同一 runtime 的 GUI，不增加 renderer/CDP/注入依赖。

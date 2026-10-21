@@ -55,9 +55,24 @@
 .billing-field input { border: none; padding: 8px 10px; width: 100%; min-width: 0; outline: none; font-size: 13px; color: var(--text-main); background: var(--bg-panel); text-align: right; font-variant-numeric: tabular-nums; transition: var(--theme-transition); }
 .billing-field input[type="number"]::-webkit-inner-spin-button, .billing-field input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .billing-field input[type="number"] { -moz-appearance: textfield; }
+.billing-field.is-readonly { grid-template-columns: minmax(112px, 1fr) auto auto; cursor: default; }
+.billing-static-value { padding: 8px 10px; color: var(--text-main); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
+.billing-request-note, .billing-request-free { margin: -2px 2px 0; color: var(--text-muted); font-size: 11.5px; line-height: 1.45; }
+.billing-request-free { color: var(--text-secondary); }
 
 @media (max-width: 860px) {
   .billing-split { grid-template-columns: 1fr; gap: 16px; }
   /* 单列堆叠时不裁剪模型列表（覆盖 JS 写入的行内 max-height） */
   .billing-model-list { max-height: none !important; }
+}
+
+@media (max-width: 520px) {
+  .billing-field.is-readonly { grid-template-columns: minmax(96px, 1fr) auto; }
+  .billing-field.is-readonly .billing-suffix {
+    grid-column: 1 / -1;
+    border-left: none;
+    border-top: 1px solid var(--border-color);
+    text-align: right;
+    white-space: normal;
+  }
 }

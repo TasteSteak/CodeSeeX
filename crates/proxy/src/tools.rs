@@ -32,6 +32,12 @@ pub(crate) use response_items::{
     is_codeseex_presented_web_search_item, native_web_search_call_item,
 };
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct WebAuthContext<'a> {
+    pub(crate) inbound: Option<&'a str>,
+    pub(crate) local_access_token: Option<&'a str>,
+}
+
 const MAX_DEPTH: usize = 4;
 const DEFAULT_DIRECTORY_PAGE_SIZE: usize = 60;
 const MAX_DIRECTORY_PAGE_SIZE: usize = 100;
@@ -80,6 +86,7 @@ pub async fn execute_tool_with_client(
     context: &ToolExecutionContext,
     messages: &[Value],
     current_image_refs: &[String],
+    auth: WebAuthContext<'_>,
     name: &str,
     arguments: &str,
 ) -> Value {
@@ -88,7 +95,15 @@ pub async fn execute_tool_with_client(
             Ok(value) => value,
             Err(error) => return error,
         };
-        return web::execute(config.network_proxy, &args, messages).await;
+        return web::execute(
+            config.network_proxy,
+            config.web_search_backend,
+            config,
+            auth,
+            &args,
+            messages,
+        )
+        .await;
     }
     if name == vision::ANALYZE_TOOL_NAME {
         let args = match parse_arguments(arguments) {

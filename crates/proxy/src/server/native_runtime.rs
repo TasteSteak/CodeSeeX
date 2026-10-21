@@ -4,7 +4,7 @@
 //! rebuilds Codex history nor reads a Codex transcript: the client's `input`
 //! remains authoritative. The native transport is the default for every
 //! upstream; Chat API compatibility is selected only when the user enables it.
-//! CodeSeeX-hosted tools (local web search) are executed inside this transport
+//! CodeSeeX-hosted tools are executed inside this transport
 //! by the hosted tool loop; the native route never borrows the Chat
 //! compatibility executor, so tool ownership never changes silently.
 
@@ -53,77 +53,11 @@ pub(super) async fn dispatch_if_selected(
     requested_model: Option<&str>,
 ) -> Option<axum::response::Response> {
     match crate::upstream::select_transport(&config.upstream) {
-        SelectedUpstreamTransport::ChatCompat => {
-            reject_official_web_search_on_chat_compat(state, input, config, model, requested_model)
-                .await
-        }
+        SelectedUpstreamTransport::ChatCompat => None,
         SelectedUpstreamTransport::NativeResponses => {
             try_native_responses(state, headers, input, config, model, requested_model).await
         }
     }
-}
-
-/// `official` is an ownership choice, not a request to use whichever search
-/// happens to be reachable. Chat compatibility has only the CodeSeeX-hosted
-/// web-search executor, so accepting an official-search request here would
-/// silently run the wrong backend. Keep local search available, but fail this
-/// explicit incompatible combination before the Chat lifecycle starts.
-async fn reject_official_web_search_on_chat_compat(
-    state: &ProxyState,
-    input: &Value,
-    config: &AppConfig,
-    model: &str,
-    requested_model: Option<&str>,
-) -> Option<axum::response::Response> {
-    if config.web_search_backend != WebSearchBackend::Official
-        || !request_advertises_web_search(input)
-    {
-        return None;
-    }
-
-    let id = response_id_from_input(input);
-    let detail = json!({
-        "id": id,
-        "transport": "chat_compat",
-        "issue": "official_web_search_requires_verified_native_responses",
-        "requested_model": requested_model,
-        "model": model,
-        "selected_web_search_backend": web_search_backend_label(config.web_search_backend),
-        "fallback": "none"
-    });
-    let _ = state
-        .store
-        .record_event(
-            "warn",
-            "native_responses_compatibility_diagnostic",
-            "Official web search requires the verified native Responses transport.",
-            Some(&detail),
-        )
-        .await;
-    Some(json_error(
-        StatusCode::BAD_REQUEST,
-        "official_web_search_incompatible",
-            "DeepSeek official web search requires the native Responses transport. Select the local web-search backend to use Chat API compatibility.".to_owned(),
-    ))
-}
-
-fn request_advertises_web_search(input: &Value) -> bool {
-    input
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                matches!(
-                    tool.get("type").and_then(Value::as_str),
-                    Some("web_search" | "web_search_2025_08_26")
-                ) || matches!(
-                    tool.pointer("/function/name")
-                        .or_else(|| tool.get("name"))
-                        .and_then(Value::as_str),
-                    Some("web_search" | "web_search_preview")
-                )
-            })
-        })
 }
 
 async fn try_native_responses(
@@ -153,32 +87,9 @@ async fn try_native_responses(
         &crate::tools::native_hostable_hosted_tool_definitions(&enabled_tools),
     );
 
-    // CodeSeeX-hosted tools (for example local web search) are executed inside
-    // the native transport itself. The native route never hands a request to
-    // the Chat compatibility path, so the two APIs stay independent and tool
-    // ownership never changes silently. A request that mixes provider-owned
-    // official search with a CodeSeeX local search function has no single owner
-    // and stays fail-closed; a hosted tool that is not search (image
-    // generation) coexists with official search because the two never claim the
-    // same capability.
+    // Both web-search backends are executed inside the native transport. The
+    // selected backend chooses the implementation, never tool ownership.
     if plan.requires_local_execution {
-        if config.web_search_backend == WebSearchBackend::Official
-            && plan.uses_official_web_search
-            && plan.requires_local_web_search
-        {
-            return Some(
-                native_incompatible(
-                    state,
-                    config,
-                    &id,
-                    requested_model,
-                    model,
-                    "mixed_official_web_search_and_hosted_tool",
-                    "This request combines provider-owned official web search with a CodeSeeX-hosted tool. CodeSeeX did not silently replace either backend. Select Chat API compatibility for this request.",
-                )
-                .await,
-            );
-        }
         return Some(
             native_hosted_tool_loop(NativeHostedToolLoopParams {
                 state,
@@ -412,16 +323,12 @@ async fn try_native_responses(
 
 /// One CodeSeeX-hosted call the native transport can execute itself.
 ///
-/// Local web search follows the selected backend, and every other hostable tool
-/// must be enabled in the user's tool selection: a disabled tool stays the
-/// client's own declaration and is never executed here.
-fn native_hosted_call_is_local(
-    call: &NativeToolCall,
-    config: &AppConfig,
-    enabled_tools: &[String],
-) -> bool {
+/// Web search always belongs to CodeSeeX. Every other hostable tool must be
+/// enabled in the user's tool selection: a disabled tool stays the client's own
+/// declaration and is never executed here.
+fn native_hosted_call_is_local(call: &NativeToolCall, enabled_tools: &[String]) -> bool {
     if crate::tools::ownership::is_web_search_tool(&call.name) {
-        return config.web_search_backend != WebSearchBackend::Official;
+        return true;
     }
     crate::tools::is_native_hostable_hosted_tool(&call.name)
         && crate::tools::is_executable_tool_enabled(&call.name, enabled_tools)
@@ -473,7 +380,7 @@ struct NativeHostedToolLoopParams<'a> {
     plan: &'a NativeToolPlan,
 }
 
-/// Executes CodeSeeX-hosted tools (local web search) inside the native
+/// Executes CodeSeeX-hosted tools inside the native
 /// Responses transport. The native route owns its own tool loop and never
 /// defers to the Chat compatibility path, so the two APIs stay independent and
 /// a request can never change tool ownership silently. Every provider tool
@@ -855,7 +762,7 @@ async fn native_hosted_tool_loop(
             .await;
         };
 
-        // Codex always declares its local web search tool, so a request that
+        // Codex always declares its web-search tool, so a request that
         // selected the CodeSeeX-hosted backend enters this loop even when the
         // provider only asks for Codex-owned tools. A group without a single
         // CodeSeeX hosted call belongs to the client: the provider turn is
@@ -865,7 +772,7 @@ async fn native_hosted_tool_loop(
         let hosted_calls = group
             .calls
             .iter()
-            .filter(|call| native_hosted_call_is_local(call, config, &enabled_tools))
+            .filter(|call| native_hosted_call_is_local(call, &enabled_tools))
             .count();
         if hosted_calls == 0 {
             return native_hosted_client_tool_group(NativeHostedClientToolGroupParams {
@@ -897,7 +804,7 @@ async fn native_hosted_tool_loop(
             for call in group
                 .calls
                 .iter()
-                .filter(|call| native_hosted_call_is_local(call, config, &enabled_tools))
+                .filter(|call| native_hosted_call_is_local(call, &enabled_tools))
             {
                 let replay = execute_native_hosted_call(
                     state,
@@ -908,6 +815,8 @@ async fn native_hosted_tool_loop(
                     &id,
                     iteration,
                     call,
+                    auth.as_deref(),
+                    Some(&state.v1_access_token),
                     &mut search_calls,
                     &mut executed_searches,
                 )
@@ -990,6 +899,8 @@ async fn native_hosted_tool_loop(
                 &id,
                 iteration,
                 call,
+                auth.as_deref(),
+                Some(&state.v1_access_token),
                 &mut search_calls,
                 &mut executed_searches,
             )
@@ -1041,6 +952,8 @@ async fn execute_native_hosted_call(
     id: &str,
     iteration: u32,
     call: &NativeToolCall,
+    inbound_auth: Option<&str>,
+    local_access_token: Option<&str>,
     search_calls: &mut u32,
     executed_searches: &mut Vec<super::native_search_presentation::ExecutedSearch>,
 ) -> String {
@@ -1099,6 +1012,10 @@ async fn execute_native_hosted_call(
         tool_context,
         tool_messages.as_slice(),
         &[],
+        crate::tools::WebAuthContext {
+            inbound: inbound_auth,
+            local_access_token,
+        },
         &call.name,
         &call.input,
     )
@@ -1500,42 +1417,6 @@ async fn record_tool_schema_repair(state: &ProxyState, id: &str, repaired: &[Str
             })),
         )
         .await;
-}
-
-async fn native_incompatible(
-    state: &ProxyState,
-    config: &AppConfig,
-    id: &str,
-    requested_model: Option<&str>,
-    model: &str,
-    issue: &str,
-    message: impl Into<String>,
-) -> axum::response::Response {
-    let message = message.into();
-    let detail = json!({
-        "id": id,
-        "transport": "native_responses",
-        "issue": issue,
-        "requested_model": requested_model,
-        "model": model,
-        "selected_web_search_backend": web_search_backend_label(config.web_search_backend),
-        "selection": "explicit_or_failed_closed",
-        "fallback": "none"
-    });
-    let _ = state
-        .store
-        .record_event(
-            "warn",
-            "native_responses_compatibility_diagnostic",
-            "Native Responses request is incompatible with the selected transport.",
-            Some(&detail),
-        )
-        .await;
-    json_error(
-        StatusCode::BAD_REQUEST,
-        "native_responses_incompatible",
-        message,
-    )
 }
 
 fn native_payload(input: &Value, model: &str, tools: &[Value]) -> Result<Value, String> {
@@ -3124,7 +3005,10 @@ mod tests {
         assert!(captured[0].get("id").is_none());
         assert!(captured[0].get("previous_response_id").is_none());
         assert_eq!(captured[0]["input"], input["input"]);
-        assert_eq!(captured[0]["tools"], json!([{ "type": "web_search" }]));
+        let tools = captured[0]["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "web_search");
         drop(captured);
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -3544,8 +3428,7 @@ mod tests {
         let data_dir = temp_data_dir("hosted-image-gen");
         std::fs::create_dir_all(&data_dir).expect("create data dir");
         let mut config = config_for_fake(data_dir.clone(), address);
-        // Official search keeps the local web-search executor out of the loop;
-        // image generation still has to run natively.
+        // Official search and image generation both run in the hosted loop.
         config.web_search_backend = WebSearchBackend::Official;
         let mut settings = BTreeMap::new();
         settings.insert(
@@ -4211,7 +4094,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn official_search_with_workspace_tools_stays_on_native() {
+    async fn official_search_with_workspace_tools_uses_the_hosted_loop() {
         let data_dir = temp_data_dir("official-search-mixed-tools");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
@@ -4239,7 +4122,7 @@ mod tests {
             Some("deepseek-v4-flash"),
         )
         .await
-        .expect("provider search with workspace tools must stay on native");
+        .expect("official search with workspace tools must stay on native");
         assert_ne!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             state
@@ -4247,13 +4130,13 @@ mod tests {
                 .response_status("resp_native_official_search_mixed")
                 .await
                 .unwrap(),
-            Some(codeseex_store::RequestStatus::Failed)
+            Some(codeseex_store::RequestStatus::Completed)
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
-    async fn official_search_is_rejected_before_chat_compat_can_run_local_search() {
+    async fn official_search_falls_through_to_chat_compat() {
         let data_dir = temp_data_dir("official-search-chat-compat");
         let mut config = AppConfig {
             data_dir: data_dir.clone(),
@@ -4277,23 +4160,14 @@ mod tests {
             "deepseek-v4-pro",
             Some("deepseek-v4-pro"),
         )
-        .await
-        .expect("official search must not fall through to chat compatibility");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
-            "official_web_search_incompatible"
-        );
+        .await;
+        assert!(response.is_none());
         assert_eq!(
             store
                 .response_status("resp_official_search_chat_compat")
                 .await
                 .unwrap(),
-            None,
-            "the Chat lifecycle never started"
+            None
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }

@@ -194,6 +194,7 @@ async fn vision_analyze_missing_config_returns_unavailable() {
         &ToolExecutionContext::default(),
         &[],
         &[],
+        WebAuthContext::default(),
         "vision_analyze",
         r#"{"image_url":"https://example.com/image.png"}"#,
     )
@@ -243,6 +244,7 @@ async fn vision_generate_missing_config_returns_unavailable() {
         &ToolExecutionContext::default(),
         &[],
         &[],
+        WebAuthContext::default(),
         "vision_generate",
         r#"{"prompt":"A small product photo"}"#,
     )
@@ -310,6 +312,7 @@ async fn vision_generation_does_not_use_analyze_api_key_as_its_credential() {
         &ToolExecutionContext::default(),
         &[],
         &[],
+        WebAuthContext::default(),
         "image_gen",
         r#"{"prompt":"A small product photo"}"#,
     )
@@ -341,6 +344,7 @@ async fn image_gen_missing_config_reports_native_tool_name() {
         &ToolExecutionContext::default(),
         &[],
         &[],
+        WebAuthContext::default(),
         "image_gen",
         r#"{"prompt":"A small product photo"}"#,
     )

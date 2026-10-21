@@ -4,6 +4,7 @@
 //! with a single result contract handed to the model and to the client. Nothing
 //! in here depends on the caller's transport, and no request carries a locale.
 
+mod deepseek;
 mod extract;
 mod fetch;
 mod ids;
@@ -17,10 +18,12 @@ mod sanitize;
 mod sources;
 mod text;
 
+use codeseex_core::config::{AppConfig, WebSearchBackend};
 use codeseex_core::NetworkProxyMode;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use crate::tools::WebAuthContext;
 pub(crate) use request::client_action_from_arguments;
 
 /// Character-bounded truncation, shared with the model-facing compaction so the
@@ -60,15 +63,22 @@ pub(crate) async fn warm_search_sources(proxy_mode: NetworkProxyMode) -> Value {
 
 pub(crate) async fn execute(
     proxy_mode: NetworkProxyMode,
+    backend: WebSearchBackend,
+    config: &AppConfig,
+    auth: WebAuthContext<'_>,
     arguments: &Value,
     messages: &[Value],
 ) -> Value {
     let request = request::WebRequest::parse(arguments);
-    let mode = request.mode.as_str();
-    match tokio::time::timeout(
-        Duration::from_secs(SEARCH_TOTAL_TIMEOUT_SECS),
-        outcome::run(proxy_mode, request, messages),
-    )
+    let mode = request.mode.as_str().to_owned();
+    match tokio::time::timeout(Duration::from_secs(SEARCH_TOTAL_TIMEOUT_SECS), async {
+        match backend {
+            WebSearchBackend::Official => outcome::payload_guard(
+                deepseek::execute(proxy_mode, config, auth, arguments, messages).await,
+            ),
+            WebSearchBackend::Local => outcome::run(proxy_mode, request, messages).await,
+        }
+    })
     .await
     {
         Ok(result) => result,

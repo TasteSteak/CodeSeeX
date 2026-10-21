@@ -14,14 +14,9 @@ pub(crate) fn is_code_tool_executable(
     name: &str,
     enabled_tools: &[String],
     community_tools: &crate::community_tools::CommunityToolSet,
-    local_web_search_enabled: bool,
 ) -> bool {
-    // Tool definitions are only the first ownership boundary. An upstream may
-    // still emit an undeclared tool call, so do not let the system-hosted
-    // allowlist re-enable local search after the user selected the official
-    // provider-owned backend.
-    if crate::tools::ownership::is_web_search_tool(name) && !local_web_search_enabled {
-        return false;
+    if crate::tools::ownership::is_web_search_tool(name) {
+        return true;
     }
     crate::tools::is_executable_tool_enabled(name, enabled_tools)
         || community_tools.is_executable_tool(name)
@@ -34,6 +29,7 @@ pub(crate) async fn execute_code_tool(
     messages: &[Value],
     current_image_refs: &[String],
     community_tools: &crate::community_tools::CommunityToolSet,
+    auth: crate::tools::WebAuthContext<'_>,
     call: &ChatToolCall,
 ) -> Value {
     if let Some(result) = community_tools.execute(&call.name, &call.arguments).await {
@@ -45,6 +41,7 @@ pub(crate) async fn execute_code_tool(
         tool_context,
         messages,
         current_image_refs,
+        auth,
         &call.name,
         &call.arguments,
     )
@@ -58,6 +55,7 @@ pub(crate) async fn execute_code_tools_concurrently(
     messages: &[Value],
     current_image_refs: &[String],
     community_tools: &crate::community_tools::CommunityToolSet,
+    auth: crate::tools::WebAuthContext<'_>,
     calls: &[ChatToolCall],
 ) -> Vec<ExecutedCodeTool> {
     futures_util::future::join_all(calls.iter().cloned().map(|call| async move {
@@ -68,6 +66,7 @@ pub(crate) async fn execute_code_tools_concurrently(
             messages,
             current_image_refs,
             community_tools,
+            auth,
             &call,
         )
         .await;
@@ -525,26 +524,18 @@ mod tests {
     }
 
     #[test]
-    fn official_backend_refuses_unsolicited_local_web_search_at_execution_boundary() {
+    fn codeseex_web_search_is_executable_for_every_backend() {
         let community = crate::community_tools::CommunityToolSet::default();
-        assert!(!is_code_tool_executable(
-            "web_search",
-            &[],
-            &community,
-            false
-        ));
-        assert!(!is_code_tool_executable(
+        assert!(is_code_tool_executable("web_search", &[], &community));
+        assert!(is_code_tool_executable(
             "web_search_preview",
             &[],
-            &community,
-            false
+            &community
         ));
-        assert!(is_code_tool_executable("web_search", &[], &community, true));
         assert!(is_code_tool_executable(
             "workspace_search",
             &["workspace_search".to_owned()],
-            &community,
-            false
+            &community
         ));
     }
 

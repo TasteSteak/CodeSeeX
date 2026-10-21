@@ -8,8 +8,8 @@
 use crate::app_state::ProxyState;
 use crate::runtime_config::{RuntimeConfigChange, RuntimeConfigService};
 use codeseex_core::catalog::{
-    build_codeseex_catalog_from_document, write_cached_catalog_document, write_catalog_atomic,
-    CatalogDocument,
+    build_codeseex_catalog_from_document, revision_is_older, write_cached_catalog_document,
+    write_catalog_atomic, CatalogDocument,
 };
 use codeseex_core::config::{AppConfig, UpstreamConfig};
 use codeseex_core::urls::models_url;
@@ -148,6 +148,7 @@ impl CatalogService {
                     // pricing-only entry, but it is never a model to select or
                     // pin, and Codex never sees it.
                     "kind": model.kind().label(),
+                    "role": model.role(),
                     "display_name": model.display_name,
                     "short_display_name": model.extra.get("short_display_name").cloned().unwrap_or(Value::Null),
                     "description": model.description,
@@ -157,6 +158,10 @@ impl CatalogService {
                     "alias_patterns": model.alias_patterns().collect::<Vec<_>>(),
                     "upstream_slug": model.upstream_slug_or_slug(),
                     "pricing_group": model.pricing_group(),
+                    "billing_unit": model.extra.get("billing_unit").cloned().unwrap_or(Value::Null),
+                    "search_request_price": model.extra.get("search_request_price").cloned().unwrap_or(Value::Null),
+                    "fetch_request_price": model.extra.get("fetch_request_price").cloned().unwrap_or(Value::Null),
+                    "free_until": model.extra.get("free_until").cloned().unwrap_or(Value::Null),
                     "is_default": model.slug == document.default_slug(),
                     "pricing": rate.as_ref().map(|rate| json!({
                         "cached_input": rate.rates.cached_input,
@@ -279,9 +284,17 @@ impl CatalogService {
                 return self.record_refresh_failure("catalog_remote_invalid", &error, &config)
             }
         };
-        if document.revision == config.catalog_document().revision
-            && config.catalog_source_label() == "remote"
-        {
+        let current = config.catalog_document();
+        if revision_is_older(&current.revision, &document.revision) {
+            return json!({
+                "ok": true,
+                "revision": current.revision,
+                "source": config.catalog_source_label(),
+                "unchanged": true,
+                "ignored_remote_revision": document.revision
+            });
+        }
+        if document.revision == current.revision && config.catalog_source_label() == "remote" {
             // Remember the validator even when the payload did not change,
             // otherwise every later refresh re-downloads the whole manifest.
             if let Ok(mut state) = self.inner.lock() {
@@ -772,5 +785,31 @@ mod tests {
         let key = probe_cache_key(&upstream);
         upstream.base_url = "https://relay.example.com/v1".to_owned();
         assert_ne!(key, probe_cache_key(&upstream));
+    }
+
+    #[test]
+    fn document_payload_exposes_web_search_request_prices() {
+        let payload = CatalogService::default().document_payload(&AppConfig::default());
+        let search = payload["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["slug"] == "deepseek-web-search")
+            .expect("web-search billing entry");
+
+        assert_eq!(search["kind"], "billing_only");
+        assert_eq!(search["role"], "web_search");
+        assert_eq!(search["billing_unit"], "per_1k_requests");
+        assert_eq!(search["search_request_price"], 5.0);
+        assert_eq!(search["fetch_request_price"], 5.0);
+        assert_eq!(search["free_until"], "2026-11-01T00:00:00+08:00");
+    }
+
+    #[test]
+    fn older_remote_catalog_revision_is_ignored() {
+        assert!(revision_is_older("0.8.3.1", "0.8.0.1"));
+        assert!(!revision_is_older("0.8.3.1", "0.8.3.2"));
+        assert!(!revision_is_older("0.8.3.1", "0.8.3.1"));
+        assert!(!revision_is_older("0.8.3.1", "main"));
     }
 }

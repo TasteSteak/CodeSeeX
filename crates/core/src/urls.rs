@@ -43,6 +43,29 @@ pub fn responses_url(base_url: &str) -> Result<String, url::ParseError> {
     Ok(url.to_string())
 }
 
+pub fn tools_search_url(base_url: &str) -> Result<String, url::ParseError> {
+    tools_endpoint_url(base_url, "search")
+}
+
+pub fn tools_fetch_url(base_url: &str) -> Result<String, url::ParseError> {
+    tools_endpoint_url(base_url, "fetch")
+}
+
+fn tools_endpoint_url(base_url: &str, endpoint: &str) -> Result<String, url::ParseError> {
+    let normalized = normalize_base_url(base_url);
+    let mut url = Url::parse(&normalized)?;
+    let path = url.path().trim_end_matches('/');
+    let api_path = if path.to_ascii_lowercase().ends_with("/v1") {
+        path.to_owned()
+    } else {
+        format!("{path}/v1")
+    };
+    url.set_path(&format!("{api_path}/tools/{endpoint}"));
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
 pub fn balance_url(base_url: &str) -> Result<String, url::ParseError> {
     let normalized = normalize_base_url(base_url);
     let mut url = Url::parse(&normalized)?;
@@ -157,6 +180,30 @@ mod tests {
         assert_eq!(
             responses_url("http://127.0.0.1:9000/openai/v1").unwrap(),
             "http://127.0.0.1:9000/openai/v1/responses"
+        );
+    }
+
+    #[test]
+    fn official_tools_urls_use_v1_tools_paths() {
+        assert_eq!(
+            tools_search_url("https://api.deepseek.com/v1/").unwrap(),
+            "https://api.deepseek.com/v1/tools/search"
+        );
+        assert_eq!(
+            tools_fetch_url("https://api.deepseek.com/").unwrap(),
+            "https://api.deepseek.com/v1/tools/fetch"
+        );
+    }
+
+    #[test]
+    fn custom_tools_urls_preserve_the_configured_prefix() {
+        assert_eq!(
+            tools_search_url("http://127.0.0.1:9000/openai/v1").unwrap(),
+            "http://127.0.0.1:9000/openai/v1/tools/search"
+        );
+        assert_eq!(
+            tools_fetch_url("http://127.0.0.1:9000").unwrap(),
+            "http://127.0.0.1:9000/v1/tools/fetch"
         );
     }
 

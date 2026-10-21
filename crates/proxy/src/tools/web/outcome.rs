@@ -89,7 +89,7 @@ pub(super) async fn run(
 /// future producer cannot leak a resource payload unnoticed. `payload_guard`
 /// in the result means the primary filter missed something, so the flag is a
 /// defect signal worth logging rather than a normal outcome.
-fn payload_guard(outcome: Value) -> Value {
+pub(super) fn payload_guard(outcome: Value) -> Value {
     let (mut outcome, changed) = sanitize_value(outcome);
     if changed {
         if let Some(object) = outcome.as_object_mut() {
@@ -412,7 +412,7 @@ fn confidence(document: &ExtractedDocument) -> &'static str {
     }
 }
 
-fn render_blocks(blocks: &[SelectedBlock]) -> String {
+pub(super) fn render_blocks(blocks: &[SelectedBlock]) -> String {
     let mut output = String::new();
     let mut last_heading = String::new();
     for block in blocks {
@@ -434,7 +434,7 @@ fn render_blocks(blocks: &[SelectedBlock]) -> String {
 
 /// The rendered excerpt is the model-facing budget, markers included, so the
 /// selection is never partly discarded by a later cap.
-fn bound_excerpt(rendered: &str) -> String {
+pub(super) fn bound_excerpt(rendered: &str) -> String {
     if crate::tools::web::text_char_count(rendered) <= EVIDENCE_BUDGET_CHARS {
         return rendered.to_owned();
     }

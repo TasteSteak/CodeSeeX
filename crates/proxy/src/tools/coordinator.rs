@@ -171,13 +171,7 @@ pub(crate) async fn complete_chat_with_tools(
         }
         let proxy_executed_calls = proxy_executed_calls_in_order(&tool_calls, &partition);
         if let Some(disabled) = proxy_executed_calls.iter().find(|call| {
-            !is_code_tool_executable(
-                &call.name,
-                context.enabled_tools,
-                context.community_tools,
-                context.config.web_search_backend
-                    != codeseex_core::config::WebSearchBackend::Official,
-            )
+            !is_code_tool_executable(&call.name, context.enabled_tools, context.community_tools)
         }) {
             return Err(ToolLoopError::new(
                 format!(
@@ -321,6 +315,10 @@ pub(crate) async fn complete_chat_with_tools(
             &message_snapshot,
             context.current_image_refs,
             context.community_tools,
+            crate::tools::WebAuthContext {
+                inbound: context.auth,
+                local_access_token: context.local_access_token,
+            },
             &proxy_executed_calls,
         )
         .await;

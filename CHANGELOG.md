@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.0 - 2026-10-21
+
+This release aggregates the user-visible changes since 0.8.2. Internal 0.8.3
+builds are not a separate release.
+
+### Web search
+
+- The `official` backend now uses DeepSeek's Search and Fetch APIs instead of forwarding a provider-native `web_search` declaration. Search calls `/v1/tools/search`; opening a result calls `/v1/tools/fetch`.
+- Official search remains a CodeSeeX-hosted tool, so it works with both Native Responses and Chat compatibility. The old native-only compatibility rejection and the separate provider-owned search path were removed.
+- Official search uses the existing upstream credential resolution, preserves provider ranking, returns bounded summaries as model evidence, retries transient 408/429/5xx failures once, and fails explicitly instead of falling back to local scraping.
+- The desktop backend hint and billing catalog now identify the official option as the DeepSeek Search API. Search and Fetch are shown at CNY 5 per 1,000 successful requests, free until 2026-11-01 00:00 Asia/Shanghai.
+
+### Catalog and agent behavior
+
+- The catalog now carries a billing-only `deepseek-web-search` entry. It appears in billing settings without being offered as a chat model or entering the Codex model list.
+- Catalog revision `0.8.3.1` adds a downgrade guard: an older numeric remote manifest or startup cache can no longer replace a newer built-in catalog.
+- The release build includes the reviewed prompt seed for proactive `request_user_input` clarification while retaining a plain-text fallback when the client component is unavailable.
+
 ## 0.8.2 - 2026-09-15
 
 This release improves both availability and stability of the native Responses transport: an enabled image generation tool now really runs inside it, and the provider boundary adapts to the official DeepSeek contract for thinking-mode replay, tool-output ordering, and inline image volume, three shapes that could make the provider reject a whole turn. The client contract and display stay unchanged.

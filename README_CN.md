@@ -1,7 +1,7 @@
 <h1 align="center">CodeSeeX</h1>
 
 <p align="center">
-  <img alt="Version 0.8.2" src="https://img.shields.io/badge/version-0.8.2-1f6feb">
+  <img alt="Version 0.9.0" src="https://img.shields.io/badge/version-0.9.0-1f6feb">
   <img alt="Platform Windows macOS Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2ea043">
   <img alt="License AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-bd561d">
 </p>
@@ -32,7 +32,7 @@ CodeSeeX 面向的是当前 AI 工具市场中的一个明确空缺：
 - 简单转接脚本擅长让某个模型临时接入另一个 endpoint。
 - CodeSeeX 面向 Codex 风格的真实 Agent 会话，重点是工具生命周期、上下文卫生、服务请求分类、用量可观测和长期稳定性。
 
-当前版本：`0.8.2`
+当前版本：`0.9.0`
 
 ```text
 Codex Desktop  ->  CodeSeeX 本地 Agent Runtime  ->  DeepSeek 兼容上游
@@ -75,8 +75,8 @@ CodeSeeX 在转发层外增加了本地 Runtime：
 - 在 Codex 中使用 DeepSeek V4 模型：`deepseek-v4-pro` 和 `deepseek-flash`。
 - 官方 DeepSeek endpoint 默认使用原生 Responses，Chat API 兼容模式仅作为实验性、用户主动选择的回退。
 - 图像理解与图像生成是两个独立可选工具；DeepSeek Vision 不会加入 Codex 主模型 catalog。
-- Web Search 可使用默认的 CodeSeeX 本地后端，也可以独立选择 DeepSeek 官方后端。
-- CodeSeeX 托管的本地工具（例如本地 Web Search）在原生 Responses 链路内执行，工具归属不会被静默改变；当一次请求同时混入上游官方的 web search 与托管工具时，CodeSeeX 会直接失败并提示改用 Chat 兼容模式，而不是替你二选一。
+- Web Search 可使用默认的 CodeSeeX 网页抓取后端，也可以独立选择 DeepSeek 官方后端。
+- [官方后端](docs/deepseek-search-api.md)由 CodeSeeX 调用 DeepSeek Search（`/v1/tools/search`）与 Fetch（`/v1/tools/fetch`）接口，在原生 Responses 与 Chat 兼容模式下都可用；Search 与 Fetch 各按每 1,000 次成功请求 5 元计费（北京时间 2026-11-01 00:00 前免费），失败时不会静默回退到网页抓取后端。
 - 模型清单、别名、能力与定价来自同一份带版本的目录文档，按「用户覆盖 → 远程清单 → 本地缓存 → 内置文档」分层解析。
 - 目录条目区分 `chat` 与 `billing_only`，并带有语义化 `role`：只计费的识图模型会照常计价，但不会作为 Codex 模型提供；任意模型卡片都可以上锁，固定为指定上游。
 - 思考链镜像支持 `none` / `smart` / `fixed` / `full`，只改变 Codex 的显示，不改变发给上游的内容。
@@ -272,7 +272,7 @@ CodeSeeX manager settings 不应被当作上游凭据存储。余额查询会读
 
 ## 隐私说明
 
-CodeSeeX 是本地 bridge，但模型请求会转发到你配置的上游服务。图像理解和图像生成会把图像数据发送到各自选择的服务。Web Search 可能请求搜索结果页或普通网页。相关服务可能有自己的服务条款、留存策略、速率限制和反滥用规则。
+CodeSeeX 是本地 bridge，但模型请求会转发到你配置的上游服务。图像理解和图像生成会把图像数据发送到各自选择的服务。本地 Web Search 会请求第三方搜索结果页或普通网页；官方 Web Search 会把查询词和目标 URL 发送给 DeepSeek Search 与 Fetch。相关服务可能有自己的服务条款、留存策略、速率限制和反滥用规则。
 
 默认日志是紧凑且脱敏的。开发诊断可能暴露更多 request shape 信息，只应在调试时开启。
 

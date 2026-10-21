@@ -4669,7 +4669,7 @@ async fn codex_service_responses_request_suppresses_previous_history_replay() {
 }
 
 #[tokio::test]
-async fn official_search_chat_compat_omits_automatic_local_web_search() {
+async fn official_search_chat_compat_injects_the_codeseex_web_search_tool() {
     let fake_state = FakeUpstreamState::default();
     let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let fake_addr = fake_listener.local_addr().unwrap();
@@ -4720,17 +4720,14 @@ async fn official_search_chat_compat_omits_automatic_local_web_search() {
     let names = upstream_function_tool_names(&requests[0]);
     assert!(names.contains(&"apply_patch"), "{names:?}");
     assert!(names.contains(&"workspace_search"), "{names:?}");
-    assert!(
-        !names.contains(&"web_search"),
-        "official mode must not silently inject local web search: {names:?}"
-    );
+    assert!(names.contains(&"web_search"), "{names:?}");
 
     drop(requests);
     let _ = std::fs::remove_dir_all(data_dir);
 }
 
 #[tokio::test]
-async fn official_search_chat_compat_rejects_unsolicited_local_web_search_call() {
+async fn official_search_chat_compat_runs_the_codeseex_web_search_executor() {
     let fake_state = FakeUpstreamState::default();
     let fake_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let fake_addr = fake_listener.local_addr().unwrap();
@@ -4772,20 +4769,36 @@ async fn official_search_chat_compat_rejects_unsolicited_local_web_search_call()
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = response.json::<Value>().await.unwrap();
-    assert_eq!(body["error"]["code"], "tool_loop_failed");
     assert!(
-        body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("web_search")),
+        serde_json::to_string(&body)
+            .unwrap_or_default()
+            .contains("web-search-result-handled"),
         "{body}"
     );
     let requests = fake_state
         .requests
         .lock()
         .expect("fake upstream lock poisoned");
-    assert_eq!(requests.len(), 1, "a local search result was not replayed");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the hosted search result was not replayed"
+    );
+    let tool_result = requests[1]
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages.iter().find(|message| {
+                message.get("role").and_then(Value::as_str) == Some("tool")
+                    && message.get("tool_call_id").and_then(Value::as_str) == Some("call_web")
+            })
+        })
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(tool_result.contains("missing_url"), "{tool_result}");
 
     drop(requests);
     let _ = std::fs::remove_dir_all(data_dir);
